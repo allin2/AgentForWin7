@@ -31,6 +31,7 @@ export enum IPCMessageType {
 }
 
 export interface IPCMessage<T = unknown> {
+  protocolVersion: '1.0.0';
   id: string;
   type: IPCMessageType;
   direction: IPCDirection;
@@ -68,12 +69,17 @@ export interface TaskCancelPayload {
 export interface TaskApprovePayload {
   taskId: string;
   approvalId: string;
+  /** Hash of the exact plan shown to the user. */
+  planHash: string;
+  /** Workspace baseline bound to the preview. */
+  workspaceBaseHash: string;
 }
 
 export interface TaskRejectPayload {
   taskId: string;
   approvalId: string;
-  reason?: string;
+  /** User-visible reason returned to Core/model as rejection evidence. */
+  reason: string;
 }
 
 export interface TerminalInputPayload {
@@ -115,6 +121,11 @@ export interface DiffPreviewPayload {
   originalContent: string;
   proposedContent: string;
   diff: string;
+  contentEncoding: 'utf-8' | 'utf-8-bom' | 'utf-16le' | 'utf-16be' | 'gbk' | 'binary';
+  eol: 'lf' | 'crlf' | 'mixed' | 'none';
+  truncated: boolean;
+  previewHash: string;
+  workspaceBaseHash: string;
 }
 
 export interface ApprovalRequestPayload {
@@ -123,12 +134,20 @@ export interface ApprovalRequestPayload {
   action: string;
   description: string;
   risk: 'low' | 'medium' | 'high';
+  /** Stable Policy rule shown to the user and recorded in the decision audit. */
+  ruleId: string;
+  targets: string[];
+  planHash: string;
+  previewHash: string;
+  workspaceBaseHash: string;
 }
 
 export interface TerminalOutputPayload {
   sessionId: string;
   data: string;
   exitCode?: number;
+  sequence: number;
+  truncated: boolean;
 }
 
 export interface ErrorOccurredPayload {
@@ -136,6 +155,8 @@ export interface ErrorOccurredPayload {
   message: string;
   detail?: string;
   recoverable: boolean;
+  recommendedAction: string;
+  retryAfterMs?: number;
 }
 
 export interface DiagnosticsResultPayload {

@@ -1,5 +1,12 @@
 # SPIKE 03 - Git Adapter 隔离验证
 
+## 状态
+
+- **任务书**：`docs/tasks/active/SPIKE_03_GIT_ADAPTER.md`
+- **状态**：APPROVED_FOR_IMPLEMENTATION
+- **Win7 实机验证**：NOT_PERFORMED
+- **成果迁入**：成果已迁入 `src/git-adapter/`（待 Win7 验证；原型代码 `isolation.ts`、`executor.ts`、`whitelist.ts` 已吸收到正式模块）
+
 > **Win7-Validation: NOT_PERFORMED**
 
 ## 目标

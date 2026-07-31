@@ -1,5 +1,12 @@
 # SPIKE 04 - 存储索引验证
 
+## 状态
+
+- **任务书**：`docs/tasks/active/SPIKE_04_STORAGE_INDEX.md`
+- **状态**：APPROVED_FOR_IMPLEMENTATION
+- **Win7 实机验证**：NOT_PERFORMED
+- **成果迁入**：成果已迁入 `src/state/`（待 Win7 验证；原型 `schema.sql`、`migrations.ts` 已吸收到正式模块）
+
 > **Win7-Validation: NOT_PERFORMED**
 
 ## 目标

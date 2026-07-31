@@ -1,5 +1,12 @@
 # SPIKE 02 - 终端容器化验证
 
+## 状态
+
+- **任务书**：`docs/tasks/active/SPIKE_02_TERMINAL_CONTAINMENT.md`
+- **状态**：APPROVED_FOR_IMPLEMENTATION
+- **Win7 实机验证**：NOT_PERFORMED
+- **成果迁入**：待验证（终端 containment 方案，阻塞 Phase 6/7 定稿；Go/No-Go 结论须来自 Win7 SP1 x64 实机执行）
+
 > **Win7-Validation: NOT_PERFORMED**
 
 ## 目标

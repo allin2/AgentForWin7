@@ -1,12 +1,29 @@
+# Build outputs
+dist/
+coverage/
+*.tsbuildinfo
+
 # Dependencies
 node_modules/
 
-# IDE / agent workspace state (not part of the delivery baseline)
-.qoder/
-
-# Python bytecode
+# Python
 __pycache__/
 *.pyc
+*.pyo
+.pytest_cache/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# IDE / agent workspace state (not part of the delivery baseline)
+.qoder/
 
 # Generated HTML exports of PRDs (source of truth is the .md)
 docs/prds/*.html

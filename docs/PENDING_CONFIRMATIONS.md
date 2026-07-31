@@ -4,10 +4,10 @@
 
 ## PC-001：包根文件与实现路径白名单冲突
 
-- 状态：已裁决（2026-07-27，ADR-0017）：`src/win7_agent/__init__.py` 已加入 PHASE_01 §0.2 白名单，仅允许包含 `__version__ = "0.1.0"`。本条关闭。
+- 状态：已裁决（2026-07-27，ADR-0017）：`src/phase1-2/win7_agent/__init__.py` 已加入 PHASE_01 §0.2 白名单，仅允许包含 `__version__ = "0.1.0"`。本条关闭。
 - 发现位置：`docs/tasks/PHASE_01_CAPABILITY_PROBE.md` §0.2 与 §4.1。
-- 事实：§4.1 要求创建 `src/win7_agent/__init__.py`，但 §0.2 的唯一源码白名单为 `src/win7_agent/probe/**`，不包含该文件。
-- 当前处理：已创建 `src/win7_agent/__init__.py`，且内容严格限定为 `__version__ = "0.1.0"`。
+- 事实：§4.1 要求创建 `src/phase1-2/win7_agent/__init__.py`，但 §0.2 的唯一源码白名单为 `src/phase1-2/win7_agent/probe/**`，不包含该文件。
+- 当前处理：已创建 `src/phase1-2/win7_agent/__init__.py`，且内容严格限定为 `__version__ = "0.1.0"`。
 - 需要裁决：无。
 
 ## PC-002：开发环境未提供 CPython 3.8.10
@@ -17,7 +17,7 @@
 - 当前处理：Phase 1/2 代码均已在 CPython 3.8.10 下通过编译与测试矩阵；代码仅采用 Python 3.8 可用的语法和标准库 API。
 - 需要裁决：无；请在 Win7 实机 E1/E2 使用 CPython 3.8.10 执行各任务书验收矩阵，并按 `docs/EVALUATION.md` §5 留存验收记录。
 
-## PC-003：Win7 对标 Codex 计划的关键架构裁决（ADR-0028~0035 提议态）
+## PC-003：Win7 对标 Codex 计划的关键架构裁决（ADR-0028~0035 已裁决）
 
 - 状态：已裁决（2026-07-29，ADR-0036）。裁决结果：ADR-0028~0035 及下列关键项**全部批准**，状态转 Accepted；授权按规划实施，前提为"Win7 支持"——即各组件仍须通过对应 Win7 SP1 x64 实机 Spike/验收方可宣称满足 Win7，Spike No-Go 时按 ADR-0028 降级阶梯以补充 ADR 修订。随裁决生效：SPIKE_01~04 任务书转 `APPROVED_FOR_IMPLEMENTATION`（脚手架可在现代构建机先行编写，`Win7-Validation` 保持 `NOT_PERFORMED` 直至实机执行）；PHASE_03~07 转 `APPROVED_FOR_IMPLEMENTATION`，授权按对应阶段推进实施。
 - 定位（重要）：ADR-0027 及既有架构文档继续作为 **Win7 平台架构与安全宪法**；ADR-0028~0035 是收窄其上的 **Electron 首选实施 Profile**。裁决使这些 ADR 转 `Accepted`，含义是**决策方向锁定、授权推进验证与实施**，**不等于"已满足 Win7 的可交付产品"**——当前仍判定为"Win7 首选实施方案，等待 Spike 验证"；四项 Win7 实机 Spike 通过前，不得将技术栈**表述为"已满足 Win7/ 已可交付"**。

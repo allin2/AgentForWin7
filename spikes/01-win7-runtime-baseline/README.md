@@ -1,5 +1,12 @@
 # SPIKE 01 - Win7 运行时基线验证
 
+## 状态
+
+- **任务书**：`docs/tasks/active/SPIKE_01_WIN7_RUNTIME_BASELINE.md`
+- **状态**：APPROVED_FOR_IMPLEMENTATION
+- **Win7 实机验证**：NOT_PERFORMED
+- **成果迁入**：待验证（为 Phase 3-7 提供 Runtime Profile 基线；Go/No-Go 结论须来自 Win7 SP1 x64 实机执行）
+
 > **Win7-Validation: NOT_PERFORMED**
 
 ## 目标

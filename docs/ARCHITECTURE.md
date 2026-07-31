@@ -104,11 +104,13 @@ Gateway 不再限定为 Python 标准库 HTTP 客户端。任务书必须选择�
 | 文档与 ADR 体系 | `[当前已授权]` | 可继续维护，但关键决策必须新增 ADR |
 | `win7_agent.probe` | `[历史冻结实现]` | Phase 1 继续使用 CPython 3.8.10 标准库；完成状态仍取决于 Win7 E1/E2 验收 |
 | 只读代码分析 Agent | `[当前已授权]` | 仅按 Phase 2 任务书、指定分支与允许路径实现；Mock/Replay、目标工作区只读、无真实模型/网络 |
-| Desktop Shell | `[候选待 Spike]` | Electron 22.3.27 等候选必须先有独立兼容性 Spike 任务书 |
-| 通用 Agent Core、Runner、Gateway | `[未来待授权]` | 本文只冻结边界，不授权代码 |
-| 写入、交互终端、后台服务、插件、多 Agent | `[未来待授权]` | 不再全局禁止，分别经过任务书、安全模型和 Win7 验收后引入 |
+| Desktop Shell | `[部分实现/待 Spike]` | IPC Schema、安全策略、Updater 基线已实现；Electron main/preload/renderer 入口仍缺失 |
+| Gateway / Workspace / State | `[理论实现/待实机]` | Phase 3–5 源码已汇入整合分支；企业网络、SQLite 原生绑定与 Win7 证据未完成 |
+| Agent Core / Runner / Git Adapter | `[契约骨架/受阻]` | Policy、Broker、状态与 Mock 已实现；真实 Runner 在 SPIKE_02 前 fail-closed |
+| 交互终端、后台服务、插件、多 Agent | `[未来待授权或待实机]` | 终端等待 SPIKE_02；插件/多 Agent 不在 v1 |
 
-ADR-0027 不修改 Phase 1/2 的 Python 3.8.10、标准库、零网络、只读、分支和路径白名单合同，也不允许把新运行时文件放入既有白名单。
+ADR-0027 不修改 Phase 1/2 的 Python 3.8.10、标准库、零网络、只读、分支和路径白名单合同。
+Phase 3–7 的授权来源为 ADR-0036、各阶段任务书与整合任务书，不来自本文架构描述。
 
 ## 4. 关键架构原则
 
@@ -178,7 +180,7 @@ sequenceDiagram
 ```text
 win7-coding-agent/
   docs/                  # 约束、ADR、任务书、协议和验收
-  legacy/                # Phase 1/2 历史冻结组件（实际路径以任务书为准）
+  phase1-2/              # Phase 1/2 历史冻结组件（实际路径以任务书为准）
   desktop/               # Desktop Shell（未来任务）
   core/                  # Agent Core、Policy、上下文与调度（未来任务）
   runner/                # Runner、终端和 Tool Adapters（未来任务）
