@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { tempRoot } from './temp-root.mjs';
 import vm from 'node:vm';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
@@ -488,7 +488,7 @@ function fixture(root, sourceRepositoryRoot = process.cwd(), candidate = 'win23'
 }
 
 test('A9 v3 builder produces byte-identical fixture candidates with the complete runtime closure', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-package-fixture-'));
+  const root = tempRoot('a9-package-fixture-');
   const sourceRepositoryRoot = cleanSourceFixture(root, '1c0464441db049d25a28425ebaf9b2db65b0ff59');
   const inputs = fixture(root, sourceRepositoryRoot, 'win22');
   const options = { repositoryRoot: sourceRepositoryRoot, ...inputs, outputRoot: path.join(root, 'out') };
@@ -609,7 +609,7 @@ test('WIN7-42 W42 kit exposes 30 cases, A9-26 additions and W42 closure', () => 
 });
 
 test('WIN7-42 fixture build emits the 30-case kit and rebased driver', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-win42-candidate-'));
+  const root = tempRoot('a9-win42-candidate-');
   try {
     const sourceRepositoryRoot = cleanSourceFixture(root);
     const inputs = fixture(root, sourceRepositoryRoot, 'win42');
@@ -675,7 +675,7 @@ test('WIN7-42 added protection predicates reject injected contradictory observat
 
 
 test('A9 v3 formal source identity must equal the current clean HEAD', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-source-identity-'));
+  const root = tempRoot('a9-source-identity-');
   const inputs = fixture(root);
   assert.throws(() => buildA9ProductCandidate({
     repositoryRoot: process.cwd(),
@@ -688,7 +688,7 @@ test('A9 v3 formal source identity must equal the current clean HEAD', () => {
 });
 
 test('WIN7-23 builder and verifier bind a clean A9-15 candidate without reusing WIN7-22 identity', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-win23-candidate-'));
+  const root = tempRoot('a9-win23-candidate-');
   const sourceRepositoryRoot = cleanSourceFixture(root);
   const inputs = fixture(root, sourceRepositoryRoot, 'win23');
   const built = buildA9ProductCandidate({
@@ -753,7 +753,7 @@ test('WIN7-23 builder and verifier bind a clean A9-15 candidate without reusing 
 });
 
 test('WIN7-24 packages the external driver runtime contract without modifying WIN7-23 identity', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-win24-candidate-'));
+  const root = tempRoot('a9-win24-candidate-');
   const sourceRepositoryRoot = cleanSourceFixture(root);
   const inputs = fixture(root, sourceRepositoryRoot, 'win24');
   const built = buildA9ProductCandidate({
@@ -816,7 +816,7 @@ test('WIN7-24 packages the external driver runtime contract without modifying WI
 });
 
 test('WIN7-25 binds the restart projection repair without modifying WIN7-24 identity', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-win25-candidate-'));
+  const root = tempRoot('a9-win25-candidate-');
   const sourceRepositoryRoot = cleanSourceFixture(root);
   const inputs = fixture(root, sourceRepositoryRoot, 'win25');
   const built = buildA9ProductCandidate({
@@ -875,7 +875,7 @@ test('WIN7-25 binds the restart projection repair without modifying WIN7-24 iden
 });
 
 test('WIN7-26 kit and report verifier require executable Inspector and latest-outcome projection evidence', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-win26-candidate-'));
+  const root = tempRoot('a9-win26-candidate-');
   const sourceRepositoryRoot = cleanSourceFixture(root);
   const inputs = fixture(root, sourceRepositoryRoot, 'win26');
   const built = buildA9ProductCandidate({
@@ -964,7 +964,7 @@ test('WIN7-26 kit and report verifier require executable Inspector and latest-ou
 });
 
 test('WIN7-27 report verifier parses machine-readable projection attachments and rejects contradictions', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-win27-candidate-'));
+  const root = tempRoot('a9-win27-candidate-');
   const sourceRepositoryRoot = cleanSourceFixture(root);
   const inputs = fixture(root, sourceRepositoryRoot, 'win27');
   const built = buildA9ProductCandidate({
@@ -1155,7 +1155,7 @@ test('WIN7-27 report verifier parses machine-readable projection attachments and
 });
 
 test('WIN7-29 A9-16 UI subset candidate binds the responsive-UI contract and enforces 15 cases', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-win29-candidate-'));
+  const root = tempRoot('a9-win29-candidate-');
   const sourceRepositoryRoot = cleanSourceFixture(root);
   const inputs = fixture(root, sourceRepositoryRoot, 'win29');
   const built = buildA9ProductCandidate({
@@ -1227,7 +1227,7 @@ test('WIN7-29 A9-16 UI subset candidate binds the responsive-UI contract and enf
 });
 
 test('WIN7-30 corrected candidate matches its input lock item by item (ADR-0126 guard)', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-win30-candidate-'));
+  const root = tempRoot('a9-win30-candidate-');
   const sourceRepositoryRoot = cleanSourceFixture(root);
   const inputs = fixture(root, sourceRepositoryRoot, 'win30');
   const built = buildA9ProductCandidate({
@@ -1304,7 +1304,7 @@ test('WIN7-30 corrected candidate matches its input lock item by item (ADR-0126 
 });
 
 test('WIN7-31 reissues W30 with candidate-scoped projection keys and bound G2 repair provenance', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-win31-candidate-'));
+  const root = tempRoot('a9-win31-candidate-');
   const sourceRepositoryRoot = cleanSourceFixture(root);
   const inputs = fixture(root, sourceRepositoryRoot, 'win31');
   const built = buildA9ProductCandidate({
@@ -1361,7 +1361,7 @@ test('WIN7-31 reissues W30 with candidate-scoped projection keys and bound G2 re
 });
 
 test('WIN7-31 build rejects a stale quoted projection case key after derived driver creation', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-win31-stale-projection-'));
+  const root = tempRoot('a9-win31-stale-projection-');
   const sourceRepositoryRoot = cleanSourceFixture(root);
   fs.appendFileSync(path.join(sourceRepositoryRoot, 'release', 'win7-product-v3', 'a9-package-integrity-w31.cjs'),
     "\nconst staleProjectionCaseForTest = 'W28-09-LATEST-OUTCOME-PROJECTION';\n", 'utf8');
@@ -1376,7 +1376,7 @@ test('WIN7-31 build rejects a stale quoted projection case key after derived dri
 });
 
 test('WIN7-32 reissues W31 with real-125%-DPI capacity repair provenance and candidate-scoped keys', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-win32-candidate-'));
+  const root = tempRoot('a9-win32-candidate-');
   const sourceRepositoryRoot = cleanSourceFixture(root);
   const inputs = fixture(root, sourceRepositoryRoot, 'win32');
   const built = buildA9ProductCandidate({
@@ -1442,7 +1442,7 @@ test('WIN7-32 reissues W31 with real-125%-DPI capacity repair provenance and can
 });
 
 test('WIN7-32 build rejects a stale quoted projection case key after derived driver creation', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-win32-stale-projection-'));
+  const root = tempRoot('a9-win32-stale-projection-');
   const sourceRepositoryRoot = cleanSourceFixture(root);
   fs.appendFileSync(path.join(sourceRepositoryRoot, 'release', 'win7-product-v3', 'a9-package-integrity-w32.cjs'),
     "\nconst staleProjectionCaseForTest = 'W31-09-LATEST-OUTCOME-PROJECTION';\n", 'utf8');
@@ -1457,7 +1457,7 @@ test('WIN7-32 build rejects a stale quoted projection case key after derived dri
 });
 
 test('WIN7-33 reissues W32 with Win7 software-rendering startup repair and candidate-scoped keys', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-win33-candidate-'));
+  const root = tempRoot('a9-win33-candidate-');
   const sourceRepositoryRoot = cleanSourceFixture(root);
   const inputs = fixture(root, sourceRepositoryRoot, 'win33');
   const built = buildA9ProductCandidate({
@@ -1504,7 +1504,7 @@ test('WIN7-33 reissues W32 with Win7 software-rendering startup repair and candi
 });
 
 test('WIN7-34 reissues W33 with an app-readiness rendering-policy guard and candidate-scoped keys', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-win34-candidate-'));
+  const root = tempRoot('a9-win34-candidate-');
   const sourceRepositoryRoot = cleanSourceFixture(root);
   const inputs = fixture(root, sourceRepositoryRoot, 'win34');
   const built = buildA9ProductCandidate({
@@ -1574,7 +1574,7 @@ test('WIN7-34 reissues W33 with an app-readiness rendering-policy guard and cand
 });
 
 test('WIN7-35 reissues W34 with pre-ready product entry loading, exit code repair, and candidate-scoped keys', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-win35-candidate-'));
+  const root = tempRoot('a9-win35-candidate-');
   const sourceRepositoryRoot = cleanSourceFixture(root);
   const inputs = fixture(root, sourceRepositoryRoot, 'win35');
   const built = buildA9ProductCandidate({
@@ -1660,7 +1660,7 @@ test('WIN7-35 reissues W34 with pre-ready product entry loading, exit code repai
 });
 
 test('WIN7-35 build rejects a stale quoted projection case key after derived driver creation', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-win35-stale-projection-'));
+  const root = tempRoot('a9-win35-stale-projection-');
   const sourceRepositoryRoot = cleanSourceFixture(root);
   fs.appendFileSync(path.join(sourceRepositoryRoot, 'release', 'win7-product-v3', 'a9-package-integrity-w35.cjs'),
     "\nconst staleProjectionCaseForTest = 'W34-09-LATEST-OUTCOME-PROJECTION';\n", 'utf8');
@@ -1675,7 +1675,7 @@ test('WIN7-35 build rejects a stale quoted projection case key after derived dri
 });
 
 test('WIN7-36 reissues the frozen W35 capacity failure with a current-candidate closure', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-win36-candidate-'));
+  const root = tempRoot('a9-win36-candidate-');
   const sourceRepositoryRoot = cleanSourceFixture(root);
   const inputs = fixture(root, sourceRepositoryRoot, 'win36');
   const built = buildA9ProductCandidate({ repositoryRoot: sourceRepositoryRoot, ...inputs, outputRoot: path.join(root, 'out') });
@@ -1730,7 +1730,7 @@ test('WIN7-36 reissues the frozen W35 capacity failure with a current-candidate 
 });
 
 test('WIN7-36 build rejects stale W35 candidate-scoped errors after driver derivation', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-win36-stale-token-'));
+  const root = tempRoot('a9-win36-stale-token-');
   const sourceRepositoryRoot = cleanSourceFixture(root);
   fs.appendFileSync(path.join(sourceRepositoryRoot, 'release', 'win7-product-v3', 'a9-package-integrity-w36.cjs'),
     "\nconst staleCodeForTest = 'A9_W35_DRIVER_PRODUCT_ENTRY_LATE_LOAD';\n", 'utf8');
@@ -1745,7 +1745,7 @@ test('WIN7-36 build rejects stale W35 candidate-scoped errors after driver deriv
 });
 
 test('WIN7-37 carries A9-19 on the immutable WIN7-36 with a 21-case current-candidate closure', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-win37-candidate-'));
+  const root = tempRoot('a9-win37-candidate-');
   const sourceRepositoryRoot = cleanSourceFixture(root);
   const inputs = fixture(root, sourceRepositoryRoot, 'win37');
   const built = buildA9ProductCandidate({ repositoryRoot: sourceRepositoryRoot, ...inputs, outputRoot: path.join(root, 'out') });
@@ -1801,7 +1801,7 @@ test('WIN7-37 carries A9-19 on the immutable WIN7-36 with a 21-case current-cand
 });
 
 test('WIN7-37 build rejects stale W36 candidate-scoped tokens after driver derivation', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-win37-stale-token-'));
+  const root = tempRoot('a9-win37-stale-token-');
   const sourceRepositoryRoot = cleanSourceFixture(root);
   fs.appendFileSync(path.join(sourceRepositoryRoot, 'release', 'win7-product-v3', 'a9-package-integrity-w37.cjs'),
     "\nconst staleCodeForTest = 'A9_W36_KIT_CONTRACT_INVALID';\n", 'utf8');
@@ -1816,7 +1816,7 @@ test('WIN7-37 build rejects stale W36 candidate-scoped tokens after driver deriv
 });
 
 test('WIN7-38 carries A9-20 and A9-21 on the immutable WIN7-37 with a 15-case current-candidate closure', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-win38-candidate-'));
+  const root = tempRoot('a9-win38-candidate-');
   const sourceRepositoryRoot = cleanSourceFixture(root);
   const inputs = fixture(root, sourceRepositoryRoot, 'win38');
   const built = buildA9ProductCandidate({ repositoryRoot: sourceRepositoryRoot, ...inputs, outputRoot: path.join(root, 'out') });
@@ -1868,7 +1868,7 @@ test('WIN7-38 carries A9-20 and A9-21 on the immutable WIN7-37 with a 15-case cu
 });
 
 test('WIN7-38 build rejects stale W37 candidate-scoped tokens after driver derivation', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-win38-stale-token-'));
+  const root = tempRoot('a9-win38-stale-token-');
   const sourceRepositoryRoot = cleanSourceFixture(root);
   fs.appendFileSync(path.join(sourceRepositoryRoot, 'release', 'win7-product-v3', 'a9-package-integrity-w38.cjs'),
     "\nconst staleCodeForTest = 'A9_W37_KIT_CONTRACT_INVALID';\n", 'utf8');
@@ -1883,7 +1883,7 @@ test('WIN7-38 build rejects stale W37 candidate-scoped tokens after driver deriv
 });
 
 test('WIN7-34 build rejects a stale quoted projection case key after derived driver creation', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-win34-stale-projection-'));
+  const root = tempRoot('a9-win34-stale-projection-');
   const sourceRepositoryRoot = cleanSourceFixture(root);
   fs.appendFileSync(path.join(sourceRepositoryRoot, 'release', 'win7-product-v3', 'a9-package-integrity-w34.cjs'),
     "\nconst staleProjectionCaseForTest = 'W33-09-LATEST-OUTCOME-PROJECTION';\n", 'utf8');
@@ -1898,7 +1898,7 @@ test('WIN7-34 build rejects a stale quoted projection case key after derived dri
 });
 
 test('WIN7-33 build rejects a stale quoted projection case key after derived driver creation', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-win33-stale-projection-'));
+  const root = tempRoot('a9-win33-stale-projection-');
   const sourceRepositoryRoot = cleanSourceFixture(root);
   fs.appendFileSync(path.join(sourceRepositoryRoot, 'release', 'win7-product-v3', 'a9-package-integrity-w33.cjs'),
     "\nconst staleProjectionCaseForTest = 'W32-09-LATEST-OUTCOME-PROJECTION';\n", 'utf8');
@@ -1913,7 +1913,7 @@ test('WIN7-33 build rejects a stale quoted projection case key after derived dri
 });
 
 test('WIN7-28 verifier binds DOM outcome/turn identity, row content and time, and real pagination', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-win28-candidate-'));
+  const root = tempRoot('a9-win28-candidate-');
   const sourceRepositoryRoot = cleanSourceFixture(root);
   const inputs = fixture(root, sourceRepositoryRoot, 'win28');
   const built = buildA9ProductCandidate({
@@ -2777,7 +2777,7 @@ test('WIN7-28 RF01-RF04 repair: retry orchestration, immediate snapshot binding,
 
 
 test('A9 v25 input recorder requires a preapproved kit ZIP and two independently identified returns', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-v25-lock-'));
+  const root = tempRoot('a9-v25-lock-');
   const { kitRoot, kitZip, approvedKitRegistry, sourceRepositoryRoot } = createV25AuthorizedKit(root);
   const runnerZip = createV25ReturnFixture(root, kitRoot, '11111111-1111-4111-8111-111111111111', '1');
   const runnerZip2 = createV25ReturnFixture(root, kitRoot, '22222222-2222-4222-8222-222222222222', '2', '2026-08-30T00:01:00.000Z');
@@ -2887,7 +2887,7 @@ test('A9 v25 input recorder requires a preapproved kit ZIP and two independently
 });
 
 test('v25 production approval registry must be tracked and byte-identical to clean HEAD', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-v25-registry-head-'));
+  const root = tempRoot('a9-v25-registry-head-');
   const relative = 'release/win7-product-v3/a9-v25-approved-kits.json';
   const registry = path.join(root, relative);
   fs.mkdirSync(path.dirname(registry), { recursive: true });
@@ -2905,7 +2905,7 @@ test('v25 production approval registry must be tracked and byte-identical to cle
   assert.throws(() => verifyCommittedApprovalRegistry(registry, root), /APPROVAL_REGISTRY_NOT_CLEAN_HEAD/);
   execFileSync('git', ['add', relative], { cwd: root });
   assert.throws(() => verifyCommittedApprovalRegistry(registry, root), /APPROVAL_REGISTRY_NOT_CLEAN_HEAD/);
-  const untrackedRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-v25-registry-untracked-'));
+  const untrackedRoot = tempRoot('a9-v25-registry-untracked-');
   const untracked = path.join(untrackedRoot, relative);
   fs.mkdirSync(path.dirname(untracked), { recursive: true });
   writeJson(untracked, { schema_version: 1, kits: [] });
@@ -2916,7 +2916,7 @@ test('v25 production approval registry must be tracked and byte-identical to cle
 });
 
 test('A9 integrity uses Electron original-fs so physical ASAR bytes are not virtualized', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-integrity-asar-'));
+  const root = tempRoot('a9-integrity-asar-');
   const resources = path.join(root, 'resources');
   fs.mkdirSync(resources, { recursive: true });
   const payload = Buffer.from('physical-default-app-asar');
@@ -2940,7 +2940,7 @@ test('A9 integrity uses Electron original-fs so physical ASAR bytes are not virt
 });
 
 test('v25 recorder requires raw evidence, actual PE/API/CRT closure and matching run/helper bindings', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-v25-evidence-'));
+  const root = tempRoot('a9-v25-evidence-');
   const kit = createV25AuthorizedKit(root);
   const second = createV25ReturnFixture(root, kit.kitRoot, '22222222-2222-4222-8222-222222222222', 'second');
   const rewriteBinding = (directory, update) => {
@@ -3020,7 +3020,7 @@ test('v25 recorder requires raw evidence, actual PE/API/CRT closure and matching
 });
 
 test('WIN7-22 acceptance requires the formal input lock and complete product closure', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-win20-candidate-'));
+  const root = tempRoot('a9-win20-candidate-');
   const sourceRepositoryRoot = cleanSourceFixture(root, '1c0464441db049d25a28425ebaf9b2db65b0ff59');
   const inputs = fixture(root, sourceRepositoryRoot, 'win22');
   const built = buildA9ProductCandidate({
@@ -3216,7 +3216,7 @@ test('WIN7-22 acceptance requires the formal input lock and complete product clo
 });
 
 test('WIN7-17 report verifier requires candidate binding, every assertion, and hashed external evidence', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-win7-report-'));
+  const root = tempRoot('a9-win7-report-');
   const evidenceRoot = path.join(root, 'evidence');
   fs.mkdirSync(evidenceRoot);
   fs.writeFileSync(path.join(evidenceRoot, 'proof.txt'), 'external proof\n', 'utf8');
@@ -3250,7 +3250,7 @@ test('WIN7-17 report verifier requires candidate binding, every assertion, and h
 });
 
 test('WIN7-22 report verifier binds inheritance and parses direct D-013 protocol evidence', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-win22-report-'));
+  const root = tempRoot('a9-win22-report-');
   const evidenceRoot = path.join(root, 'evidence');
   fs.mkdirSync(evidenceRoot);
   fs.writeFileSync(path.join(evidenceRoot, 'proof.txt'), 'external proof\n', 'utf8');
@@ -3634,7 +3634,7 @@ test('WIN7-22 report verifier binds inheritance and parses direct D-013 protocol
 });
 
 test('A9 v3 builder fails before publishing when an input hash differs', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-package-input-'));
+  const root = tempRoot('a9-package-input-');
   const inputs = fixture(root);
   fs.appendFileSync(inputs.storageZip, 'tamper');
   assert.throws(() => buildA9ProductCandidate({ repositoryRoot: process.cwd(), ...inputs, outputRoot: path.join(root, 'out'), allowUncommitted: true }), /A9_STORAGE_ZIP_SHA256_MISMATCH/);
@@ -3643,7 +3643,7 @@ test('A9 v3 builder fails before publishing when an input hash differs', () => {
 });
 
 test('A9 v3 builder removes a partial work tree when sensitive payload scanning fails', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-package-secret-'));
+  const root = tempRoot('a9-package-secret-');
   const inputs = fixture(root);
   const productFile = path.join(process.cwd(), 'src', 'shell', 'product', 'a9-package-runtime.js');
   const original = fs.readFileSync(productFile, 'utf8');
@@ -3672,7 +3672,7 @@ const W39_SMOKE_PATH = path.join(process.cwd(), 'release', 'win7-product-v3', 'a
 const W39_DRIVER_PATH = path.join(process.cwd(), 'src', 'shell', 'tests', 'product', 'a9-06-driver-entry.cjs');
 
 function w39TemporarySourceCopy(source) {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-w39-injected-'));
+  const root = tempRoot('a9-w39-injected-');
   const file = path.join(root, 'source.cjs');
   try {
     fs.writeFileSync(file, source, 'utf8');
@@ -3718,7 +3718,7 @@ function w39RequiredRecordProblems(smokeSource, driverSource) {
 }
 
 test('WIN7-39 carries the repaired validation kit on the immutable WIN7-38 with a 15-case current-candidate closure', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-win39-candidate-'));
+  const root = tempRoot('a9-win39-candidate-');
   const sourceRepositoryRoot = cleanSourceFixture(root);
   const inputs = fixture(root, sourceRepositoryRoot, 'win39');
   const built = buildA9ProductCandidate({ repositoryRoot: sourceRepositoryRoot, ...inputs, outputRoot: path.join(root, 'out') });
@@ -3810,7 +3810,7 @@ test('W39 driver resolves the candidate product entry exactly per the gated cont
   const resolveDriverProductEntry = vm.runInNewContext(
     `(function () { ${match[1]}\nreturn resolveDriverProductEntry; })()`, { path: pathStub });
   // 临时目录模拟 <candidateRoot>\validation 与 <runRoot>\driver-app 的候选布局。
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-w39-entry-'));
+  const root = tempRoot('a9-w39-entry-');
   const candidateRoot = path.join(root, 'candidate 39 候选');
   fs.mkdirSync(path.join(candidateRoot, 'validation'), { recursive: true });
   fs.mkdirSync(path.join(root, 'run', 'driver-app'), { recursive: true });
@@ -3837,7 +3837,7 @@ test('W39 M1/M4 seed builders use the public persistence API and recover exactly
   const { A9PersistenceManager } = require(stateDist);
   const { canonicalizeWorkspacePath } = require(coreDist);
   const openDatabase = (databasePath, options) => new Database(databasePath, options && options.readonly ? { readonly: true } : {});
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-w39-seed-'));
+  const root = tempRoot('a9-w39-seed-');
   const workspaceRoot = path.join(root, 'w39 seed workspace 中文');
   const dataRoot = path.join(root, 'w39 seed data 中文');
   fs.mkdirSync(workspaceRoot, { recursive: true });
@@ -4079,7 +4079,7 @@ test('W39 R3-6 M4 seed is visible through the real runtime and all 2500 events p
   const { canonicalizeWorkspacePath } = require(path.join(process.cwd(), 'src/core/dist/index.js'));
   const { createA9AgentRuntime } = require(path.join(process.cwd(), 'src/shell/product/a9-agent-runtime.js'));
   const openDatabase = (file, options) => new Database(file, options && options.readonly ? { readonly: true } : {});
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-w39-m4-runtime-'));
+  const root = tempRoot('a9-w39-m4-runtime-');
   const workspaceRoot = path.join(root, 'workspace 中文');
   const dataRoot = path.join(root, 'data 中文');
   fs.mkdirSync(workspaceRoot, { recursive: true });
@@ -4172,7 +4172,7 @@ test('W39 R3-8 Git resolver chooses argument, MinGit, where and records no-Git w
 });
 
 test('W39 build rejects injected stale W37 candidate-scoped tokens (handoff item 8a)', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-win39-stale-w37-'));
+  const root = tempRoot('a9-win39-stale-w37-');
   const sourceRepositoryRoot = cleanSourceFixture(root);
   fs.appendFileSync(path.join(sourceRepositoryRoot, 'release', 'win7-product-v3', 'a9-package-integrity-w39.cjs'),
     "\nconst staleW37CodeForTest = 'A9_W37_KIT_CONTRACT_INVALID';\n", 'utf8');
@@ -4187,7 +4187,7 @@ test('W39 build rejects injected stale W37 candidate-scoped tokens (handoff item
 });
 
 test('W39 build rejects injected stale W38 candidate-scoped tokens (handoff item 8b)', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-win39-stale-w38-'));
+  const root = tempRoot('a9-win39-stale-w38-');
   const sourceRepositoryRoot = cleanSourceFixture(root);
   fs.appendFileSync(path.join(sourceRepositoryRoot, 'release', 'win7-product-v3', 'a9-win7-39-smoke.cjs'),
     "\n// const staleW38ProbeForTest = 'A9_W38_LIVE_TEST_KEY_REQUIRED';\n", 'utf8');
@@ -4256,7 +4256,7 @@ test('W39 R4-1 prefixed approval card uses snapshot ID for denial events and app
 test('W39 R4-2 Git setup creates workspace before README and init; rejects rehearsal copy', () => {
   const source = fs.readFileSync(W39_SMOKE_PATH, 'utf8');
   const section = (copy) => copy.match(/\/\/ A9_W39_GIT_SETUP_BEGIN([\s\S]*?)\/\/ A9_W39_GIT_SETUP_END/)[1];
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'w39-git-setup-'));
+  const root = tempRoot('w39-git-setup-');
   try {
     const run = (copy, suffix) => {
       const gitWorkRepo = path.join(root, suffix, '中文 工作库');
@@ -4488,7 +4488,7 @@ test('W40 §4.2 stale-token guard rejects injected W39/W38/W37 active literals',
   const actualGuard = vm.runInNewContext(`${guardSource}\nassertNoStaleCandidateTokens`, {
     fs, path, A915_CANDIDATES: new Set(['WIN7-40']), STALE_TOKEN_EXEMPT_CANDIDATES: new Set(),
   });
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-w40-stale-'));
+  const root = tempRoot('a9-w40-stale-');
   try {
     const lockDir = path.join(root, 'release/win7-product-v3');
     const stage = path.join(root, 'stage');
@@ -4548,7 +4548,7 @@ test('W40 §4.2 stale-token guard rejects injected W39/W38/W37 active literals',
 });
 
 test('W40 R5 report verify takes complete disposition from Kit and rejects old kind or missing result', () => {
-  const evidenceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-w40-r5-report-'));
+  const evidenceRoot = tempRoot('a9-w40-r5-report-');
   try {
     const bytes = Buffer.from('observed-product-evidence');
     fs.writeFileSync(path.join(evidenceRoot, 'observed.json'), bytes);
@@ -4683,7 +4683,7 @@ test('W40 §4.6 selector and message contract is present in actual A9-24 workben
 });
 
 test('WIN7-40 candidate build includes 22-case kit, rebased driver and all six derived files', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-win40-candidate-'));
+  const root = tempRoot('a9-win40-candidate-');
   try {
     const sourceRepositoryRoot = cleanSourceFixture(root);
     const inputs = fixture(root, sourceRepositoryRoot, 'win40');
@@ -5512,7 +5512,7 @@ test('W40 R3-2 accepts any nonempty structured code and retains raw response; re
 
 // Fourth repair: actual smoke main with simulated child reports, never a Win7 claim.
 async function w40R4SmokeProbe(source, options = {}) {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'w40-r4-smoke-'));
+  const root = tempRoot('w40-r4-smoke-');
   const candidate = path.join(root, 'candidate'); const evidence = path.join(root, 'evidence');
   const calls = []; const fixtures = [];
   const productMain = path.join(candidate, 'resources/app/product/main.js');
@@ -5799,7 +5799,7 @@ test('W41 six derivatives differ from W40 only by identity and registered lineag
 });
 
 test('WIN7-41 fixture candidate has 22 cases, W41 driver and full validation closure', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-win41-candidate-'));
+  const root = tempRoot('a9-win41-candidate-');
   try {
     const sourceRepositoryRoot = cleanSourceFixture(root);
     const inputs = fixture(root, sourceRepositoryRoot, 'win41');
@@ -5830,7 +5830,7 @@ test('W41 guard rejects injected W40/W39/W38/W37 active tokens and the old Kit n
   const guard = vm.runInNewContext(`${guardSource}\nassertNoStaleCandidateTokens`, {
     fs, path, A915_CANDIDATES: new Set(['WIN7-41']), STALE_TOKEN_EXEMPT_CANDIDATES: new Set(),
   });
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-w41-stale-'));
+  const root = tempRoot('a9-w41-stale-');
   try {
     const stage = path.join(root, 'stage');
     const validation = path.join(stage, 'validation');
@@ -5931,7 +5931,7 @@ test('W41 replays W40 physical JSON before failure, review mode and Stop through
 test('W42 cold seed links persisted history turns without a warmup submission', () => {
   const { A9PersistenceManager } = require('../../../src/state/dist/a9-persistence.js');
   const { w42LinkColdSeedTurns } = require('../../../release/win7-product-v3/a9-win7-42-smoke.cjs');
-  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-w42-cold-seed-'));
+  const dataRoot = tempRoot('a9-w42-cold-seed-');
   const opened = A9PersistenceManager.open({ databasePath: path.join(dataRoot, 'a9-state.db'), dataRoot,
     openDatabase: (file, options) => new Database(file, options?.readonly ? { readonly: true } : {}) });
   assert.equal(opened.status, 'ready');
@@ -5996,7 +5996,7 @@ function v26DeveloperFixture(root, repositoryRoot, managed = false) {
   writeJson(inputs.lockPath,lock);return {...inputs, lock};
 }
 test('v26 developer package uses protocol 3, remains noncandidate and has reproducible closure',()=>{
-  const root=fs.mkdtempSync(path.join(os.tmpdir(),'a9-v26-developer-TEST_ONLY-'));
+  const root=tempRoot('a9-v26-developer-TEST_ONLY-');
   const repositoryRoot=cleanSourceFixture(root);const inputs=v26DeveloperFixture(root,repositoryRoot);
   const first=buildA9ProductCandidate({repositoryRoot,...inputs,outputRoot:path.join(root,'first')});
   const second=buildA9ProductCandidate({repositoryRoot,...inputs,outputRoot:path.join(root,'second')});
@@ -6012,7 +6012,7 @@ test('v26 developer package uses protocol 3, remains noncandidate and has reprod
   assert.throws(()=>buildA9ProductCandidate({repositoryRoot,...inputs,outputRoot:path.join(root,'first')}),/NEW_OUTPUT_DIRECTORY_REQUIRED/);
 });
 test('v26 producer refuses protocol/profile/gates/registry drift and uncommitted sources',()=>{
-  const root=fs.mkdtempSync(path.join(os.tmpdir(),'a9-v26-producer-negative-TEST_ONLY-'));
+  const root=tempRoot('a9-v26-producer-negative-TEST_ONLY-');
   const repositoryRoot=cleanSourceFixture(root);const inputs=v26DeveloperFixture(root,repositoryRoot);const original=inputs.lock;
   for(const mutate of [
     (v)=>{v.inputs.runner_return_zip.protocol_version=2;},
@@ -6029,7 +6029,7 @@ test('v26 producer refuses protocol/profile/gates/registry drift and uncommitted
 });
 
 test('managed developer package is distinct from streaming and cannot consume an old profile or candidate authority',()=>{
-  const root=fs.mkdtempSync(path.join(os.tmpdir(),'a9-v26-managed-TEST_ONLY-')), repositoryRoot=cleanSourceFixture(root), inputs=v26DeveloperFixture(root,repositoryRoot,true);
+  const root=tempRoot('a9-v26-managed-TEST_ONLY-'), repositoryRoot=cleanSourceFixture(root), inputs=v26DeveloperFixture(root,repositoryRoot,true);
   const built=buildA9ProductCandidate({repositoryRoot,...inputs,outputRoot:path.join(root,'managed')});
   assert.equal(built.manifest.status,'A9_31_DEVELOPER_CHECK_NOT_WIN7_CANDIDATE');assert.equal(built.manifest.external_acceptance_eligible,false);assert.equal(built.manifest.release_authority,undefined);
   assert.equal(built.manifest.required_native.runner_helper_profile,'D-013-v26-managed-a9-trusted-shell-current-user');
@@ -6045,7 +6045,7 @@ function a932DeveloperFixture(root,repositoryRoot){
   lock.lock_id='A9-32-DEVELOPER-INPUTS-D013-V26-MANAGED';lock.provenance.task='A9-32';writeJson(inputs.lockPath,lock);return {...inputs,lock};
 }
 test('A9-32 developer package is its own noncandidate profile with reproducible closure and no validation suite',()=>{
-  const root=fs.mkdtempSync(path.join(os.tmpdir(),'a9-32-developer-TEST_ONLY-')), repositoryRoot=cleanSourceFixture(root), inputs=a932DeveloperFixture(root,repositoryRoot);
+  const root=tempRoot('a9-32-developer-TEST_ONLY-'), repositoryRoot=cleanSourceFixture(root), inputs=a932DeveloperFixture(root,repositoryRoot);
   const first=buildA9ProductCandidate({repositoryRoot,...inputs,outputRoot:path.join(root,'first')});
   const second=buildA9ProductCandidate({repositoryRoot,...inputs,outputRoot:path.join(root,'second')});
   assert.deepEqual(fs.readFileSync(first.zipPath),fs.readFileSync(second.zipPath));
@@ -6060,7 +6060,7 @@ test('A9-32 developer package is its own noncandidate profile with reproducible 
   assert.throws(()=>buildA9ProductCandidate({repositoryRoot,...inputs,outputRoot:path.join(root,'first')}),/NEW_OUTPUT_DIRECTORY_REQUIRED/);
 });
 test('A9-32 developer lock cannot be marked non-developer, take another task or drop the managed contract',()=>{
-  const root=fs.mkdtempSync(path.join(os.tmpdir(),'a9-32-negative-TEST_ONLY-')), repositoryRoot=cleanSourceFixture(root), inputs=a932DeveloperFixture(root,repositoryRoot);const original=inputs.lock;
+  const root=tempRoot('a9-32-negative-TEST_ONLY-'), repositoryRoot=cleanSourceFixture(root), inputs=a932DeveloperFixture(root,repositoryRoot);const original=inputs.lock;
   for(const mutate of [
     v=>{v.provenance.development_only=false},
     v=>{v.provenance.task='A9-31'},
@@ -6071,7 +6071,7 @@ test('A9-32 developer lock cannot be marked non-developer, take another task or 
   ]){const lock=JSON.parse(JSON.stringify(original));mutate(lock);writeJson(inputs.lockPath,lock);assert.throws(()=>buildA9ProductCandidate({repositoryRoot,...inputs,outputRoot:path.join(root,'not-written')}),/A9_V26_/);}
 });
 test('batch-2 lock identity is refused when the lock claims a developer provenance or an older lock id',()=>{
-  const root=fs.mkdtempSync(path.join(os.tmpdir(),'a9-batch2-identity-TEST_ONLY-')), repositoryRoot=cleanSourceFixture(root), inputs=a932DeveloperFixture(root,repositoryRoot);const original=inputs.lock;
+  const root=tempRoot('a9-batch2-identity-TEST_ONLY-'), repositoryRoot=cleanSourceFixture(root), inputs=a932DeveloperFixture(root,repositoryRoot);const original=inputs.lock;
   for(const mutate of [
     v=>{v.lock_id='A9-BATCH2-INPUTS-D013-V26-MANAGED'},
     v=>{v.lock_id='A9-BATCH2-INPUTS-D013-V26-MANAGED';v.provenance={task:'A9-33',development_only:false,candidate:'WIN7-42',candidate_tentative:true}},

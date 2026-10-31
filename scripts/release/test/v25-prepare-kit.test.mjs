@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { tempRoot } from './temp-root.mjs';
 import { spawnSync, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
@@ -18,7 +18,7 @@ const digest = (bytes) => crypto.createHash('sha256').update(bytes).digest('hex'
 function fixture() {
   // Only this isolated TEST_ONLY repository is committed. The working checkout,
   // historical input locks and revoked kit are never modified by this test.
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-v25-prepare-TEST_ONLY-'));
+  const dir = tempRoot('a9-v25-prepare-TEST_ONLY-');
   const helper = path.join(dir, 'native/helper');
   const kit = path.join(helper, 'build-win10-kit-v25');
   fs.mkdirSync(helper, { recursive: true });

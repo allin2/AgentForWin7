@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { tempRoot } from './temp-root.mjs';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
@@ -15,7 +15,7 @@ const req=createRequire(import.meta.url);
 const {SOURCES,INPUTS}=req('../../../native/helper/build-win10-kit-v26/prepare-kit.cjs');
 const runIds=['318e27e4-ec82-4d65-9975-18fd28a904dc','b70f9534-6e7e-4f2f-a51d-26f035644bba'];
 function fixture(managed=false) {
-  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'A9-V26-TEST_ONLY-'));const helper=path.join(dir,'native/helper');const kit=path.join(helper,managed?'build-win10-kit-v26-managed':'build-win10-kit-v26');
+  const dir=tempRoot('A9-V26-TEST_ONLY-');const helper=path.join(dir,'native/helper');const kit=path.join(helper,managed?'build-win10-kit-v26-managed':'build-win10-kit-v26');
   fs.mkdirSync(kit,{recursive:true});for(const n of SOURCES)fs.writeFileSync(path.join(helper,n),managed?fs.readFileSync(path.join(root,'native/helper',n)):execFileSync('git',['show','c2b6356f83ef8502a34516010924547c57a3bec2:native/helper/'+n],{cwd:root}));
   for(const n of INPUTS.filter(n=>!managed||!n.startsWith('SOURCE_COMMIT')))fs.copyFileSync(path.join(root,'native/helper',managed?'build-win10-kit-v26-managed':'build-win10-kit-v26',n),path.join(kit,n));
   const git=(args)=>execFileSync('git',args,{cwd:dir,encoding:'utf8',stdio:['ignore','pipe','pipe']}).trim();
