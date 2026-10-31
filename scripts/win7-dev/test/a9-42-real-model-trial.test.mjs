@@ -5,6 +5,7 @@ import https from 'node:https';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { tempRoot } from '../../release/test/temp-root.mjs';
 import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const d = require('../a9-42-real-model-trial.cjs');
@@ -53,7 +54,7 @@ async function withRelay(handler, fn, options = {}) {
   try { await fn(relay, await relay.listen()); } finally { await relay.close(); await upstream.close(); }
 }
 test('strict config: fixed upstream, limit, secret/layout, profile/run, unknown fields and deadline', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a942r-binding-'));
+  const root = tempRoot('a942r-binding-');
   const bindingFile = path.join(root, 'execution-binding.json'); fs.writeFileSync(bindingFile, fixture.bytes());
   const c = config();
   assert.equal(d.validateConfig(c, now, false, { executionBindingPath: bindingFile }).idle_seconds, 60);
@@ -391,7 +392,7 @@ test('key-less network preflight: GET /models without Authorization, 401 only, b
 });
 test('direct profile cannot accept the old relay/key-file execution inputs', () => {
   assert.equal(d.requirePreflight, undefined); assert.equal(d.readKeyPipe, undefined);
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a942r-direct-negative-'));
+  const root = tempRoot('a942r-direct-negative-');
   const bindingFile = path.join(root, 'execution-binding.json'); fs.writeFileSync(bindingFile, fixture.bytes());
   for (const values of [{ ...config(), transport: 'relay' }, { ...config(), api_key_file: 'C:\\key.txt' }])
     assert.throws(() => d.validateConfig(values, now, false, { executionBindingPath: bindingFile }));

@@ -21,8 +21,11 @@ const now = Date.parse('2026-10-30T12:00:00.000Z');
 const temporary = [];
 function temp() {
   const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'a9-p2-controller-')));
-  temporary.push(dir); return dir; // Retained: this task does not authorize deletion.
+  temporary.push(dir); return dir; // Removed when the test process exits.
 }
+process.on('exit', () => {
+  for (const dir of temporary) { try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ } }
+});
 function fixture(evidenceClass = 'DEV_CHANNEL', id = crypto.randomUUID()) {
   const d = c.descriptor(id, evidenceClass), roots = c.roots(d);
   const budget = {
@@ -350,7 +353,6 @@ test('fixed PS reader grammar accepts emitted JSON and rejects executable/duplic
   assert.doesNotMatch(ps.split('\n').filter(line => !line.trim().startsWith('#')).join('\n'), /Invoke-Expression|ConvertFrom-Json|\[pscustomobject\]|\$PSScriptRoot/);
 });
 
-test.after(() => { process.stdout.write('# retained_test_directories=' + JSON.stringify(temporary) + '\n'); });
 
 // These are local orchestration tests with an in-memory SSH/PowerShell/SFTP executor.
 // They do not interpret PowerShell/C# or prove actual target ZIP/Scheduler/desktop behavior.

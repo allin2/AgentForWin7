@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
-import os from 'node:os';
+import { tempRoot } from '../../../test/temp-root.mjs';
 import path from 'node:path';
 import test from 'node:test';
 import { createRequire } from 'node:module';
@@ -16,7 +16,7 @@ const RUN_ID = '3f1c2a52-6b0e-4c1e-9f5e-0d7b8a1c2e44';
 const PREFIX = denySet.runPrefixHash(RUN_ID);
 const OTHER = H('another-run-prefix');
 const NOW = Date.parse('2026-10-30T12:00:00.000Z');
-const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'a9-alpha3-authority-'));
+const tmp = () => tempRoot('a9-alpha3-authority-');
 const bytes = (value) => Buffer.from(`${JSON.stringify(value, null, 2)}\n`, 'utf8');
 const write = (root, name, value) => {
   const file = path.join(root, name);

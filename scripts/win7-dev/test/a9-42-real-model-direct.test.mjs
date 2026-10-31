@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import https from 'node:https';
 import fs from 'node:fs';
-import os from 'node:os';
+import { tempRoot } from '../../release/test/temp-root.mjs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
@@ -100,7 +100,7 @@ test('actual Gateway retries are counted and cannot bypass direct cap', async ()
 });
 
 function providerFixture() {
-  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'a942-direct-seed-'));
+  const root = fs.realpathSync(tempRoot('a942-direct-seed-'));
   const source = path.join(root, 'original'); const destination = path.join(root, 'isolated');
   const config = { schemaVersion: 1, baseUrl: d.UPSTREAM, model: 'deepseek-v4-flash', keyRemembered: true, customHeaderNames: [] };
   const files = { 'Local State': { os_crypt: { encrypted_key: Buffer.from('DPAPI_TEST_ONLY').toString('base64') }, unrelated_user_data: 'DO_NOT_COPY' },

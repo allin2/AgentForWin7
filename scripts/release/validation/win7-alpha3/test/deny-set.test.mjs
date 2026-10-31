@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
-import os from 'node:os';
+import { tempRoot } from '../../../test/temp-root.mjs';
 import path from 'node:path';
 import test from 'node:test';
 import { createRequire } from 'node:module';
@@ -15,7 +15,7 @@ const H = (value) => crypto.createHash('sha256').update(value).digest('hex');
 const RUN_ID = '3f1c2a52-6b0e-4c1e-9f5e-0d7b8a1c2e44';
 const PREFIX = H(RUN_ID.toLowerCase().slice(0, 8));
 const OTHER = H('another-run-prefix');
-const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'a9-alpha3-deny-'));
+const tmp = () => tempRoot('a9-alpha3-deny-');
 
 function set(overrides = {}) {
   return {

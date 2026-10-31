@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
+import { tempRoot } from '../temp-root.mjs';
 import path from 'node:path';
 import test from 'node:test';
 import { createRequire } from 'node:module';
@@ -15,7 +15,7 @@ const fixturePins = {
   forensic: '0d78a8d4d68d67bb726914e8df87e135e557962a59b8ecb5bcc71915ae9fa152',
 };
 export function temporary(prefix) {
-  return fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'win10-TEST_ONLY-' + prefix));
+  return fs.realpathSync(tempRoot('win10-TEST_ONLY-' + prefix));
 }
 export function bindingFixture(name = 'current') {
   const bytes = fs.readFileSync(path.join(here, 'win10-TEST_ONLY', name + '.json'));
