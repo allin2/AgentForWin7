@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { createRequire } from 'node:module';
+import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
 import {
   assertHash,
@@ -25,12 +26,26 @@ import { extractZip, getZipEntry, readZipEntries, readZipEntry, writeDeterminist
 
 import { verifyV26ReturnReview } from './a9-v26-return-evidence.mjs';
 import { applyHelperRecoveryToSbom, loadRecoveredHelper, validateRunnerInputSelection, verifyHelperRecoveryManifest } from './a9-helper-recovery.mjs';
+import { candidateIdentity, createCandidateContract, renderCandidateSuiteFile } from './a9-candidate-suite.mjs';
 
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = path.resolve(scriptDirectory, '..', '..');
 const RUNTIME_MODULES = ['core', 'gateway', 'git-adapter', 'runner', 'shell', 'state', 'workspace'];
 
 const RELEASE_PROFILES = {
+  'A9-ALPHA4-INPUTS-D013-V26-MANAGED': {
+    task: 'A9-44', candidate: 'WIN7-57', candidateTentative: true, batch2: true,
+    releaseId: 'WIN7-CODING-AGENT-A9-ALPHA4', version: '0.3.0-alpha.4',
+    taskBook: 'docs/tasks/A9_44_WORKBENCH_DARK_THEME.md',
+    lockFile: 'a9-alpha4-input-lock.json', kitFile: 'A9_ALPHA4_VALIDATION_KIT.json',
+    validationDoc: 'A9_ALPHA4_WIN7_VALIDATION.md',
+    integrityCommand: 'RUN_A9_ALPHA4_INTEGRITY.cmd', smokeCommand: 'RUN_A9_ALPHA4_SMOKE.cmd',
+    reportCommand: 'RUN_A9_ALPHA4_REPORT_VERIFY.cmd',
+    integrityScript: 'a9-alpha4-package-integrity.cjs', reportScript: 'a9-alpha4-report.cjs',
+    smokeScript: 'a9-alpha4-smoke.cjs', fixturesScript: 'a9-alpha4-fixtures.cjs',
+    requestScript: 'a9-alpha4-desktop-request.cjs', controllerScript: 'a9-alpha4-desktop-controller.ps1',
+    driverFile: 'a9-alpha4-driver.cjs', evidenceDirectory: 'a9-alpha4-evidence',
+  },
   // A9-43 D1 / DESIGN §5.3：全阶段 DEV 与正式执行共用此 batch2 Profile。候选号 WIN7-56 仅为暂定，冻结前核号；核号后须同步修改本项、锁与包内套件。
   'A9-BATCH2-INPUTS-D013-V26-MANAGED': {
     task: 'A9-43', candidate: 'WIN7-56', candidateTentative: true, batch2: true,
@@ -581,7 +596,7 @@ export function buildA9ProductCandidate(options) {
     }
     const runtimeDependencies = copyRuntimeDependencies(root, appRoot);
     writeJson(path.join(appRoot, 'package.json'), {
-      name: profile.developmentOnly ? 'win7-coding-agent-a9-alpha2-developer' : profile.batch2 ? 'win7-coding-agent-a9-alpha3' : 'win7-coding-agent-a9-alpha1',
+      name: packageApplicationName(profile),
       productName: 'Win7 Coding Agent',
       version: lock.version,
       private: true,
@@ -878,12 +893,23 @@ function batch2InstallationGuide(lock, profile) {
     + '- The application does not change PATH, services, registry or firewall and does not download a runtime.\n'
     + '- Keep the old program directory during upgrade. On failure stop the new candidate and relaunch the old directory against the preserved data; retain corruption backups and evidence.\n'
     + '- API keys are entered only in Settings. Never put them in validation commands or reports.\n'
-    + `- The tentative number ${profile.candidate} is re-checked against refs, registrations and directories before freeze. This package is NOT_PERFORMED for Win10, Win7 and Alpha 3 until same-candidate external evidence is recorded.\n`;
+    + `- The tentative number ${profile.candidate} is re-checked against refs, registrations and directories before freeze. This package is NOT_PERFORMED for Win10, Win7 and Alpha ${profile.version.split('alpha.')[1]} until same-candidate external evidence is recorded.\n`;
 }
 
-function loadBatch2Fixtures(root) {
-  const requireFrom = createRequire(path.join(root, 'release', 'win7-product-v3', 'load.cjs'));
-  return requireFrom('./a9-batch2-fixtures.cjs');
+export function packageApplicationName(profile) {
+  return profile.developmentOnly ? 'win7-coding-agent-a9-alpha2-developer'
+    : profile.batch2 ? `win7-coding-agent-a9-alpha${profile.version.split('alpha.')[1]}` : 'win7-coding-agent-a9-alpha1';
+}
+
+function loadBatch2Fixtures(root, lock, profile) {
+  const filename = path.join(root, 'release', 'win7-product-v3', 'a9-batch2-fixtures.cjs');
+  const bytes = renderCandidateSuiteFile(fs.readFileSync(filename), candidateIdentity(lock.lock_id, profile), profile,
+    RELEASE_PROFILES['A9-BATCH2-INPUTS-D013-V26-MANAGED']);
+  // This pure contract module has no imports or load-time I/O. Evaluate the exact
+  // generated file used by the package, rather than rebinding an old module object.
+  const context = { module: { exports: {} }, require: { main: null }, Buffer };
+  vm.runInNewContext(bytes.toString('utf8'), context, { filename, timeout: 1000 });
+  return context.module.exports;
 }
 
 // CMD 入口 ASCII/CRLF；PowerShell 与其他套件文本为无 BOM、无 CR 的 UTF-8（PowerShell 与 CMD 另限 ASCII，避免旧版按系统代码页误读）。
@@ -898,22 +924,25 @@ function assertBatch2SuiteEncoding(name, bytes) {
   if (/\.ps1$/i.test(name) && /[^\x00-\x7f]/.test(text)) throw new Error(`A9_BATCH2_POWERSHELL_NON_ASCII:${name}`);
 }
 
-function assembleBatch2Validation(root, stage, sourceCommit, lock, profile) {
+export function assembleBatch2Validation(root, stage, sourceCommit, lock, profile) {
   const releaseDirectory = path.join(root, 'release', 'win7-product-v3');
+  const historicalProfile = RELEASE_PROFILES['A9-BATCH2-INPUTS-D013-V26-MANAGED'];
   const validationRoot = path.join(stage, 'validation');
   fs.mkdirSync(validationRoot, { recursive: true });
   const copies = [];
-  for (const name of [profile.validationDoc, profile.integrityCommand, profile.smokeCommand, profile.reportCommand]) {
-    copies.push([path.join(releaseDirectory, name), path.join(stage, name), name]);
+  for (const key of ['validationDoc', 'integrityCommand', 'smokeCommand', 'reportCommand']) {
+    const name = profile[key];
+    copies.push([path.join(releaseDirectory, historicalProfile[key]), path.join(stage, name), name]);
   }
-  for (const name of [profile.integrityScript, profile.reportScript, profile.smokeScript, profile.fixturesScript, profile.requestScript, profile.controllerScript]) {
-    copies.push([path.join(releaseDirectory, name), path.join(validationRoot, name), `validation/${name}`]);
+  for (const key of ['integrityScript', 'reportScript', 'smokeScript', 'fixturesScript', 'requestScript', 'controllerScript']) {
+    const name = profile[key];
+    copies.push([path.join(releaseDirectory, historicalProfile[key]), path.join(validationRoot, name), `validation/${name}`]);
   }
   copies.push([path.join(root, 'src', 'shell', 'tests', 'product', 'a9-batch2-driver-entry.cjs'), path.join(validationRoot, profile.driverFile), `validation/${profile.driverFile}`]);
   const suiteHashes = {};
   for (const [source, target, name] of copies) {
     if (!fs.existsSync(source)) throw new Error(`A9_BATCH2_SUITE_FILE_MISSING:${name}`);
-    const bytes = fs.readFileSync(source);
+    const bytes = renderCandidateSuiteFile(fs.readFileSync(source), candidateIdentity(lock.lock_id, profile), profile, historicalProfile);
     assertBatch2SuiteEncoding(name, bytes);
     fs.writeFileSync(target, bytes);
     suiteHashes[name] = sha256Bytes(bytes);
@@ -922,11 +951,12 @@ function assembleBatch2Validation(root, stage, sourceCommit, lock, profile) {
 }
 
 function createBatch2ValidationKit(root, sourceCommit, lock, profile, suiteHashes) {
-  const fixtures = loadBatch2Fixtures(root);
+  const fixtures = loadBatch2Fixtures(root, lock, profile);
   const contract = fixtures.selfCheck();
   if (!contract.ok) throw new Error(`A9_BATCH2_FIXTURE_CONTRACT_INVALID:${contract.problems.join(',')}`);
   if (fixtures.CONTRACT.lock_id !== lock.lock_id || fixtures.CONTRACT.candidate !== profile.candidate
-      || fixtures.CONTRACT.release_id !== lock.release_id || fixtures.CONTRACT.version !== lock.version) {
+      || fixtures.CONTRACT.release_id !== lock.release_id || fixtures.CONTRACT.version !== lock.version
+      || JSON.stringify(fixtures.CONTRACT) !== JSON.stringify(createCandidateContract(candidateIdentity(lock.lock_id, profile)))) {
     throw new Error('A9_BATCH2_FIXTURE_IDENTITY_MISMATCH');
   }
   return {
@@ -2307,12 +2337,12 @@ function buildRuntimeDistributions(root, outputRoot) {
   return distributions;
 }
 
-function copyContractEvidence(root, stage, profile) {
+export function copyContractEvidence(root, stage, profile) {
   const destination = path.join(stage, 'evidence', 'contracts');
   fs.mkdirSync(destination, { recursive: true });
   // ADR-0125/ADR-0141/ADR-0142：候选任务书映射。
-  const developerTaskBooks = { 'A9-30': 'docs/tasks/A9_30_SHELL_STREAMING.md', 'A9-31': 'docs/tasks/A9_31_BACKGROUND_PROCESS_TOOLS.md', 'A9-32': 'docs/tasks/A9_32_EXPLICIT_TASK_CONTINUE.md' };
-  const taskBook = profile.developmentOnly ? developerTaskBooks[profile.task] : profile.batch2 ? 'docs/tasks/A9_43_ALPHA3_WIN7_56_RELEASE.md' : profile.candidate === 'WIN7-38'
+  const taskBooks = { 'A9-30': 'docs/tasks/A9_30_SHELL_STREAMING.md', 'A9-31': 'docs/tasks/A9_31_BACKGROUND_PROCESS_TOOLS.md', 'A9-32': 'docs/tasks/A9_32_EXPLICIT_TASK_CONTINUE.md', 'A9-43': 'docs/tasks/A9_43_ALPHA3_WIN7_56_RELEASE.md' };
+  const taskBook = profile.taskBook || taskBooks[profile.task] || (profile.candidate === 'WIN7-38'
     ? 'docs/tasks/A9_22_WIN7_38_REISSUE_AND_ACCEPTANCE.md'
     : profile.candidate === 'WIN7-39'
     ? 'docs/tasks/A9_23_WIN7_39_REISSUE_AND_ACCEPTANCE.md'
@@ -2326,7 +2356,7 @@ function copyContractEvidence(root, stage, profile) {
     ? 'docs/tasks/A9_16_ALPHA2_REVIEW_STREAMING_RESPONSIVE_UI.md'
     : A915_CANDIDATES.has(profile.candidate)
       ? 'docs/tasks/A9_15_UI_PROGRESS_FEEDBACK.md'
-      : 'docs/tasks/A9_14_D013_CMD_VERBATIM_AND_WIN7_22.md';
+      : 'docs/tasks/A9_14_D013_CMD_VERBATIM_AND_WIN7_22.md');
   const contracts = [
     'docs/prds/WIN7_TRUSTED_CODING_AGENT_REQUIREMENTS_V1.md',
     'docs/tasks/A9_TRUSTED_AGENT_RUNTIME.md',
@@ -2394,9 +2424,9 @@ function scanSensitivePayload(stage) {
   }
 }
 
-function validateA9Lock(lock) {
+export function validateA9Lock(lock) {
   if (['A9-30-DEVELOPER-INPUTS-D013-V26','A9-31-DEVELOPER-INPUTS-D013-V26-MANAGED','A9-32-DEVELOPER-INPUTS-D013-V26-MANAGED'].includes(lock?.lock_id)) return validateV26DeveloperLock(lock);
-  if (lock?.lock_id === 'A9-BATCH2-INPUTS-D013-V26-MANAGED') return validateBatch2Lock(lock);
+  if (RELEASE_PROFILES[lock?.lock_id]?.batch2) return validateBatch2Lock(lock);
   const profile = lock && RELEASE_PROFILES[lock.lock_id];
   if (!profile || lock.schema_version !== 1
       || lock.release_id !== 'WIN7-CODING-AGENT-A9-ALPHA1' ||
@@ -2617,8 +2647,8 @@ function validateV26DeveloperLock(lock) {
 // A9-33 §6.1：正式 batch2 锁。原生字节与 A9-31 managed 开发锁相同，但身份、来源与 Win7 门独立声明，
 // 不能由开发锁改字段得到，也不能被开发 Profile 接受。
 function validateBatch2Lock(lock) {
-  const profile = RELEASE_PROFILES['A9-BATCH2-INPUTS-D013-V26-MANAGED'];
-  if (lock.lock_id !== 'A9-BATCH2-INPUTS-D013-V26-MANAGED'
+  const profile = RELEASE_PROFILES[lock.lock_id];
+  if (!profile?.batch2
     || lock.release_id !== profile.releaseId || lock.version !== profile.version
     || lock.provenance?.task !== profile.task || lock.provenance?.development_only !== false
     || lock.provenance?.candidate !== profile.candidate || lock.provenance?.candidate_tentative !== true
@@ -2654,7 +2684,7 @@ function validateV26NativeInputs(lock, managed, failure) {
   if (lock.inputs.storage_return_zip?.sqlite !== '3.43.1' || lock.inputs.storage_return_zip?.electron_abi !== 110) throw new Error('A9_STORAGE_PROFILE_INVALID');
 }
 
-function verifyV26CommittedInputs(root, lock) {
+export function verifyV26CommittedInputs(root, lock) {
   const runner = lock.inputs.runner_return_zip;
   const relative = 'release/win7-product-v3/a9-v26-approved-build-kits.json';
   const bytes = fs.readFileSync(path.join(root, relative));
