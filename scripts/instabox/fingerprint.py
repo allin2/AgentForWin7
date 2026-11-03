@@ -24,8 +24,11 @@ def input_fingerprint(root):
 
 
 def version(argv):
-    result = subprocess.run(argv, capture_output=True, text=True, check=True, timeout=15)
-    return result.stdout.strip()
+    try:
+        result = subprocess.run(argv, capture_output=True, text=True, check=True, timeout=15)
+        return result.stdout.strip()
+    except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return None
 
 
 if __name__ == "__main__":

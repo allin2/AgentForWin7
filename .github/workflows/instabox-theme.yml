@@ -1,0 +1,31 @@
+name: Dark theme on InstaBox
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  theme:
+    runs-on: instabox-medium
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Prepare and test theme
+        shell: bash
+        run: |
+          set -euo pipefail
+          head_sha="$(git rev-parse HEAD)"
+          printf '%s\n' "$head_sha"
+          test "$head_sha" = "$GITHUB_SHA"
+          bash scripts/instabox/prepare-linux.sh "$PWD"
+          source scripts/instabox/env.sh
+          test "$(node --version)" = "v20.17.0"
+          npm run test:local -- --module shell --test-file tests/product/a9-appearance-theme.test.ts
