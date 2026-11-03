@@ -130,6 +130,7 @@ npm run package:win7 -- \
 | 安全 | [docs/SECURITY.md](docs/SECURITY.md) |
 | 架构决策 | [docs/DECISIONS_INDEX.md](docs/DECISIONS_INDEX.md) |
 | 任务书索引 | [docs/tasks/README.md](docs/tasks/README.md) |
+| 参与贡献 | [.github/CONTRIBUTING.md](.github/CONTRIBUTING.md) |
 
 ## 已移出的历史文件
 

@@ -1,0 +1,61 @@
+name: 问题报告 / Bug report
+description: 报告功能错误或异常行为。安全漏洞请改用 Security 页面私密报告。
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        请勿在此填写 API Key、代理密码或其他凭据。日志和截图请先脱敏。
+        安全漏洞请在 Security 页面选择 “Report a vulnerability” 私密提交。
+  - type: input
+    id: version
+    attributes:
+      label: 版本
+      description: Release 版本号，或源码提交 SHA。
+      placeholder: v0.3.0-alpha.3-win7-56
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: 系统环境
+      description: Windows 版本、SP 与关键补丁；是否为虚拟机。
+      placeholder: Windows 7 SP1 x64，已装 KB4474419、KB4490628、KB3140245
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: 权限模式
+      options:
+        - Full Access
+        - Read Only
+        - 不确定
+    validations:
+      required: true
+  - type: input
+    id: provider
+    attributes:
+      label: 模型服务类型
+      description: 只写服务类型和模型名，不要写地址中的密钥。
+      placeholder: OpenAI 兼容接口 / DeepSeek
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      placeholder: |
+        1. ...
+        2. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望结果与实际结果
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志或截图（已脱敏）
+      render: text
