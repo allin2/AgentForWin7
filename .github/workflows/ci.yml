@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  docs:
+    name: Docs check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      # docs:check reads historical commits and candidate tags, so it needs full history.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+      - run: node scripts/check_docs.mjs
+
+  test:
+    name: Daily tests (macOS)
+    # Tests assume a case-insensitive filesystem like Windows and the macOS development machine.
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            src/*/package-lock.json
+            src/shell/office-lite/package-lock.json
+      - name: Cache Electron download
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/Library/Caches/electron
+          key: electron-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json', 'src/shell/package-lock.json') }}
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          for package in . src/core src/gateway src/git-adapter src/runner src/shell src/shell/office-lite src/state src/workspace; do
+            # Retry once: the Electron postinstall download is occasionally aborted by the server.
+            npm ci --prefix "$package" --no-audit --no-fund || npm ci --prefix "$package" --no-audit --no-fund
+          done
+      - name: Daily test set
+        run: npm run test:local

@@ -1,5 +1,6 @@
 # AgentForWin7
 
+[![CI](https://github.com/allin2/AgentForWin7/actions/workflows/ci.yml/badge.svg)](https://github.com/allin2/AgentForWin7/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Windows%207%20SP1%20x64-brightgreen.svg)](docs/WIN7_CONSTRAINTS.md)
 [![Release](https://img.shields.io/badge/Release-v0.3.0--alpha.3-orange.svg)](https://github.com/allin2/AgentForWin7/releases/tag/v0.3.0-alpha.3-win7-56)
