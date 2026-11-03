@@ -59,5 +59,13 @@ jobs:
             # Retry once: the Electron postinstall download is occasionally aborted by the server.
             npm ci --prefix "$package" --no-audit --no-fund || npm ci --prefix "$package" --no-audit --no-fund
           done
+      - name: Match the development host shell set
+        # GitHub macOS images ship PowerShell Core; the development machine does not.
+        # With pwsh on PATH the runner picks it as the default shell, a development-only
+        # substitute that is not Win7 evidence, and the POSIX shell tests fail.
+        shell: bash
+        run: |
+          if command -v pwsh >/dev/null; then sudo rm -f "$(command -v pwsh)"; fi
+          if command -v pwsh >/dev/null; then echo "pwsh is still on PATH" >&2; exit 1; fi
       - name: Daily test set
         run: npm run test:local
