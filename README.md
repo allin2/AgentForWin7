@@ -11,6 +11,14 @@
 
 > 当前为内部预览版。完整 Alpha、RC 与稳定版验收尚未签发，已知限制见 [Release 说明](https://github.com/allin2/AgentForWin7/releases/tag/v0.3.0-alpha.3-win7-56)。
 
+## 界面
+
+![工作台首页：选择工作区后描述任务，顶部显示当前权限模式](docs/images/win7-workbench-start.png)
+
+![按轮审阅改动：右侧检查器列出每轮改动，可查看 Diff 或撤销整轮](docs/images/win7-workbench-changes.png)
+
+截图来自 `v0.3.0-alpha.3-win7-56` 发布包在 Windows 7 SP1 x64 上的运行。对话内容是自动化测试输入。
+
 ## 主要能力
 
 - **便携运行**：基于 Electron 22.3.27（Win7 最后支持的分支），内置 SQLite 原生模块与 D-013 helper（项目自研的 Win32 进程管理程序），解压即用，无需另装 Node.js。
