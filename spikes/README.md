@@ -10,3 +10,10 @@
 | 04 | `04-storage-index/` | `SPIKE_04_STORAGE_INDEX.md` | APPROVED_FOR_IMPLEMENTATION | OWNER_ACCEPTED_FOR_MVP（正式 NOT_PERFORMED；D-014 工件已就绪） | MVP 使用有界内存状态；机械盘门禁 PASS；indexer/benchmark/恢复与 Win7 S01～S08 延期 |
 
 > ADR-0055 只完成 MVP 负责人收口；四项 SPIKE 的正式合同仍须真实通过后，ADR-0028~0035 的附条件才算满足。
+
+## 已移出的离线输入（2026-11-03）
+
+`02-terminal-containment/build-win10/kit/inputs/` 与 `04-storage-index/build-win10/kit/inputs/` 已移出当前树，共 18 个文件，含 Electron 22.3.27 与 Node 16.17.1 安装包。
+两套构建套件的脚本、输入锁、清单和许可证仍保留。重建旧套件前，先执行
+`git checkout archive/pre-cleanup-20261103 -- spikes/02-terminal-containment/build-win10/kit/inputs spikes/04-storage-index/build-win10/kit/inputs`
+取回原字节，再按各自 `input-lock.json` 核对 SHA-256。

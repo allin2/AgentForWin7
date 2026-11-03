@@ -1,156 +1,146 @@
-# Win7 Coding Agent
+# AgentForWin7
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Windows%207%20SP1%20x64-brightgreen.svg)](docs/WIN7_CONSTRAINTS.md)
-[![Node](https://img.shields.io/badge/Node-%3E%3D16.17.1-blue.svg)](package.json)
+[![Release](https://img.shields.io/badge/Release-v0.3.0--alpha.3-orange.svg)](https://github.com/allin2/AgentForWin7/releases/tag/v0.3.0-alpha.3-win7-56)
 
-面向 **Windows 7 SP1 x64** 的企业内部通用 Coding Agent 执行端与桌面客户端。
+面向 **Windows 7 SP1 x64** 的桌面编码助手，产品名 Win7 Coding Agent。
 
-模型推理默认位于远程或企业内网服务（如 DeepSeek 等 OpenAI 兼容接口）；Win7 端负责受控交互、工作区安全读写、命令隔离执行、状态事务与完整合规审计。
+模型推理在远程或企业内网的 OpenAI 兼容服务上完成，例如 DeepSeek。Win7 端负责对话界面、工作区读写、命令执行、检查点回滚和本地审计。
 
----
+> 当前为内部预览版。完整 Alpha、RC 与稳定版验收尚未签发，已知限制见 [Release 说明](https://github.com/allin2/AgentForWin7/releases/tag/v0.3.0-alpha.3-win7-56)。
 
-## 核心特性
+## 主要能力
 
-- 🛡️ **Win7 深度适配与强边界**：原生适配 Windows 7 SP1 x64 环境，基于 Win32 Job Object 与 D-013 隔离帮助程序 (`helper.exe`)，实现进程树受控清理与防僵尸进程保障。
-- ⚡ **绿色便携包**：WIN7-42 发布包包含 Electron 22.3.27（Win7 最终支持分支）、预编译 SQLite 3.43 原生模块与 D-013 helper，运行界面无需另装 Node.js 或构建工具链；Git 功能使用用户环境中的 Git，包内不包含 Git 可执行程序。
-- 🔄 **原子工作区读写与快照回滚**：全量文件写入具备编码探测（UTF-8、GBK、UTF-16LE）、确定性 Diff、每轮检查点与一键回滚能力。
-- 📜 **SQLite WAL 事件账本**：会话、计划、交互审计均写入本地高性能 SQLite WAL 数据库，支持离线追溯与故障恢复。
-- 🔒 **严格的安全模型与 IPC 隔离**：渲染进程与系统内核严格隔离，所有高权限操作均经 Schema 强校验 IPC、安全策略链与目标绑定确认。
+- **便携运行**：基于 Electron 22.3.27（Win7 最后支持的分支），内置 SQLite 原生模块与 D-013 helper（项目自研的 Win32 进程管理程序），解压即用，无需另装 Node.js。
+- **工作区读写**：识别 UTF-8、GBK、UTF-16LE 编码，生成确定性 Diff，每轮自动建检查点，可回滚。
+- **命令与 Git**：Agent 可执行 Shell 命令和 Git 操作。D-013 helper 用 Win32 Job Object 管理进程树，防止残留进程。Git 使用用户环境中已安装的 Git。
+- **审批与审计**：外部写入和高影响操作需要目标绑定确认。会话、计划与操作记录写入本地 SQLite WAL 账本。
+- **轻量工具**：编辑反馈、环境信息、Skills、向用户提问、图片读取，以及 Office Lite：有界读取 DOCX/XLSX、生成新稿和内容级修改副本，不承诺版式保真、宏或公式重算。
 
----
+## 权限与安全
 
-## 架构概览
+请先阅读 [安全说明](docs/SECURITY.md) 第 10 节。要点如下：
+
+- **Full Access 模式下，Agent、Shell、Git hooks 和项目脚本拥有当前 Windows 用户的真实权限。** 产品不提供现代沙箱，Shell 网络不隔离。
+- 检查点、Diff、审批和审计可以降低误操作风险，但不能保证所有副作用可逆。请在受信项目、受限账号和可恢复的工作副本中使用。
+- 当前支持 Full Access 与 Read Only 两种模式。Review 模式尚未完成，进入时保持 fail-closed。
+- 渲染进程不直接获得文件、进程、凭据或网络权限。Provider 凭据用 DPAPI 保存，并在日志中脱敏。TLS 默认验证。
+
+发现安全问题时，请不要公开提交 Issue。请在本仓库 Security 页面选择 “Report a vulnerability” 私密提交。
+
+## 下载与运行
+
+### 系统要求
+
+| 项目 | 要求 |
+|---|---|
+| 操作系统 | Windows 7 SP1 x64（Build 7601） |
+| 系统补丁 | KB4474419、KB4490628（SHA-2 签名支持）；KB3140245（TLS 1.2）。从 [Microsoft Update Catalog](https://www.catalog.update.microsoft.com/) 获取 |
+| 磁盘 | 建议本地 NTFS 分区 |
+| 模型服务 | 一个 OpenAI 兼容端点：Base URL、API Key、模型名 |
+
+### 启动
+
+1. 从 [最新预发布版](https://github.com/allin2/AgentForWin7/releases/tag/v0.3.0-alpha.3-win7-56) 下载 `Win7CodingAgent-0.3.0-alpha.3-win7-x64.zip`。
+2. 核对 SHA-256：`11f85358a0aeacc93c1e763b11461fe1f464886e985b9a8e97852c07ef6e9a72`。
+3. 解压到本地路径，例如 `D:\Tools\Win7CodingAgent`。
+4. 运行解压目录中的 `electron.exe`。
+5. 首次启动时，在设置中填写模型端点。
+
+## 架构
 
 ```mermaid
 flowchart LR
-    User["用户 / 开发者"] --> Shell["Electron Desktop Shell"]
-    Shell --> Core["Agent Core (Loop & Policy)"]
-    Core --> Gateway["Model Gateway (TLS 1.2+)"]
-    Gateway --> Model["远程 / 内网 LLM (DeepSeek / OpenAI)"]
-    Core --> Workspace["Workspace (Atomic Edit & Rollback)"]
-    Core --> State["State & Audit (SQLite WAL)"]
-    Core --> Runner["Trusted Runner (D-013 Helper)"]
-    Runner --> Git["Isolated Git Adapter"]
-
-    Policy["Policy & Approval Chain"] --> Core
-    Policy --> Workspace
-    Policy --> Runner
+    User["用户"] --> Shell["Electron 桌面外壳<br/>Schema IPC"]
+    Shell --> Core["Agent Core<br/>循环 / 策略 / 审批"]
+    Core --> Gateway["Model Gateway<br/>OpenAI 兼容 / TLS"]
+    Gateway --> Model["远程或内网模型"]
+    Core --> Workspace["Workspace<br/>读写 / 检查点 / 回滚"]
+    Core --> State["State<br/>SQLite WAL 账本"]
+    Core --> Runner["Runner<br/>D-013 helper"]
+    Core --> Git["Git Adapter<br/>用户环境 Git"]
 ```
 
----
+详细设计见 [架构说明](docs/ARCHITECTURE.md)，平台限制见 [Win7 约束](docs/WIN7_CONSTRAINTS.md)。
 
-## 快速开始
+## 开发
 
-### 1. Windows 7 用户运行（免安装）
+开发机与产品运行时是两套环境：
 
-#### 系统前置要求
-1. **操作系统**：Windows 7 SP1 x64 (Build 7601)
-2. **必需补丁**（确保系统支持 SHA-2 签名与 TLS 1.2，补丁包见 `.acceptance/deps/kb/`）：
-   - `KB4474419` & `KB4490628`（SHA-2 代码签名支持与服务堆栈更新）
-   - `KB3140245`（TLS 1.2 传输层安全协议）
-3. **硬件**：建议本地 NTFS SSD 分区（保障 SQLite WAL 并发事务性能）
+- 开发机：Node **20.17.0**，以 `.nvmrc` 为准。根目录的 better-sqlite3 按该版本编译，其他 Node 版本会在测试前停止。
+- 产品：随包的 Electron 22 内置 Node 16.17.1。开发机检查通过不代表 Win7 通过。
 
-#### 启动步骤
-1. 前往 **[GitHub Releases 页面](https://github.com/allin2/win7-coding-Agent/releases/tag/v0.3.0-alpha.1-win7-42)** 下载便携版压缩包 `Win7CodingAgent-0.3.0-alpha.1-win7-x64.zip`。
-2. 解压至本地无特殊字符路径（如 `D:\Tools\Win7CodingAgent`）。
-3. 双击运行主程序 `electron.exe`。
-4. 首次启动在设置中配置远程/内网 LLM 端点（Base URL、API Key、模型名称）。
-
----
-
-### 2. 开发者构建指南
-
-本项目采用 **"开发机构建 → Win7 端运行"** 的交叉分发模式。
-
-#### 开发机环境
-- **Node.js** `>=16.17.1`
-- **npm** `>=8.15.0`
-
-#### 安装与验证
 ```bash
-# 1. 克隆代码仓库
-git clone https://github.com/allin2/win7-coding-Agent.git
-cd win7-coding-Agent
+git clone https://github.com/allin2/AgentForWin7.git
+cd AgentForWin7
+nvm use
 
-# 2. 安装所有工作区依赖
-npm ci
+# 根目录与各模块分别安装依赖
+for package in . src/core src/gateway src/git-adapter src/runner src/shell src/shell/office-lite src/state src/workspace; do
+  npm ci --prefix "$package"
+done
 
-# 3. 快速语法与构建验证
-npm run build
-
-# 4. 执行完整回归测试（7 个模块、1,581+ 单元/契约测试）
-npm test
-
-# 5. 检查文档与规范一致性
-npm run docs:check
-
-# 完整工程检查：文档 → 工具自测 → 产品构建/测试 → 发布专项测试
-# 替代上面的分步检查；不要先 build 再重复构建。
-npm run verify:all
-
-# 局部检查
-npm run verify:tools
-npm run verify:release
+npm run test:local -- --module gateway   # 单模块：先构建依赖闭包，再测该模块
+npm run test:local                       # 7 个模块的日常集合
+npm run docs:check                       # 文档改动
+npm run verify:tools                     # 检查工具改动
+npm run verify:release                   # 打包工具改动或发布准备
+npm test                                 # 完整集成回归
 ```
 
-完整入口保留原有 `npm test`、`verify`、`verify:quick` 的行为。
-它只构建一次，枚举 `scripts/release/test/*.test.mjs` 全部专项测试。
-前置失败时，下游记为 `NOT_PERFORMED`，整体返回非零退出码。
-结果绑定本次开发机运行环境，不证明 Win10 或 Win7 实机通过。
-发布专项测试依赖现有原生模块及离线输入；缺失时返回失败，不自动下载或跳过。
-已有测试的 SKIP/TODO 会明确计数，并阻止发布组和完整入口返回 PASS。
-各组耗时输出在 `[verify-project-summary]` JSON 中，不自动写入仓库。
-新入口与发布专项测试本轮在开发机 Node 20.17.0 检查。
-此运行时记录不改变产品 Electron 22 的 Node/ABI 合同。
+`docs:check` 会核对历史提交和候选 tag，请使用完整克隆，不要用 `--depth 1`。更多入口与未执行项说明见 [scripts/README](scripts/README.md)。
 
-#### 生成 Win7 发布包
+### 打包
+
+打包需要已锁定的离线输入，这些输入不在仓库中：Electron、Runner 和 Storage 三个 ZIP。
+
 ```bash
-# 构建确定性 Win7 便携交付包
-npm run package:win7
+npm run package:win7 -- \
+  --electron-zip <Electron ZIP> \
+  --runner-zip <Runner ZIP> \
+  --storage-zip <Storage ZIP> \
+  --formal-input-lock release/win7-product-v3/<对应 Profile 的输入锁>.json \
+  --output <新目录>
 ```
 
----
+打包器按输入锁核对每个输入的 SHA-256，默认要求源码提交等于 HEAD 且工作区干净。开发构建不是正式候选。正式候选的构建、验收与发布流程见 [验收与发版规范](docs/acceptance/ACCEPTANCE_AND_RELEASE_WORKFLOW.md) 和 [发布说明](release/win7-product-v3/README.md)。
 
-## 仓库模块结构
-
-本项目采用 npm Workspaces 多模块单体仓（Monorepo）结构：
+## 仓库结构
 
 ```text
-├── src/
-│   ├── core/           # Agent 核心运行状态机、多轮循环与策略网关
-│   ├── gateway/        # 远程模型流式通信客户端（OpenAI / DeepSeek 协议兼容）
-│   ├── runner/         # 进程执行器与 D-013 隔离进程管控
-│   ├── shell/          # Electron 桌面外壳、安全 IPC Schema 与 UI 入口
-│   ├── workspace/      # 工作区安全读写、编码侦测、检查点与回滚引擎
-│   ├── state/          # SQLite WAL 事务持久化、审计流水与事件账本
-│   └── git-adapter/    # 隔离受控 Git 适配器与 Session Guard
-├── native/
-│   └── helper/         # Win32 C++ 隔离帮助程序源码与构建套件 (D-013)
-├── release/            # 发布闭包规范、输入锁定 (Input-lock) 与 Win7 验证脚本
-├── scripts/            # 整合构建、文档审查与自动化工具
-└── docs/               # 架构说明、Win7 平台约束与 ADR 决策记录
+├── src/            # 7 个产品模块：core、gateway、runner、shell、workspace、state、git-adapter
+├── native/helper/  # D-013 Win32 helper 源码与各版本构建套件
+├── release/        # 输入锁、发布合同与 Win7 验证驱动
+├── scripts/        # 构建、检查、打包、Win7 开发通道与 CI 工具
+├── validation/     # Win7 实机验证证据索引
+├── spikes/         # 早期技术验证（Spike 01～04）的代码与验收证据
+└── docs/           # 架构、约束、安全、决策记录、任务书与状态
 ```
 
----
+## 文档
 
-## 关键文档与治理指引
+| 主题 | 文档 |
+|---|---|
+| 执行约束 | [AGENTS.md](AGENTS.md) |
+| 当前状态 | [docs/STATUS.md](docs/STATUS.md) |
+| 文档导航 | [docs/README.md](docs/README.md) |
+| 架构 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) |
+| Win7 平台约束 | [docs/WIN7_CONSTRAINTS.md](docs/WIN7_CONSTRAINTS.md) |
+| 安全 | [docs/SECURITY.md](docs/SECURITY.md) |
+| 架构决策 | [docs/DECISIONS_INDEX.md](docs/DECISIONS_INDEX.md) |
+| 任务书索引 | [docs/tasks/README.md](docs/tasks/README.md) |
 
-在对本仓库提交代码或进行架构调整前，请务必阅读对应规范：
+## 已移出的历史文件
 
-| 规范主题 | 核心文档 | 说明 |
-|---|---|---|
-| **最高准则** | [AGENTS.md](AGENTS.md) | 仓库执行总入口、实现授权白名单与安全红线 |
-| **当前状态** | [docs/STATUS.md](docs/STATUS.md) | 项目最新状态、功能放行判定与里程碑记录 |
-| **Win7 平台约束** | [docs/WIN7_CONSTRAINTS.md](docs/WIN7_CONSTRAINTS.md) | C01–C20 平台红线、Runtime Profile 与依赖白名单 |
-| **架构与安全** | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | 进程拓扑、内存预算与安全威胁模型 |
-| **决策记录** | [docs/DECISIONS.md](docs/DECISIONS.md) | 历次架构决策（ADR-0001 ~ ADR-0118）不可变归档 |
-| **任务书索引** | [docs/tasks/README.md](docs/tasks/README.md) | 各阶段 Phase、Spike、Alpha 任务书索引与边界 |
-| **实机验证** | [validation/README.md](validation/README.md) | Windows 7 实机验收证据索引 |
+2026-11-03 的仓库整理把下列文件移出当前目录，Git 历史中仍完整保留：
 
----
+- Spike 02、04 构建套件中的离线输入（`kit/inputs/`，含 Electron 与 Node 安装包）。
+- Python 原型阶段代码：`src/phase1-2/`、`tests/`、`scripts/run_*.bat`。
+- 原生工件校验文件：`A6/*.sha256` 和根目录的 `WIN7_NATIVE_ARTIFACTS_*.sha256`。哈希值仍记录在 [Win7 约束](docs/WIN7_CONSTRAINTS.md) 中。
 
-## 开源许可证
+需要时用 `git checkout archive/pre-cleanup-20261103 -- <路径>` 取回。
 
-本项目原创代码与文档采用 [Apache License 2.0](LICENSE) 开源。
-第三方依赖、运行时与构建工件遵循其各自的原生许可协议。
+## 许可证
+
+原创代码与文档采用 [Apache License 2.0](LICENSE)。第三方依赖、运行时与构建工件遵循各自的许可证。

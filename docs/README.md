@@ -33,6 +33,15 @@
 
 历史报告是时间点快照，不覆盖当前状态；当前状态必须绑定明确的 Git commit 和执行环境。
 
+## 当前入口与历史记录
+
+| 类别 | 位置 | 用途 |
+|---|---|---|
+| 当前入口 | `../AGENTS.md`、`STATUS.md`、`WIN7_CONSTRAINTS.md`、`ARCHITECTURE.md`、`SECURITY.md`、`DECISIONS_INDEX.md`、`tasks/README.md` 当前工作分区 | 了解项目现状、约束与决策时先读这些 |
+| 历史记录 | `plans/`、`reports/`、`status/`、`prds/archive/`、`STATUS_LOG.md`、`tasks/` 已关闭与历史分区 | 时间点快照与过程材料；被决策记录、检查脚本和打包合同引用，保留在原路径 |
+
+2026-11-03 起，仓库当前树移出了 Python 原型、旧 Spike 离线输入和两份原生工件校验文件；取回方式见[根 README](../README.md#已移出的历史文件)。
+
 WIN7-28 修复证据的用途、目录位置与检索方式见[本机历史修复证据索引](acceptance/EVIDENCE_ARCHIVE_RETRIEVAL.md#本机历史修复证据索引)。
 
 ## 本地治理入口（ADR-0192）
