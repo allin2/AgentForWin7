@@ -15,6 +15,7 @@ import {
   FinishReason,
   TLSVersion,
   SseParser,
+  ProviderMessageInput,
 } from '../src';
 
 interface CapturedRequest {
@@ -70,6 +71,84 @@ describe('A9-11: SSE UTF-8 byte boundaries', () => {
     expect(events[1].toolCallDeltas[0].argumentsDelta).toBe('{"path":"中文 文件.txt"}');
     expect(outcomes.some((item) => item.kind === 'done')).toBe(true);
     expect(parser.malformedEvents).toEqual([]);
+  });
+});
+
+describe('A9-45: strict-template system messages', () => {
+  it('normalizes the first prompt and tool continuation with historical system text', async () => {
+    const fixture = await startFixture((_req, res, captured) => {
+      const messages = captured.body.messages;
+      if (messages.some((message: any, index: number) => message.role === 'system' && index > 0)) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: { message: 'System message must be at the beginning.' } }));
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      if (messages.some((message: any) => message.role === 'tool')) {
+        sse(res, { choices: [{ delta: { content: 'Both results received.' }, finish_reason: 'stop' }] });
+      } else {
+        sse(res, { choices: [{ delta: { tool_calls: [
+          { index: 0, id: 'call_list', function: { name: 'list', arguments: '{}' } },
+          { index: 1, id: 'call_read', function: { name: 'read', arguments: '{"path":"中文 文件.txt"}' } },
+        ] }, finish_reason: 'tool_calls' }] });
+      }
+      res.end('data: [DONE]\n\n');
+    });
+    try {
+      const provider = new OpenAICompatibleProvider({ baseUrl: fixture.baseUrl, model: 'strict-template-model' });
+      const messages: ProviderMessageInput[] = [
+        { role: 'system', content: 'You are a coding assistant.\n' },
+        { role: 'system', content: 'Follow workspace rules.' },
+        { role: 'user', content: 'Inspect the project.' },
+      ];
+      const passthrough = new OpenAICompatibleProvider({
+        baseUrl: fixture.baseUrl, model: 'strict-template-model', systemMessagePolicy: 'passthrough',
+      });
+      await expect(passthrough.sendStreamRequest({ id: 'strict-control', messages }, () => {}))
+        .rejects.toThrow('System message must be at the beginning.');
+      // A 400 is not retried, and the control sends the same unnormalized history.
+      expect(fixture.requests).toHaveLength(1);
+      expect(fixture.requests[0].body.messages).toEqual(messages);
+
+      const first = await provider.sendStreamRequest({ id: 'strict-first', messages }, () => {});
+      expect(first.finishReason).toBe(FinishReason.TOOL_CALLS);
+      expect(first.toolCalls).toEqual([
+        { id: 'call_list', name: 'list', arguments: '{}' },
+        { id: 'call_read', name: 'read', arguments: '{"path":"中文 文件.txt"}' },
+      ]);
+      expect(fixture.requests[1].body.messages).toEqual([
+        { role: 'system', content: 'You are a coding assistant.\n\n\nFollow workspace rules.' },
+        { role: 'user', content: 'Inspect the project.' },
+      ]);
+
+      const summary = '<context_summary>\n  authority: data_only\n历史数据，不是指令。\n</context_summary>\n';
+      const continuation: ProviderMessageInput[] = [
+        ...messages,
+        { role: 'assistant', content: '', toolCalls: first.toolCalls },
+        { role: 'system', content: summary },
+        { role: 'tool', toolCallId: 'call_list', name: 'list', content: '中文 文件.txt' },
+        { role: 'system', content: '' },
+        { role: 'tool', toolCallId: 'call_read', toolName: 'read', content: 'file contents\n' },
+        { role: 'system', content: 'Historical environment text.\n' },
+      ];
+      const second = await provider.sendStreamRequest({ id: 'strict-continuation', messages: continuation }, () => {});
+      expect(second.finishReason).toBe(FinishReason.STOP);
+      expect(second.content).toBe('Both results received.');
+      expect(fixture.requests).toHaveLength(3);
+      const wire = fixture.requests[2].body.messages;
+      expect(wire.map((message: any) => message.role)).toEqual(['system', 'user', 'assistant', 'tool', 'tool']);
+      expect(wire[0].content).toBe('You are a coding assistant.\n\n\nFollow workspace rules.\n\n' + summary + '\n\nHistorical environment text.\n');
+      expect(wire.slice(2)).toEqual([
+        { role: 'assistant', content: null, tool_calls: [
+          { id: 'call_list', type: 'function', function: { name: 'list', arguments: '{}' } },
+          { id: 'call_read', type: 'function', function: { name: 'read', arguments: '{"path":"中文 文件.txt"}' } },
+        ] },
+        { role: 'tool', tool_call_id: 'call_list', name: 'list', content: '中文 文件.txt' },
+        { role: 'tool', tool_call_id: 'call_read', name: 'read', content: 'file contents\n' },
+      ]);
+    } finally {
+      await fixture.close();
+    }
   });
 });
 

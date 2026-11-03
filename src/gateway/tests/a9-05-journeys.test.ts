@@ -131,9 +131,9 @@ describe('J1 (FIXTURE MODEL): project explanation reads AGENTS.md and real confi
       }
       // A9-26 loads only the root instructions, without preloading repository contents.
       const initial = model.requests[0].messages;
-      expect(initial.map((message: any) => message.role)).toEqual(['system', 'system', 'user']);
+      expect(initial.map((message: any) => message.role)).toEqual(['system', 'user']);
       expect(initial.filter((message: any) => String(message.content).includes('<project_instructions'))).toHaveLength(1);
-      expect(initial[1].content).toContain('structured argv');
+      expect(initial[0].content).toContain('structured argv');
       expect(initial.some((message: any) => String(message.content).includes('demo-app'))).toBe(false);
     } finally {
       await model.close();

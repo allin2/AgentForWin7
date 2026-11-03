@@ -108,6 +108,8 @@ export interface OpenAIProviderConfig {
   model: string;
   apiKey?: string;
   customHeaders?: Record<string, string>;
+  /** 缺省合并 system 消息以兼容只允许一条开头 system 的模板。 */
+  systemMessagePolicy?: 'merge-leading' | 'passthrough';
   tlsConfig?: TLSConfig;
   allowInsecureTLS?: boolean;
   retryConfig?: RetryConfig;
@@ -299,7 +301,7 @@ export class OpenAICompatibleProvider {
    */
   buildOpenAIMessages(messages: ProviderMessageInput[]): Array<Record<string, unknown>> {
     let imageCount = 0;
-    return messages.map((raw) => {
+    const wireMessages = messages.map((raw) => {
       const m = raw as Record<string, unknown>;
       const role = m.role as string;
       if (m.images !== undefined) {
@@ -342,6 +344,16 @@ export class OpenAICompatibleProvider {
       }
       return { role, content: m.content };
     });
+    if (this.config.systemMessagePolicy === 'passthrough') return wireMessages;
+
+    // Validate every message before normalization, including images on system roles.
+    // Keep history objects untouched; only the outbound wire projection is reshaped.
+    const systems = wireMessages.filter((message) => message.role === 'system');
+    if (systems.length === 0 || (systems.length === 1 && wireMessages[0].role === 'system'
+        && systems[0].content !== '')) return wireMessages;
+    const content = systems.map((message) => message.content).filter((text) => text !== '').join('\n\n');
+    const remaining = wireMessages.filter((message) => message.role !== 'system');
+    return content === '' ? remaining : [{ role: 'system', content }, ...remaining];
   }
 
   private async executeSingleStreamRequest(
