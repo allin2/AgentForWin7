@@ -4,7 +4,8 @@
 
 ## 产品与可试用结果
 
-- 最新已发布试用版：`v0.3.0-alpha.3-win7-56`，内部预览版；[下载与说明](https://github.com/allin2/win7-coding-Agent/releases/tag/v0.3.0-alpha.3-win7-56)。UTC `2026-10-31T03:20:23Z` 公开，4 个附件回下载校验通过。
+- 最新已发布试用版：`v0.3.0-alpha.4-win7-57`，内部预览版；[下载与说明](https://github.com/allin2/AgentForWin7/releases/tag/v0.3.0-alpha.4-win7-57)。UTC `2026-11-04T05:10:13Z` 公开，4 个附件回下载校验通过。包含 A9-44 暗色主题与 A9-45 system 合并；Win7 证据为一次开发级最短链路（DEV_CHANNEL），负责人合并验收待确认，见 [A9-44 §9.19](tasks/A9_44_WORKBENCH_DARK_THEME.md#919-alpha4-发布与当前状态)。
+- 上一试用版：`v0.3.0-alpha.3-win7-56`，UTC `2026-10-31T03:20:23Z` 公开。
 - 当前已签发并发布候选：`v0.3.0-alpha.3` / WIN7-56，源 `251dbdf4…`，ZIP `11f85358…`，结论 `A9_43_WIN7_56_PASS_WITH_KNOWN_LIMITS`（ADR-0311）。负责人准确确认接受已有实机证据，保留原 DEV_CHANNEL 标签；冻结候选只读，发布同一字节 ZIP。
 - 上一 Win7 实机已签限定范围结论：`A9_39_WIN7_55_BATCH2_PASS_WITH_KNOWN_LIMITS`（ADR-0286）。source `b4ce2be42cc9448142b831612dc7d5bc3a4df3cd`；ZIP SHA-256 `7de63dd8db0fde0f7c76aafa48f44ce6c9841c651c03b93215e175ad3792824a`。
 - 总控 FORMAL `f9ae2982`；补充组 DEV `cdb82d32`；证据等级与签发范围详见 [ADR-0286/0287](DECISIONS.md#adr-0286-win7-55-门-b限定已直接证明范围签发)。本页不将补充组改成 FORMAL。
