@@ -116,6 +116,9 @@ export function uploadTimeout(bytes) {
   return Math.max(600, Math.ceil(bytes / 200000));
 }
 export function developmentRootLimit(holder, now = Date.now()) {
+  // A9-44 §9.18 K3: alpha.4 shortest-chain run, exact holder and window only.
+  if (holder === 'a4w-c0c02003' && Number.isFinite(now)
+    && now >= Date.parse('2026-11-04T04:11:39.000Z') && now < Date.parse('2026-11-04T05:41:39.000Z')) return 24e9;
   // ADR-0310: separately approved fifth window, exact holder and deadline.
   if (holder === 'a942-751c-7f41ca1c' && Number.isFinite(now)
     && now >= Date.parse('2026-10-31T01:16:21.000Z') && now < Date.parse('2026-10-31T02:46:21.000Z')) return 35e9;
