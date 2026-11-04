@@ -23,10 +23,16 @@ import type { HelperTransport, HelperTransportResult } from '../src';
 // Run a Node script through the shell the runner selects on this developer host. POSIX sh keeps the
 // inline form. Windows PowerShell 5.1 needs the call operator and drops embedded double quotes from
 // native arguments, so PowerShell and CMD run the script from a file instead.
+const nodeScriptDirs: string[] = [];
+afterAll(() => {
+  for (const dir of nodeScriptDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
+});
 function nodeScriptCommand(source: string): string {
   const kind = selectShell({}).kind;
   if (kind !== 'powershell' && kind !== 'cmd') return `${JSON.stringify(process.execPath)} -e ${JSON.stringify(source)}`;
-  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'a9-node-script-')), 'script.cjs');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-node-script-'));
+  nodeScriptDirs.push(dir);
+  const file = path.join(dir, 'script.cjs');
   fs.writeFileSync(file, source, 'utf8');
   if (kind === 'cmd') return `"${process.execPath}" "${file}"`;
   const literal = (value: string) => `'${value.replace(/'/g, "''")}'`;

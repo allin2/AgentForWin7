@@ -112,13 +112,13 @@ describe('A9-30 Runner secure projection', () => {
   });
 });
 
-it('A9-30 real child protocol transport exposes 2-second ticks before terminal', async () => {
-  // The peer is a #! Node script. Windows cannot spawn it as the helper executable without a shell
-  // or arguments, and the protocol logic under test is platform-neutral.
-  if (process.platform === 'win32') return;
+// The peer is a #! Node script. Windows cannot spawn it as the helper executable without a shell
+// or arguments, and the protocol logic under test is platform-neutral, so win32 reports it as skipped.
+(process.platform === 'win32' ? it.skip : it)('A9-30 real child protocol transport exposes 2-second ticks before terminal', async () => {
   const fs = require('fs'); const os = require('os'); const path = require('path');
   const { StdioHelperTransport } = require('../src/native-transport');
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-native-protocol-child-'));
+  try {
   const script = path.join(root, 'helper-fixture');
   // This is a live stdio protocol peer, not Windows native execution evidence.
   fs.writeFileSync(script, `#!${process.execPath}
@@ -142,4 +142,7 @@ if(seq===2) {clearInterval(timer); setTimeout(()=>{send({...env,type:'execution_
   const startupMs = Number(fs.readFileSync(path.join(root, 'started-at'), 'utf8')) - start;
   expect(chunks[0].elapsedMs - startupMs).toBeLessThan(3500);
   expect(chunks[1].elapsedMs - startupMs).toBeGreaterThanOrEqual(3900);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 }, 10000);
