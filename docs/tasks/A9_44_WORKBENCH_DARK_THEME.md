@@ -1,13 +1,15 @@
 # A9-44 — 工作台暗色主题
 
 ```text
-Status: APPROVED_FOR_IMPLEMENTATION
+Status: COMPLETE
 Task Type: PRODUCT_EXPERIENCE
-Target Branch: main integrated at 7e45ee5c353152ed255b7e829a981dac9e4d220b; local delivery a9-44-dark-theme; private box/dark1a
+Target Branch: main; released source a2b4aa8b2e81cb38ce4287c108d0f61490e04b6a (v0.3.0-alpha.4-win7-57)
 Source Baseline: b9ecdb7c85179fbbababf5cd2112426edd35724f
-Phase-Gate: A9_44_DEVELOPER_VERIFIED
+Phase-Gate: A9_44_WIN7_57_PASS_WITH_KNOWN_LIMITS
 Win10-Validation: NOT_PERFORMED
-Win7-Validation: DEV_CHANNEL
+Win7-Validation: A9_44_WIN7_57_PASS_WITH_KNOWN_LIMITS
+Evidence-Class: DEV_CHANNEL
+Acceptance-Basis: OWNER_ACCEPTED_EXISTING_DEV_CHANNEL_EVIDENCE_ROUTE_B (§9.16, §9.20)
 ```
 
 ## 1. 目标与授权状态
@@ -799,3 +801,18 @@ A9-45 阶段中夹具收到 5 个请求：包内 Gateway 不合并的对照被�
 负责人合并验收、正式门 A/B、Win10、本候选上的 batch2 37 用例套件、真实 Qwen 与同事后端均为 NOT_PERFORMED。
 本机证据：`outputs/win7-dev/a4w-c980ca14-13c1-4dce-9e52-929db32e92d1/`、`outputs/alpha4-r1/`。
 另见：部分既有发布测试在系统临时目录留下 `rc0506-*`、`a9-office-negative-stage-*`、`a7-contract-*`；本轮沙箱已整体删除，测试本身未修。
+
+### 9.20 负责人接受 WIN7-57
+
+负责人看过 §9.19 的发版报告、K1～K9 裁决和未执行项后，于 2026-11-04 回复“接受”。
+执行代理据此登记结论 A9_44_WIN7_57_PASS_WITH_KNOWN_LIMITS，记录为本机 `outputs/alpha4-r1/OWNER_ACCEPTANCE.json`。
+
+| 项 | 内容 |
+|---|---|
+| 范围 | 仅源码 `a2b4aa8…`、ZIP `46a6f792…`、Win7 run `c980ca14…`；冻结记录 `0f4743d3…` 未变 |
+| 依据 | §9.16 乙路线：一次 Win7 实机最短链路加负责人合并验收，替代门 A/B |
+| 证据类别 | 原 Win7 结果保留 DEV_CHANNEL；不追溯签发门 A/B，不补做 FORMAL 运行 |
+| 已知限制 | 门 A/B、Win10、本候选 batch2 37 用例套件未执行；A9-45 只经严格模板夹具验证，真实 Qwen 与同事后端未验证；A9-45 截图未显示对话内容；沿用 alpha.3 限制；跨机可重复性未验证 |
+
+已公开附件 `WIN7-57-RELEASE-EVIDENCE.json` 是发布时快照，仍写“验收待确认”；为保持 `SHA256SUMS` 不变，附件不替换，以本节和发布说明为准。
+本任务在准确已签范围内 COMPLETE。后继问题另开任务处理。

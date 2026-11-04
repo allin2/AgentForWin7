@@ -1,13 +1,15 @@
 # A9-45 — OpenAI 兼容后端 system 消息归一化
 
 ```text
-Status: APPROVED_FOR_IMPLEMENTATION
+Status: COMPLETE
 Task Type: PRODUCT_COMPATIBILITY_BUGFIX
 Target Branch: main e6efd0f7 (integrated 2026-11-03/04, see §9); private box/sys400c; local a9-45-system-message at 3de9bee899a179c8245365297196ee0eb4876227
 Source Baseline: 79388ea0c2da4af73c01d2869dd32ebd7319aa5a
-Phase-Gate: A9_45_DEVELOPER_VERIFIED
+Phase-Gate: A9_44_WIN7_57_PASS_WITH_KNOWN_LIMITS
 Win10-Validation: NOT_PERFORMED
-Win7-Validation: NOT_PERFORMED
+Win7-Validation: A9_44_WIN7_57_PASS_WITH_KNOWN_LIMITS
+Evidence-Class: DEV_CHANNEL
+Acceptance-Basis: SHIPPED_AND_ACCEPTED_WITH_WIN7_57 (A9-44 §9.20)
 ```
 
 ## 1. 交付与依据
@@ -194,3 +196,9 @@ Core 历史仍每轮替换环境信息；Win7 探针 `w42-product-probes.cjs` �
 当前 main 为 `e6efd0f…`。Phase-Gate 保持 A9_45_DEVELOPER_VERIFIED。
 真实 Qwen 服务端、同事后端、Win10、Win7 实机、产品打包和发布均为 NOT_PERFORMED。
 负责人后继要求本修复与暗色主题一起推进 alpha.4 发版；版本范围记录见 A9-44 §9.17。
+
+### 9.4 随 alpha.4 发布并被接受
+
+本修复随 `v0.3.0-alpha.4-win7-57` 发布，Win7 实机 DEV_CHANNEL 场景与结果见 A9-44 §9.19。
+负责人接受 WIN7-57，结论为 A9_44_WIN7_57_PASS_WITH_KNOWN_LIMITS，见 A9-44 §9.20。
+已知限制：只经严格模板夹具与 Qwen 官方模板渲染验证；真实 Qwen 服务端与同事实际后端仍为 NOT_PERFORMED。
