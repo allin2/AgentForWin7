@@ -197,17 +197,23 @@ describe('R4: provider config persistence and DPAPI integration', () => {
       runtime.setMode('read_only');
       await runtime.configureProvider({ baseUrl: fixture.baseUrl, model: 'environment-fixture' });
       expect((await runtime.submitTurn('ENV-FIRST')).ok).toBe(true);
+      // A9-45: the provider merges every system message into one leading message, so read the
+      // environment block out of the system content instead of expecting a separate message.
+      const environmentBlocks = (r: any): string[] => (r.messages || [])
+        .filter((m: any) => m.role === 'system' && typeof m.content === 'string')
+        .flatMap((m: any) => m.content.match(/<environment_facts>[\s\S]*?<\/environment_facts>/g) || []);
       const facts = () => seen.filter((r) => r.messages?.some((m: any) => m.role === 'user' && m.content === 'ENV-SECOND'))
-        .flatMap((r) => r.messages.filter((m: any) => m.role === 'system' && m.content.startsWith('<environment_facts>')));
-      const first = seen.flatMap((r) => (r.messages || []).filter((m: any) => m.role === 'system' && m.content.startsWith('<environment_facts>')));
-      expect(first[0].content).toContain('git=PATH 中未发现');
+        .flatMap(environmentBlocks);
+      const first = seen.flatMap(environmentBlocks);
+      expect(first.length).toBeGreaterThan(0);
+      expect(first[0]).toContain('git=PATH 中未发现');
       fs.renameSync(gitPath, path.join(toolDir, 'not-a-tool'));
       fs.writeFileSync(gitPath, 'fixture-only; never executed', 'utf8');
       expect((await runtime.submitTurn('ENV-SECOND')).ok).toBe(true);
       expect(facts().length).toBeGreaterThan(0);
-      expect(facts()[0].content).toContain(`git=发现文件 ${gitPath}`);
-      expect(facts()[0].content).toContain('版本/可运行性=UNKNOWN');
-      expect(facts()[0].content).toContain(`Node=${process.versions.node}`);
+      expect(facts()[0]).toContain(`git=发现文件 ${gitPath}`);
+      expect(facts()[0]).toContain('版本/可运行性=UNKNOWN');
+      expect(facts()[0]).toContain(`Node=${process.versions.node}`);
     } finally {
       if (priorPath === undefined) delete process.env.PATH;
       else process.env.PATH = priorPath;
