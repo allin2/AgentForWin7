@@ -75,7 +75,8 @@ jobs:
     # Windows Server is not Win7 evidence. It catches win32 paths, encodings, cmd.exe and
     # Windows PowerShell 5.1 selection, and process handling before a Win7 window is spent.
     # These modules need neither Electron nor the root better-sqlite3 build; the others do.
-    runs-on: windows-2025
+    # windows-2022 keeps wmic, which Win7 has and process-tree cleanup uses; windows-2025 removed it.
+    runs-on: windows-2022
     timeout-minutes: 30
     steps:
       - name: Keep the checkout byte-identical to the macOS job
