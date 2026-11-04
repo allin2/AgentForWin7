@@ -116,6 +116,9 @@ export function uploadTimeout(bytes) {
   return Math.max(600, Math.ceil(bytes / 200000));
 }
 export function developmentRootLimit(holder, now = Date.now()) {
+  // A9-44 §9.18 K6: second alpha.4 shortest-chain run, exact holder and window only.
+  if (holder === 'a4w-c980ca14' && Number.isFinite(now)
+    && now >= Date.parse('2026-11-04T04:41:05.000Z') && now < Date.parse('2026-11-04T06:11:05.000Z')) return 24e9;
   // A9-44 §9.18 K3: alpha.4 shortest-chain run, exact holder and window only.
   if (holder === 'a4w-c0c02003' && Number.isFinite(now)
     && now >= Date.parse('2026-11-04T04:11:39.000Z') && now < Date.parse('2026-11-04T05:41:39.000Z')) return 24e9;

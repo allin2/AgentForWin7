@@ -375,3 +375,11 @@ test('alpha.4 shortest-chain window grants only the delegated 24 GB scope', () =
  assert.throws(()=>checkCapacity(100e9,24e9,1,{holder,now:start}),/DISK_LIMIT/);
  assert.throws(()=>checkCapacity(50e9,0,1,{holder,now:start}),/DISK_LIMIT/);
 });
+
+test('second alpha.4 shortest-chain window grants only the delegated 24 GB scope', () => {
+ const holder='a4w-c980ca14',start=Date.parse('2026-11-04T04:41:05.000Z'),end=Date.parse('2026-11-04T06:11:05.000Z');
+ assert.equal(developmentRootLimit(holder,start),24e9);assert.equal(developmentRootLimit(holder,end-1),24e9);
+ for(const [h,t] of [['other',start],[holder.toUpperCase(),start],[holder,start-1],[holder,end],['a4w-c0c02003',end]])assert.equal(developmentRootLimit(h,t),20e9);
+ checkCapacity(100e9,23e9,1e9,{holder,now:start});
+ assert.throws(()=>checkCapacity(100e9,24e9,1,{holder,now:start}),/DISK_LIMIT/);
+});

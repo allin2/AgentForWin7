@@ -69,6 +69,10 @@ function Assert-Writer {
   if ($rows.Count -ne 4 -or $rows[1] -cne $D['holder'] -or $rows[3] -cne $D['token']) { throw 'LOCK_NOT_OWNED' }
 }
 function Development-Root-Limit([string]$holder, [DateTime]$at) {
+  # A9-44 section 9.18 K6: second alpha.4 shortest-chain run, exact holder and window only.
+  $a4wSecondStart = [DateTime]::Parse('2026-11-04T04:41:05.000Z').ToUniversalTime()
+  $a4wSecondEnd = [DateTime]::Parse('2026-11-04T06:11:05.000Z').ToUniversalTime()
+  if ($holder -ceq 'a4w-c980ca14' -and $at -ge $a4wSecondStart -and $at -lt $a4wSecondEnd) { return [long]24000000000 }
   # A9-44 section 9.18 K3: alpha.4 shortest-chain run, exact holder and window only.
   $a4wStart = [DateTime]::Parse('2026-11-04T04:11:39.000Z').ToUniversalTime()
   $a4wEnd = [DateTime]::Parse('2026-11-04T05:41:39.000Z').ToUniversalTime()
