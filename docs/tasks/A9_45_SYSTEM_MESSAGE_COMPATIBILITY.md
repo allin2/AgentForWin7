@@ -3,7 +3,7 @@
 ```text
 Status: APPROVED_FOR_IMPLEMENTATION
 Task Type: PRODUCT_COMPATIBILITY_BUGFIX
-Target Branch: main worktree uncommitted source sync; private box/sys400c; local a9-45-system-message at 3de9bee899a179c8245365297196ee0eb4876227
+Target Branch: main e6efd0f7 (integrated 2026-11-03/04, see §9); private box/sys400c; local a9-45-system-message at 3de9bee899a179c8245365297196ee0eb4876227
 Source Baseline: 79388ea0c2da4af73c01d2869dd32ebd7319aa5a
 Phase-Gate: A9_45_DEVELOPER_VERIFIED
 Win10-Validation: NOT_PERFORMED
@@ -159,3 +159,38 @@ Mac G1 使用最终准确提交核对父链、引用、范围、秘密、指纹�
 
 真实同事后端、Win10、Win7 实机、产品打包、门 A/B、main 提交、公开 origin 推送及发布均为 NOT_PERFORMED。
 该结果只证明当前源码的开发机修复和 InstaBox 工作流闭环，不改变已发布包或任何冻结候选的字节与结论。
+
+## 9. 后继：main 集成、真实请求与 Qwen 模板对照
+
+### 9.1 负责人指示集成 main
+
+负责人后继要求将暗色主题与 A9-45 统一提交，并先推进验证和合并到 main。
+本节取代 §3 中“不合并或提交 main、不推送公开 origin”的限制；§3 原文保留。
+执行代理推送前未向负责人指出该限制冲突，属执行偏差。
+执行代理将负责人所说的“实机验证”理解为真实模型请求；本项目“实机”专指 Win7 实机，见 GLOSSARY。
+
+| 提交 | 内容 | 验证与证据层级 |
+|---|---|---|
+| `32b16ec…` | A9-45 产品源码与测试，A9-44、A9-45、ENGINEERING_06 任务书及索引 | 四个产品文件与 `3de9bee8…` 逐字节一致；Gateway 19 组 305 项、docs:check、verify:release 399 项 PASS，均为开发机 Node 20.17.0 |
+| `e6efd0f…` | shell `a9-provider-persistence.test.ts` 环境信息断言 | 完整日常集合 7 模块 PASS（开发机）；GitHub CI run 41758140357 PASS |
+
+`32b16ec…` 使 shell A9-42 环境信息用例必然失败，开发机 20 次全部复现。
+原因是该用例查找以 `<environment_facts>` 开头的单独 system 消息，合并后该消息并入开头。
+Core 历史仍每轮替换环境信息；Win7 探针 `w42-product-probes.cjs` 按包含匹配，不受影响。
+执行代理只改该断言，保留两轮检查。漏检原因是 §4 的验证只覆盖 Gateway。
+
+### 9.2 真实请求与 Qwen 模板对照
+
+| 检查 | 结果 | 限制 |
+|---|---|---|
+| DeepSeek `deepseek-flash` 真实请求 1 次 | 合并后的两条 system 报文返回 200，按序回复 | 只证明合并报文被接受；不证明严格模板修复。原件 `outputs/a9-45-real-model-20261103/` |
+| Qwen 官方聊天模板渲染，未调用模型 | Qwen3.5-27B、Qwen3.5-35B-A3B、Qwen3.6-35B-A3B 对未合并消息抛出 `System message must be at the beginning.`，合并后通过；Qwen2.5 与 Qwen3 系列两种都通过；带工具定义结论相同 | 开发机逻辑验证；服务端预处理、模型回复、流式与思考内容未覆盖。原件 `outputs/a9-45-qwen-template-20261104/` |
+
+同事后端仍为 UNKNOWN；Qwen3.5/3.6 加官方模板是与报错一致的推断。
+另见 QwQ-32B 模板因工具调用 assistant 的 `content` 为 null 失败，与合并无关；真实服务端是否先规避为 UNKNOWN，本轮不修。
+
+### 9.3 当前状态
+
+当前 main 为 `e6efd0f…`。Phase-Gate 保持 A9_45_DEVELOPER_VERIFIED。
+真实 Qwen 服务端、同事后端、Win10、Win7 实机、产品打包和发布均为 NOT_PERFORMED。
+负责人后继要求本修复与暗色主题一起推进 alpha.4 发版；版本范围记录见 A9-44 §9.17。
