@@ -3,13 +3,13 @@
 [![CI](https://github.com/allin2/AgentForWin7/actions/workflows/ci.yml/badge.svg)](https://github.com/allin2/AgentForWin7/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Windows%207%20SP1%20x64-brightgreen.svg)](docs/WIN7_CONSTRAINTS.md)
-[![Release](https://img.shields.io/badge/Release-v0.3.0--alpha.3-orange.svg)](https://github.com/allin2/AgentForWin7/releases/tag/v0.3.0-alpha.3-win7-56)
+[![Release](https://img.shields.io/badge/Release-v0.3.0--alpha.4-orange.svg)](https://github.com/allin2/AgentForWin7/releases/tag/v0.3.0-alpha.4-win7-57)
 
 面向 **Windows 7 SP1 x64** 的桌面编码助手，产品名 Win7 Coding Agent。
 
 模型推理在远程或企业内网的 OpenAI 兼容服务上完成，例如 DeepSeek。Win7 端负责对话界面、工作区读写、命令执行、检查点回滚和本地审计。
 
-> 当前为内部预览版。完整 Alpha、RC 与稳定版验收尚未签发，已知限制见 [Release 说明](https://github.com/allin2/AgentForWin7/releases/tag/v0.3.0-alpha.3-win7-56)。
+> 当前为内部预览版。完整 Alpha、RC 与稳定版验收尚未签发，已知限制见 [Release 说明](https://github.com/allin2/AgentForWin7/releases/tag/v0.3.0-alpha.4-win7-57)。
 
 ## 界面
 
@@ -51,8 +51,8 @@
 
 ### 启动
 
-1. 从 [最新预发布版](https://github.com/allin2/AgentForWin7/releases/tag/v0.3.0-alpha.3-win7-56) 下载 `Win7CodingAgent-0.3.0-alpha.3-win7-x64.zip`。
-2. 核对 SHA-256：`11f85358a0aeacc93c1e763b11461fe1f464886e985b9a8e97852c07ef6e9a72`。
+1. 从 [最新预发布版](https://github.com/allin2/AgentForWin7/releases/tag/v0.3.0-alpha.4-win7-57) 下载 `Win7CodingAgent-0.3.0-alpha.4-win7-x64.zip`。
+2. 核对 SHA-256：`46a6f7926a084b7cdaca3d589532af50c8fc17c2de42d94302d81245369faa94`。
 3. 解压到本地路径，例如 `D:\Tools\Win7CodingAgent`。
 4. 运行解压目录中的 `electron.exe`。
 5. 首次启动时，在设置中填写模型端点。
