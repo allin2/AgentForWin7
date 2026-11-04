@@ -69,8 +69,12 @@ function loadA9PackageRuntime(options) {
 const STREAMING_PROFILE = 'D-013-v26-a9-trusted-shell-current-user';
 const MANAGED_PROFILE = 'D-013-v26-managed-a9-trusted-shell-current-user';
 const A9_32_LOCK_ID = 'A9-32-DEVELOPER-INPUTS-D013-V26-MANAGED';
-const BATCH2_LOCK_ID = 'A9-BATCH2-INPUTS-D013-V26-MANAGED';
-const BATCH2_IDENTITY = Object.freeze({ version: '0.3.0-alpha.3', releaseId: 'WIN7-CODING-AGENT-A9-ALPHA3', candidate: 'WIN7-56' });
+// Formal batch-2 locks and the exact release identity each one may carry (alpha.3 WIN7-56, alpha.4 WIN7-57).
+const FORMAL_IDENTITIES = Object.freeze({
+  'A9-BATCH2-INPUTS-D013-V26-MANAGED': Object.freeze({ version: '0.3.0-alpha.3', releaseId: 'WIN7-CODING-AGENT-A9-ALPHA3', candidate: 'WIN7-56' }),
+  'A9-ALPHA4-INPUTS-D013-V26-MANAGED': Object.freeze({ version: '0.3.0-alpha.4', releaseId: 'WIN7-CODING-AGENT-A9-ALPHA4', candidate: 'WIN7-57' }),
+});
+const formalIdentity = (lockId) => (typeof lockId === 'string' && Object.prototype.hasOwnProperty.call(FORMAL_IDENTITIES, lockId) ? FORMAL_IDENTITIES[lockId] : null);
 const HISTORICAL_STATUS = 'DEVELOPER_PACKAGE_CANDIDATE_NOT_WIN10_OR_WIN7_PASS';
 
 /**
@@ -92,15 +96,16 @@ function manifestContract(descriptor) {
     if (hasCandidate) throw new Error('A9_PACKAGE_RUNTIME_CONFIG_INVALID');
     return { kind: 'DEVELOPER', version: '0.3.0-alpha.2', status: managed ? 'A9_31_DEVELOPER_CHECK_NOT_WIN7_CANDIDATE' : 'A9_30_DEVELOPER_CHECK_NOT_WIN7_CANDIDATE', lockId: undefined };
   }
-  if (!managed || (lockId !== A9_32_LOCK_ID && lockId !== BATCH2_LOCK_ID)) throw new Error('A9_PACKAGE_RUNTIME_CONFIG_INVALID');
+  if (!managed || (lockId !== A9_32_LOCK_ID && !formalIdentity(lockId))) throw new Error('A9_PACKAGE_RUNTIME_CONFIG_INVALID');
   if (lockId === A9_32_LOCK_ID) {
     if (hasCandidate) throw new Error('A9_PACKAGE_RUNTIME_CONFIG_INVALID');
     return { kind: 'DEVELOPER', version: '0.3.0-alpha.2', status: 'A9_32_DEVELOPER_CHECK_NOT_WIN7_CANDIDATE', lockId };
   }
-  if (descriptor.candidate !== BATCH2_IDENTITY.candidate || descriptor.release_id !== BATCH2_IDENTITY.releaseId) {
+  const identity = formalIdentity(lockId);
+  if (descriptor.candidate !== identity.candidate || descriptor.release_id !== identity.releaseId) {
     throw new Error('A9_PACKAGE_RUNTIME_CONFIG_INVALID');
   }
-  return { kind: 'FORMAL_BATCH2', status: HISTORICAL_STATUS, lockId, version: BATCH2_IDENTITY.version, candidate: BATCH2_IDENTITY.candidate };
+  return { kind: 'FORMAL_BATCH2', status: HISTORICAL_STATUS, lockId, version: identity.version, candidate: identity.candidate };
 }
 
 function validateDescriptor(descriptor, manifest) {

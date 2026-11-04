@@ -177,7 +177,7 @@ describe('A9-32 developer and A9-43 alpha.3 batch-2 package binding', () => {
   const BATCH2 = 'A9-BATCH2-INPUTS-D013-V26-MANAGED';
   const AUTHORITY = { formal_input_lock_sha256: 'b'.repeat(64), approval_registry_commit: 'c'.repeat(40), approval_registry_sha256: 'd'.repeat(64) };
 
-  function managed(kind: 'a9-32' | 'batch2' | 'a9-31') {
+  function managed(kind: 'a9-32' | 'batch2' | 'alpha4' | 'a9-31') {
     const env = fixture();
     const descriptorFile = path.join(env.productRoot, '..', 'a9-runtime.json');
     const manifestFile = path.join(env.releaseRoot, 'release-manifest.json');
@@ -194,7 +194,8 @@ describe('A9-32 developer and A9-43 alpha.3 batch-2 package binding', () => {
       manifest.status = 'A9_32_DEVELOPER_CHECK_NOT_WIN7_CANDIDATE';
       manifest.external_acceptance_eligible = false;
     } else {
-      const lock = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../../../../release/win7-product-v3/a9-batch2-input-lock.json'), 'utf8'));
+      const lockFile = kind === 'alpha4' ? 'a9-alpha4-input-lock.json' : 'a9-batch2-input-lock.json';
+      const lock = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../../../../release/win7-product-v3', lockFile), 'utf8'));
       descriptor.version = manifest.version = lock.version;
       descriptor.release_id = manifest.release_id = lock.release_id;
       descriptor.lock_id = manifest.lock_id = lock.lock_id;
@@ -218,6 +219,26 @@ describe('A9-32 developer and A9-43 alpha.3 batch-2 package binding', () => {
       expect(load(formal.productRoot)).toMatchObject({ version: '0.3.0-alpha.3', releaseId: 'WIN7-CODING-AGENT-A9-ALPHA3', runnerHelperProtocol: 3, runnerHelperProfile: MANAGED });
       expect(formal.descriptor.candidate).toBe('WIN7-56');
     } finally { dev.cleanup(); formal.cleanup(); }
+  });
+
+  it('A9-44 accepts the alpha.4 formal package only with its own lock, release and candidate', () => {
+    const alpha4 = managed('alpha4');
+    try {
+      expect(load(alpha4.productRoot)).toMatchObject({ version: '0.3.0-alpha.4', releaseId: 'WIN7-CODING-AGENT-A9-ALPHA4', runnerHelperProtocol: 3, runnerHelperProfile: MANAGED });
+      expect(alpha4.descriptor.candidate).toBe('WIN7-57');
+    } finally { alpha4.cleanup(); }
+    for (const mutate of [
+      (e: any) => { e.descriptor.candidate = e.manifest.candidate = 'WIN7-56'; },
+      (e: any) => { e.descriptor.release_id = e.manifest.release_id = 'WIN7-CODING-AGENT-A9-ALPHA3'; },
+      (e: any) => { e.descriptor.version = e.manifest.version = '0.3.0-alpha.3'; },
+      (e: any) => { e.descriptor.lock_id = e.manifest.lock_id = BATCH2; },
+      (e: any) => { e.descriptor.lock_id = e.manifest.lock_id = 'constructor'; },
+    ]) {
+      const env = managed('alpha4');
+      try { mutate(env); env.save(); expect(() => load(env.productRoot)).toThrow('A9_PACKAGE_RUNTIME_CONFIG_INVALID'); } finally { env.cleanup(); }
+    }
+    const crossed = managed('batch2');
+    try { crossed.descriptor.candidate = crossed.manifest.candidate = 'WIN7-57'; crossed.save(); expect(() => load(crossed.productRoot)).toThrow('A9_PACKAGE_RUNTIME_CONFIG_INVALID'); } finally { crossed.cleanup(); }
   });
 
   it('keeps the unstamped A9-31 managed contract byte-compatible', () => {
