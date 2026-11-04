@@ -113,6 +113,9 @@ describe('A9-30 Runner secure projection', () => {
 });
 
 it('A9-30 real child protocol transport exposes 2-second ticks before terminal', async () => {
+  // The peer is a #! Node script. Windows cannot spawn it as the helper executable without a shell
+  // or arguments, and the protocol logic under test is platform-neutral.
+  if (process.platform === 'win32') return;
   const fs = require('fs'); const os = require('os'); const path = require('path');
   const { StdioHelperTransport } = require('../src/native-transport');
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-native-protocol-child-'));
