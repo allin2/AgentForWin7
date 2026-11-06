@@ -124,7 +124,7 @@ describe('A9 unified desktop workbench contract', () => {
     expect(script).toContain('a9.archiveConversation(state.activeConversationId)');
     expect(script).toContain('a9.restoreConversation(conversationId)');
     expect(script).toContain("root.setTimeout(() => { void saveDraftNow(); }, 450)");
-    expect(script).toContain("a9.saveDraft(el('task-prompt').value)");
+    expect(script).toContain('a9.saveDraft(draftText)');
     expect(css).toContain('.conversation-directory');
     expect(css).toContain('.conversation-list');
   });
@@ -420,6 +420,63 @@ describe('A9 unified desktop workbench contract', () => {
     expect(context.classify({ toolName: 'read', error: '读取失败' })[0]).toBe('failed');
     expect(context.classify({ shell: { exitCode: null, status: 'unknown' } })[0]).toBe('interrupted');
     expect(context.classify({ shell: { exitCode: 0, status: 'completed' } })[0]).toBe('success');
+  });
+
+  it('A9-47 separates drafting from sending and retains approval, question and runtime blocks', () => {
+    const nodes: any = new Map();
+    const node = (id: string) => {
+      if (!nodes.has(id)) nodes.set(id, { value: 'next draft', dataset: {}, hidden: false, disabled: false,
+        classList: { toggle: jest.fn() }, setAttribute: jest.fn() });
+      return nodes.get(id);
+    };
+    const ready = { status: 'ready', mode: 'read_only', agentStatus: 'running',
+      provider: { configured: true, probe: { classification: 'tool_calling' } } };
+    const context: any = { state: { snapshot: ready, running: true }, el: node,
+      text: (id: string, value: string) => { node(id).textContent = value; },
+      SUPPORTED_MODES: new Set(['read_only', 'full_access']), activeManagedProcesses: () => [], runtimeDiagnostic: () => 'restricted' };
+    const source = script.slice(script.indexOf('  function canSubmit('), script.indexOf('  function activeManagedProcesses('))
+      + script.slice(script.indexOf('  function syncComposer('), script.indexOf('  function resizeComposer('));
+    vm.runInNewContext(source + ';this.sync = syncComposer;this.sendable = canSubmit;', context);
+    context.sync();
+    expect(node('task-prompt').disabled).toBe(false);
+    expect(node('run-task').hidden).toBe(true);
+    expect(context.sendable()).toBe(false);
+    expect(node('cancel-task').hidden).toBe(false);
+    expect(node('composer-draft-guidance').hidden).toBe(false);
+    for (const blocked of [{ pendingApproval: {} }, { pendingQuestion: {} }, { status: 'diagnostics' }, { mode: 'needs_selection' }]) {
+      context.state.snapshot = { ...ready, ...blocked };
+      context.sync();
+      expect(node('task-prompt').disabled).toBe(true);
+    }
+    context.state.snapshot = { ...ready, agentStatus: 'idle' };
+    context.state.running = false;
+    context.sync();
+    expect(node('task-prompt').value).toBe('next draft');
+    expect(node('run-task').hidden).toBe(false);
+    expect(context.sendable()).toBe(true);
+    expect(node('composer-draft-guidance').hidden).toBe(true);
+  });
+
+  it('A9-47 reports a rejected draft save without clearing input or applying a stale acknowledgement', async () => {
+    const nodes: any = { 'task-prompt': { value: 'first' }, 'draft-status': { dataset: {}, textContent: '' } };
+    let finish: (value: any) => void = () => {};
+    const context: any = { state: { activeConversationId: 'conversation-a', draftTimer: null },
+      el: (id: string) => nodes[id], text: (id: string, value: string) => { nodes[id].textContent = value; },
+      a9: { saveDraft: jest.fn(() => new Promise((resolve) => { finish = resolve; })) }, root: {} };
+    const source = script.slice(script.indexOf('  async function saveDraftNow('), script.indexOf('  function scheduleDraftSave('));
+    vm.runInNewContext(source + ';this.save = saveDraftNow;', context);
+    const pending = context.save();
+    nodes['task-prompt'].value = 'newer draft';
+    nodes['draft-status'].textContent = '正在保存当前对话草稿…';
+    finish({ ok: true, persistence: 'dpapi' });
+    await pending;
+    expect(nodes['draft-status'].textContent).toBe('正在保存当前对话草稿…');
+    context.a9.saveDraft = async () => { throw new Error('transport unavailable'); };
+    await expect(context.save()).resolves.toEqual({ ok: false });
+    expect(nodes['task-prompt'].value).toBe('newer draft');
+    expect(nodes['draft-status'].textContent).toContain('草稿保存失败');
+    expect(nodes['draft-status'].dataset.tone).toBe('error');
+    expect(context.state.draftSaving).toBe(false);
   });
 
   it('loads persisted session events into the Inspector in order without duplicates or cross-session residue', async () => {

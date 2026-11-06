@@ -341,10 +341,18 @@
     const stopKind = state.running
       ? 'turn'
       : snapshot && snapshot.controls ? snapshot.controls.stopKind : hasManaged ? 'managed_process' : 'none';
-    prompt.disabled = blockedMode || blockedApproval || blockedQuestion || state.running;
+    prompt.disabled = blockedMode || blockedApproval || blockedQuestion;
+    const draftingWhileRunning = state.running && !prompt.disabled;
+    prompt.placeholder = draftingWhileRunning
+      ? '起草下一条消息，当前任务结束后手动发送…'
+      : '描述要完成的任务，或询问当前代码…';
+    prompt.setAttribute('aria-label', draftingWhileRunning ? '下一条消息草稿' : '任务描述');
+    el('composer-send-guidance').hidden = draftingWhileRunning;
+    el('composer-draft-guidance').hidden = !draftingWhileRunning;
+    el('composer-guidance').classList.toggle('drafting', draftingWhileRunning);
     send.hidden = state.running;
     stop.hidden = !canStop;
-    // A9-19 L04：运行中只保留 Composer 的停止按钮；左栏只显示状态（元素保留以兼容既有身份）。
+    // ADR-0314：运行中可编辑下一条草稿，执行动作仍只有停止；不自动发送。
     railStop.hidden = true;
     send.disabled = !canSubmit();
     stop.disabled = !canStop;
@@ -359,7 +367,7 @@
     else if (blockedQuestion) text('session-status', '先回答或取消当前问题；等待时不会继续模型请求，也不会自动同意任何操作。');
     else if (!snapshot.provider || !snapshot.provider.configured) text('session-status', 'Provider 尚未配置。打开设置并完成原生 tool_calls 探测。');
     else if (!snapshot.provider.probe || snapshot.provider.probe.classification !== 'tool_calling') text('session-status', 'Provider 尚未通过原生 tool_calls 探测；任务发送保持禁用。');
-    else if (state.running) text('session-status', '任务正在执行；可随时停止。工具调用与退出码会写入活动记录。');
+    else if (state.running) text('session-status', '任务正在执行；可起草下一条消息，Enter 换行，结束后手动发送。');
     else if (hasManaged) {
       const recovered = activeManagedProcesses(snapshot).filter((item) => item.pidReusePossible === true);
       text('session-status', recovered.length > 0
@@ -2329,11 +2337,24 @@
       state.draftTimer = null;
     }
     state.draftSaving = true;
+    const conversationId = state.activeConversationId;
+    const draftText = el('task-prompt').value;
+    const isCurrent = () => state.activeConversationId === conversationId && el('task-prompt').value === draftText;
     try {
-      const response = await a9.saveDraft(el('task-prompt').value);
-      if (response && response.note) text('draft-status', response.note);
-      else if (response && response.persistence === 'dpapi') text('draft-status', '草稿已由 Windows DPAPI 为当前用户保护。');
+      const response = await a9.saveDraft(draftText);
+      if (isCurrent()) {
+        el('draft-status').dataset.tone = !response || response.ok !== true ? 'error' : 'info';
+        if (!response || response.ok !== true) text('draft-status', '草稿保存失败，当前输入仍保留，请稍后重试。');
+        else if (response.note) text('draft-status', response.note);
+        else if (response.persistence === 'dpapi') text('draft-status', '草稿已由 Windows DPAPI 为当前用户保护。');
+      }
       return response;
+    } catch (_error) {
+      if (isCurrent()) {
+        el('draft-status').dataset.tone = 'error';
+        text('draft-status', '草稿保存失败，当前输入仍保留，请稍后重试。');
+      }
+      return { ok: false };
     } finally {
       state.draftSaving = false;
     }
@@ -2342,6 +2363,7 @@
   function scheduleDraftSave() {
     if (state.draftTimer) root.clearTimeout(state.draftTimer);
     text('draft-status', '正在保存当前对话草稿…');
+    el('draft-status').dataset.tone = 'info';
     state.draftTimer = root.setTimeout(() => { void saveDraftNow(); }, 450);
   }
 
@@ -3526,7 +3548,7 @@
     el('task-prompt').addEventListener('input', () => { resizeComposer(); scheduleDraftSave(); });
     el('task-prompt').addEventListener('blur', () => { void saveDraftNow(); });
     el('task-prompt').addEventListener('keydown', (event) => {
-      if (event.key === 'Enter' && !event.shiftKey && event.isComposing !== true && event.keyCode !== 229) {
+      if (!state.running && event.key === 'Enter' && !event.shiftKey && event.isComposing !== true && event.keyCode !== 229) {
         event.preventDefault();
         void submitPrompt();
       }

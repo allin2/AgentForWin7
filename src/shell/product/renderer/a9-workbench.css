@@ -414,6 +414,7 @@ summary:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--focus
 .composer-guidance { color: var(--muted); font-size: var(--fs-label); opacity: .78; }
 .composer-guidance b { color: var(--text-secondary); font: 500 var(--fs-caption) var(--font-ui); letter-spacing: .02em; }
 .composer-guidance i { padding: 0 6px; font-style: normal; opacity: .55; }
+.composer-guidance.drafting { display: block; min-width: 0; padding-right: 8px; font-size: 11px; }
 .send, .stop { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-width: 88px; min-height: 44px; margin-left: auto; padding: 0 14px; border: 1px solid transparent; border-radius: 9px; font-weight: 600; }
 .send { background: var(--accent); color: var(--on-accent); }
 .send:hover:not(:disabled) { background: var(--accent-strong); }
@@ -423,6 +424,7 @@ summary:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--focus
 .status-line { margin: 7px 0 0; color: var(--muted); font-size: 12px; text-align: center; }
 .status-line[data-tone="block"] { padding: 6px 10px; border-left: 2px solid var(--amber); background: var(--amberbg); color: var(--text-secondary); text-align: left; overflow-wrap: anywhere; }
 .draft-status { min-height: 16px; margin: 2px 0 0; color: var(--muted); font-size: 11px; text-align: center; }
+.draft-status[data-tone="error"] { display: block; color: var(--red); }
 
 .primary, .secondary, .danger { min-height: 40px; padding: 0 13px; border-radius: 8px; }
 .primary { border: 1px solid var(--accent); background: var(--accent); color: var(--on-accent); font-weight: 600; }

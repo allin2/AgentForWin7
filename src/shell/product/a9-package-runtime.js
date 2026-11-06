@@ -73,6 +73,7 @@ const A9_32_LOCK_ID = 'A9-32-DEVELOPER-INPUTS-D013-V26-MANAGED';
 const FORMAL_IDENTITIES = Object.freeze({
   'A9-BATCH2-INPUTS-D013-V26-MANAGED': Object.freeze({ version: '0.3.0-alpha.3', releaseId: 'WIN7-CODING-AGENT-A9-ALPHA3', candidate: 'WIN7-56' }),
   'A9-ALPHA4-INPUTS-D013-V26-MANAGED': Object.freeze({ version: '0.3.0-alpha.4', releaseId: 'WIN7-CODING-AGENT-A9-ALPHA4', candidate: 'WIN7-57' }),
+  'A9-ALPHA5-INPUTS-D013-V26-MANAGED': Object.freeze({ version: '0.3.0-alpha.5', releaseId: 'WIN7-CODING-AGENT-A9-ALPHA5', candidate: 'WIN7-58' }),
 });
 const formalIdentity = (lockId) => (typeof lockId === 'string' && Object.prototype.hasOwnProperty.call(FORMAL_IDENTITIES, lockId) ? FORMAL_IDENTITIES[lockId] : null);
 const HISTORICAL_STATUS = 'DEVELOPER_PACKAGE_CANDIDATE_NOT_WIN10_OR_WIN7_PASS';
