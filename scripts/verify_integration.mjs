@@ -2,7 +2,7 @@ import { spawnSync } from 'child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'fs';
 import { createRequire } from 'module';
 import { tmpdir } from 'os';
-import { dirname, join } from 'path';
+import { basename, dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 
 const repositoryRoot = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -19,6 +19,10 @@ for (let index = 0; index < args.length; index++) {
   else { console.error('VERIFY_ARGUMENT_INVALID'); process.exit(1); }
 }
 const npmExecutable = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+// Node 18.20.2+/20.12.2+ refuses to spawn npm.cmd without a shell (CVE-2024-27980, EINVAL), and a
+// shell would reinterpret the regex and path arguments. On Windows run npm's JavaScript entry with
+// this Node instead; npm itself still runs package scripts through cmd.exe.
+const npmCommand = resolveNpmCommand();
 
 const allModules = [
   'gateway',
@@ -128,7 +132,7 @@ for (const phase of quick ? ['build'] : ['build', 'test']) {
     for (const args of commands) {
       console.log(`\n[verify] ${moduleName}: npm ${args.join(' ')}`);
       const commandStarted = Date.now();
-      const result = spawnSync(npmExecutable, args, {
+      const result = spawnSync(npmCommand.file, [...npmCommand.prefix, ...args], {
         cwd: moduleDir,
         stdio: 'inherit',
         shell: false,
@@ -261,6 +265,13 @@ function checkNativeTestDependencies() {
     reportFailure('native-deps', `Node ${process.version}（ABI ${process.versions.modules}）无法加载 better-sqlite3：`
       + `${String(error && error.message).replace(/\s+/g, ' ').slice(0, 400)}。按 .nvmrc 切换 Node（nvm use）后重跑；这不是产品测试失败。`);
   }
+}
+
+function resolveNpmCommand() {
+  if (process.platform !== 'win32') return { file: npmExecutable, prefix: [] };
+  const candidates = [process.env.npm_execpath, join(dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js')];
+  const cli = candidates.find((candidate) => candidate && basename(candidate).toLowerCase() === 'npm-cli.js' && existsSync(candidate));
+  return cli ? { file: process.execPath, prefix: [cli] } : { file: npmExecutable, prefix: [] };
 }
 
 function reportFailure(moduleName, reason) {

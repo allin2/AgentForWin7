@@ -8,7 +8,8 @@ const source = readFileSync(new URL('./verify_integration.mjs', import.meta.url)
   .replace('dirname(dirname(fileURLToPath(import.meta.url)))', "'/repo'");
 const names = ['workspace', 'state', 'runner', 'git-adapter', 'gateway', 'core', 'shell'];
 const selectedOrder = ['gateway', 'workspace', 'state', 'core', 'runner', 'git-adapter', 'shell'];
-function run({ quick = false, failBuild = false, failTest = false, missingDependency = false, customLint = false, nativeBroken = false, args = [] } = {}) {
+function run({ quick = false, failBuild = false, failTest = false, missingDependency = false, customLint = false, nativeBroken = false, args = [],
+  platform = 'linux', env = {}, execPath = '/usr/bin/node' } = {}) {
   const calls = [];
   const created = [];
   const removed = [];
@@ -18,11 +19,13 @@ function run({ quick = false, failBuild = false, failTest = false, missingDepend
   const exit = new Error('exit');
   try {
     vm.runInNewContext(source, {
-      process: { argv: ['node', 'verify', ...(quick ? ['--quick'] : []), ...args], platform: 'linux', env: {},
+      process: { argv: ['node', 'verify', ...(quick ? ['--quick'] : []), ...args], platform, env, execPath,
         version: 'v22.0.0', versions: { modules: '127' },
         exit(code) { exitCode = code; throw exit; } },
       console: { log() {}, error(message) { errors.push(String(message)); } },
       join: (...parts) => parts.join('/'),
+      dirname: (file) => file.slice(0, file.lastIndexOf('/')),
+      basename: (file) => file.slice(file.lastIndexOf('/') + 1),
       tmpdir: () => '/system-temp',
       mkdtempSync: (prefix) => {
         const dir = `${prefix}${++tempSequence}`;
@@ -38,8 +41,8 @@ function run({ quick = false, failBuild = false, failTest = false, missingDepend
       readFileSync: (file) => file.endsWith('/package.json')
         ? JSON.stringify({ scripts: { lint: file.includes('/shell/') || customLint ? 'tsc --noEmit && check-js' : 'tsc --noEmit', build: 'build', test: 'test' } })
         : readFileSync(new URL(`../${file.slice('/repo/'.length)}`, import.meta.url), 'utf8'),
-      spawnSync: (_command, args, options) => {
-        calls.push({ name: options.cwd.split('/').pop(), args, env: options.env });
+      spawnSync: (command, args, options) => {
+        calls.push({ name: options.cwd.split('/').pop(), command, args, env: options.env, shell: options.shell });
         if (failBuild && options.cwd.endsWith('/runner') && args[1] === 'build') return { status: 1 };
         if (failTest && options.cwd.endsWith('/runner') && args[0] === 'test') return { status: 1 };
         return { status: 0 };
@@ -128,3 +131,17 @@ console.log('PASS: scoped builds, exact test paths, explicit slow exclusions, na
 const custom = run({ customLint: true, args: ['--module', 'runner'] });
 assert.deepEqual(custom.calls.map(({ args }) => args[1]), ['lint', 'build', '--']);
 console.log('PASS: non-duplicate lint is preserved regardless of module directory');
+
+// Windows: never spawn npm.cmd without a shell (EINVAL since CVE-2024-27980); run npm-cli.js with this Node.
+assert.deepEqual(run({ args: ['--module', 'runner'] }).calls.map(({ command, args }) => [command, args[0]]), [['npm', 'run'], ['npm', 'test']]);
+const windowsNode = 'C:/node/node.exe';
+const fromNpmRun = run({ platform: 'win32', execPath: windowsNode, env: { npm_execpath: 'C:/npm/bin/npm-cli.js' }, args: ['--module', 'runner'] });
+assert.equal(fromNpmRun.exitCode, 0);
+assert.deepEqual(fromNpmRun.calls.map(({ command, args, shell }) => [command, args[0], args[1], shell]),
+  [[windowsNode, 'C:/npm/bin/npm-cli.js', 'run', false], [windowsNode, 'C:/npm/bin/npm-cli.js', 'test', false]]);
+for (const env of [{}, { npm_execpath: 'C:/yarn/bin/yarn.js' }]) {
+  const direct = run({ platform: 'win32', execPath: windowsNode, env, args: ['--module', 'runner'] });
+  assert.equal(direct.exitCode, 0);
+  assert.ok(direct.calls.every(({ command, args }) => command === windowsNode && args[0] === 'C:/node/node_modules/npm/bin/npm-cli.js'));
+}
+console.log('PASS: Windows runs npm-cli.js with the current Node instead of spawning npm.cmd without a shell');

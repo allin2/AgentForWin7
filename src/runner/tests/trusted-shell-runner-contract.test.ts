@@ -20,6 +20,25 @@ import {
 } from '../src';
 import type { HelperTransport, HelperTransportResult } from '../src';
 
+// Run a Node script through the shell the runner selects on this developer host. POSIX sh keeps the
+// inline form. Windows PowerShell 5.1 needs the call operator and drops embedded double quotes from
+// native arguments, so PowerShell and CMD run the script from a file instead.
+const nodeScriptDirs: string[] = [];
+afterAll(() => {
+  for (const dir of nodeScriptDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
+});
+function nodeScriptCommand(source: string): string {
+  const kind = selectShell({}).kind;
+  if (kind !== 'powershell' && kind !== 'cmd') return `${JSON.stringify(process.execPath)} -e ${JSON.stringify(source)}`;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-node-script-'));
+  nodeScriptDirs.push(dir);
+  const file = path.join(dir, 'script.cjs');
+  fs.writeFileSync(file, source, 'utf8');
+  if (kind === 'cmd') return `"${process.execPath}" "${file}"`;
+  const literal = (value: string) => `'${value.replace(/'/g, "''")}'`;
+  return `& ${literal(process.execPath)} ${literal(file)}`;
+}
+
 describe('A9-02 regression: shell invocation contracts', () => {
   it('captures the complete recursive Windows descendant set before taskkill verification', () => {
     const table = [
@@ -243,7 +262,7 @@ describe('A9-02 regression: honest termination and logs', () => {
       getSensitiveValues: () => [secret],
     });
     const script = "process.stdout.write('SPLIT-'); setTimeout(() => process.stdout.write('SECRET-42'), 30)";
-    const result = await runner.execute({ command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify(script)}` });
+    const result = await runner.execute({ command: nodeScriptCommand(script) });
 
     expect(result.stdout).toContain('***redacted***');
     expect(result.stdout).not.toContain(secret);
@@ -263,7 +282,7 @@ describe('A9-02 regression: honest termination and logs', () => {
       getSensitiveValues: () => [secret, boundarySecret],
     });
     const script = `process.stdout.write(${JSON.stringify(`AAAA${boundarySecret} ${encodedBase64}`)})`;
-    const result = await runner.execute({ command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify(script)}` });
+    const result = await runner.execute({ command: nodeScriptCommand(script) });
     const raw = fs.readFileSync(result.logPaths!.stdout, 'utf8');
 
     expect(result.stdout).not.toContain(encodedBase64);
@@ -280,7 +299,7 @@ describe('A9-02 regression: honest termination and logs', () => {
       getSensitiveValues: () => [secret],
     });
     const script = `process.stdout.write(${JSON.stringify(mixed)})`;
-    const result = await runner.execute({ command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify(script)}` });
+    const result = await runner.execute({ command: nodeScriptCommand(script) });
     const raw = fs.readFileSync(result.logPaths!.stdout, 'utf8');
 
     expect(result.stdout).not.toContain(mixed);
@@ -435,7 +454,7 @@ describe('A9-02 regression: honest termination and logs', () => {
     try {
       process.env.A9_BUILD_MODE = secret;
       for (const background of [false, true]) {
-        const result = await runner.execute({ command: JSON.stringify(process.execPath) + ' -e ' + JSON.stringify(script), background });
+        const result = await runner.execute({ command: nodeScriptCommand(script), background });
         if (background) {
           expect(result.status).toBe('background_started');
           await new Promise((resolve) => setTimeout(resolve, 300));
