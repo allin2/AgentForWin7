@@ -631,7 +631,13 @@ export class OpenAICompatibleProvider {
             // Close the original error-response socket rather than leaving that lease idle.
             errorSocket?.destroy();
           };
-          interruptHttpError = () => finishHttpError(' [response interrupted]');
+          interruptHttpError = () => {
+            // A dropped body can end inside a credential, before full-key redaction
+            // can match it. Report only status and interruption in that case.
+            if (settled) return;
+            retainedBytes = 0;
+            finishHttpError('[response interrupted]');
+          };
           res.on('data', (chunk: Buffer) => {
             if (settled) return;
             armNoDataTimer();

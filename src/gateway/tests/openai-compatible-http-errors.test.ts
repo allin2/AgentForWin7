@@ -217,9 +217,20 @@ describe('A9-49 bounded HTTP error receipt (loopback only)', () => {
     const error = await within(failure(call.pending));
     expect(error.statusCode).toBe(status);
     expect(error.code).toBe(status === 503 ? ErrorCode.INVALID_FRAME : ErrorCode.AUTH_INVALID_CREDENTIALS);
-    expect(error.message).toContain('partial ***redacted-api-key*** [response interrupted]');
+    expect(error.message).toBe(`Server returned status ${status}: [response interrupted]`);
     expect(error.message).not.toContain(API_KEY);
     expect(hits).toBe(status === 503 ? 2 : 1);
+    await cleaned(call);
+  });
+
+  it('does not disclose a credential prefix when a response drops in the middle of the key', async () => {
+    const partialKey = API_KEY.slice(0, -3);
+    handler = (res) => { res.writeHead(401); res.write(`credential ${partialKey}`); later(() => res.destroy()); };
+    const call = send();
+    const error = await within(failure(call.pending));
+    expect(error).toMatchObject({ statusCode: 401, code: ErrorCode.AUTH_INVALID_CREDENTIALS });
+    expect(error.message).toBe('Server returned status 401: [response interrupted]');
+    expect(error.message).not.toContain(partialKey);
     await cleaned(call);
   });
 
