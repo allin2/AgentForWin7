@@ -15,6 +15,7 @@
 
 ## 当前交付、进行中的工作与授权
 
+- [A9-46](tasks/A9_46_WORKBENCH_MINIMAL_INCREMENT.md#58-gpt-重置模式真实-git-与异常链路本地补证准备2026-11-05)：`A9_46_DEVELOPER_VERIFIED`。本机仍为 main `836a96fe…` 加未提交改动。Mac 真实产品补证复现并修复两处工具卡误报：读取失败原显示“已读取”，问询取消原显示“执行成功”。仅修改 Renderer 的已有事件映射，不改 Core、IPC、Schema、持久化或权限合同。七模块编译/静态门、49 项定向合同和两个 Electron 22.3.27 进程共 9 组真实 Git/F/G/SQLite/重启检查通过；8 次回环请求，外部模型 0，活动 task/turn/run 均为 0，测试沙箱已清理。修复前 FAIL、驱动准备失败与新直接结果集中在 `outputs/a9-46-workbench-r1/negative-r1/RESULT.json`。原 Win7 source `cf47a0fd…` / ZIP `dde21d57…` 的 §5.7 证据保持 DEV_CHANNEL：11 组真实产品、8 组显式桩交互和六个 CSS 视口；该包未含本次修复，不能继承为新字节 Win7 PASS。新 Windows 开发 ZIP 与本次修复的 Win7 运行尚未执行，`windowsExecutableInputsReady=false`。原生 125% DPI、真实 Shell 停止、未知生命周期终态、真实外部模型、正式门 A/B、Mac 提交、推送与发布仍为 NOT_PERFORMED。后续投入建议见 `negative-r1/NEXT_STEP.md`。
 - [A9-43](tasks/A9_43_ALPHA3_WIN7_56_RELEASE.md)：`v0.3.0-alpha.3` / WIN7-56 已签发并发布，任务 COMPLETE；当前结果见 §8.29–§8.36。
   同源 `251dbdf4059bfd484d7bfaf1af4945bf45b4995e`、r16 ZIP `11f85358…` 五阶段全部直接完成，结果 DEV_CHANNEL_COMPLETE：batch2、后台恢复、便携、完整 Office/轻量工具/UI、真实模型。
   batch2 `2bedc0ce…` 为 10/10 阶段、37/37 用例、67/67 断言及 GPU PASS，0 失败尝试；1582 文件回收校验、R8 收尾通过。其他阶段逐一核对绑定与收尾，便携及 Office 四张截图已检查。

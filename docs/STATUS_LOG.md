@@ -1,5 +1,39 @@
 # 项目状态流水（历史）
 
+## A9-46 真实异常终态补证与本地修复（2026-11-06 UTC）
+
+负责人确认 GPT 重置模式，由主代理作为经理推进本地补证。
+基线保持 main `836a96fe…` 加原 dirty/untracked。
+Terra 员工完成只读分析；主代理用真实入口复现并修复两个 UI 映射缺口。
+读取不存在文件原显示“已读取”，取消问询原显示“执行成功”。
+修复只识别既有 JSON 异常结果和顶层取消标志，不改事件或权限合同。
+Mac 真实 main/preload/IPC/runtime/Git/SQLite 两进程共 9 组通过。
+覆盖 Git 三种状态、目录失败与重试、读取失败、问询取消、审批拒绝零执行和重启恢复。
+49 项定向合同通过；8 次回环请求，外部模型 0，活动生命周期 0，测试沙箱已清理。
+初轮驱动准备错误与修复前真实产品 FAIL 保留。
+原 Windows 包与 Win7 证据未改；本次修复的新 Windows 开发包、Win7 运行、原生 125% DPI、
+正式门 A/B、提交、推送与发布仍为 NOT_PERFORMED。
+准确结果与后续投入建议见 [A9-46 §5.8](tasks/A9_46_WORKBENCH_MINIMAL_INCREMENT.md#58-gpt-重置模式真实-git-与异常链路本地补证准备2026-11-05)。
+
+## A9-46 Win7 开发级补证完成（2026-11-05 UTC）
+
+负责人对 30 分钟、最多两次、外部模型为 0 的准确材料回复“批”。
+主代理在 DCCS-CHAIZL-PC 的普通用户 agent / Session 1 执行 run `a67fab44…`。
+开发包来自 Win10 回传，绑定 source `cf47a0fd…`、ZIP `dde21d57…`、manifest `6b09111a…`。
+候选外 Electron 加载未改的包内真实 main/preload/IPC/runtime/SQLite，两个产品进程共 11 组通过。
+实际包内 Renderer 加显式内存桩的 A–G 交互 8 组通过，六个准确 CSS 视口与抽屉焦点检查通过。
+SQLite 3.43.1、只读工具、运行中切换锁、历史耗时/查找、完整重启零重放均有直接开发级证据。
+Git/错误三态/工具异常终态的桩证据单列，不写成真实后端结果。
+显示器 scaleFactor=1；125% 等效可视区不升级为 Windows 原生 125% DPI 结果。
+首轮因 Windows 包的 resources/app 遮蔽显式驱动而超时，FAIL 与零请求原始记录保留。
+确认进程/任务均为 0 后，只调整候选外运行时装配，同窗口第二次运行完成。
+回环请求共 3 次，外部模型为 0；后检进程 0、任务 0、锁已释放，测试临时目录条目为 0。
+原 ZIP 与产品字节未变，未重编原生组件；Mac HEAD、其他 dirty、历史材料均保留。
+证据类别为 DEV_CHANNEL，阶段保持 A9_46_DEVELOPER_VERIFIED；正式门 A/B、原生 125% DPI、
+真实外部模型、Mac 提交、推送和发布为 NOT_PERFORMED。
+准确绑定见 [A9-46 §5.7](tasks/A9_46_WORKBENCH_MINIMAL_INCREMENT.md#57-局域网回收与-win7-开发级补证2026-11-05)
+及本机 `outputs/a9-46-workbench-r1/win7-r1/RESULT.json`。
+
 ## 运维类调整改记本流水，不再立 ADR（2026-10-26）
 
 负责人裁决“不改规则，只改做法”。AGENTS.md §4 只要求接口、数据格式、兼容性、安全模型类决定新增 ADR。

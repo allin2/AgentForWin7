@@ -234,6 +234,8 @@ summary:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--focus
 .conversation-dot { display: inline-block; flex: 0 0 auto; width: 7px; height: 7px; margin-right: 6px; border-radius: 50%; background: var(--idle-dot); vertical-align: middle; }
 .conversation-dot.running { background: var(--amber); }
 .conversation-dot.waiting_approval { background: var(--amber); }
+.conversation-dot.waiting_input { background: var(--amber); }
+.conversation-waiting-note { margin: 2px 9px 6px; font-size: 11px; line-height: 1.5; }
 .conversation-dot.interrupted { background: var(--red); }
 .conversation-current-actions { display: grid; flex: 0 0 auto; grid-template-columns: 1fr 1fr; border-top: 1px solid var(--line); }
 .conversation-current-actions button { min-height: 30px; border: 0; border-right: 1px solid var(--line); background: transparent; color: var(--muted); font-size: 12px; }
@@ -305,6 +307,14 @@ summary:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--focus
 .global-error { flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 22px; border-bottom: 1px solid var(--red-line); background: var(--redbg); color: var(--red); }
 .global-error button { flex: 0 0 auto; min-height: 36px; padding: 0 11px; border: 1px solid var(--red); border-radius: 7px; background: transparent; color: var(--red); }
 .conversation { flex: 1 1 auto; min-height: 0; overflow: auto; scroll-padding: 16px; padding: 34px max(28px, calc((100% - 760px) / 2)); scrollbar-gutter: stable; overscroll-behavior: contain; }
+.conversation-find { flex: 0 0 auto; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 8px 14px; border-bottom: 1px solid var(--line); background: var(--raised); font-size: 12px; }
+.conversation-find[hidden] { display: none; }
+.conversation-find input { flex: 1 1 160px; min-width: 100px; width: 100%; padding: 6px 8px; border: 1px solid var(--line-strong); border-radius: 6px; background: var(--bg); color: var(--text); }
+.conversation-find button { min-height: 30px; padding: 3px 8px; border: 1px solid var(--line-strong); border-radius: 6px; background: var(--bg); color: var(--text); }
+.conversation-find small { flex-basis: 100%; color: var(--muted); }
+.conversation-find + .conversation ::selection { background: var(--amberbg); color: var(--text); }
+.turn-request-head { flex-wrap: wrap; }
+.turn-duration { white-space: nowrap; }
 .session-view { display: none !important; }
 .welcome { max-width: 620px; margin: clamp(20px, 6vh, 56px) auto 0; text-align: center; }
 .welcome-glyph { display: grid; place-items: center; width: 60px; height: 60px; margin: 0 auto 18px; border: 1px solid var(--line-strong); border-radius: 14px; background: var(--raised); color: var(--accent); box-shadow: 0 10px 30px rgba(31, 35, 40, .08); }
@@ -352,6 +362,7 @@ summary:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--focus
 .status-tag.success { background: var(--successbg); color: var(--success); }
 .status-tag.failed { background: var(--redbg); color: var(--red); }
 .status-tag.stopped, .status-tag.interrupted { background: var(--neutralbg); color: var(--neutral); }
+.status-tag.denied { background: var(--amberbg); color: var(--amber); }
 .activity-detail { margin: 0; padding: 7px 9px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); color: var(--text-secondary); font: 12px/1.55 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 220px; overflow: auto; }
 .approval-record { display: grid; grid-template-columns: 14px 1fr; gap: 10px; margin: 0; padding: 9px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); color: var(--text-secondary); font-size: 12px; }
 .approval-record::before { content: ""; width: 9px; height: 9px; margin-top: 4px; border-radius: 50%; background: var(--neutral); }

@@ -77,6 +77,9 @@ describe('A9 unified desktop workbench contract', () => {
   const html = fs.readFileSync(path.join(productRoot, 'renderer/workbench.html'), 'utf8');
   const css = fs.readFileSync(path.join(productRoot, 'renderer/a9-workbench.css'), 'utf8');
   const script = fs.readFileSync(path.join(productRoot, 'renderer/a9-workbench.js'), 'utf8');
+  // VM 切片必须带入生产依赖；不为测试的截取边界改写产品实现。
+  const outcomeLabels = script.slice(script.indexOf('  const OUTCOME_LABELS ='), script.indexOf('  const state ='));
+  const errorFormatter = script.slice(script.indexOf('  function errorMessage('), script.indexOf('  /** ADR-0114 显示上限'));
   const main = fs.readFileSync(path.join(productRoot, 'main.js'), 'utf8');
   const smokeDriver = fs.readFileSync(path.join(__dirname, 'a9-06-driver-entry.cjs'), 'utf8');
 
@@ -400,8 +403,21 @@ describe('A9 unified desktop workbench contract', () => {
     vm.runInNewContext(source + ';this.classify = toolEndStatus;', context);
     expect(context.classify({ shell: { exitCode: 1 } })[0]).toBe('failed');
     expect(context.classify({ result: 'Tool execution error: file not found' })[0]).toBe('failed');
+    // A9-46 real tool_end: execution exceptions are serialized into result,
+    // while cancelling ask_user emits a top-level cancelled flag.
+    expect(context.classify({ toolName: 'read', result: JSON.stringify({ error: { code: 'ENOENT', message: 'missing file' } }) }))
+      .toEqual(['failed', '失败']);
+    expect(context.classify({ toolName: 'read', result: JSON.stringify({ error: { code: 'ENOENT', message: 'x'.repeat(1200) } }).slice(0, 1000) })[0])
+      .toBe('failed');
+    expect(context.classify({ toolName: 'ask_user', cancelled: true, sideEffects: 0 }))
+      .toEqual(['stopped', '已停止']);
+    expect(context.classify({ toolName: 'read', result: JSON.stringify({ content: '{"error":{"message":"user text"},"cancelled":true}' }) }))
+      .toEqual(['success', '已读取']);
     expect(context.classify({ residueRisk: true })[1]).toBe('清理未确认');
     expect(context.classify({ shell: { status: 'cancelled' } })[0]).toBe('stopped');
+    expect(context.classify({ denied: true })).toEqual(['denied', '已拒绝']);
+    expect(context.classify({ toolName: 'read', result: '文件内容' })).toEqual(['success', '已读取']);
+    expect(context.classify({ toolName: 'read', error: '读取失败' })[0]).toBe('failed');
     expect(context.classify({ shell: { exitCode: null, status: 'unknown' } })[0]).toBe('interrupted');
     expect(context.classify({ shell: { exitCode: 0, status: 'completed' } })[0]).toBe('success');
   });
@@ -443,14 +459,14 @@ describe('A9 unified desktop workbench contract', () => {
       text: (id: string, value: any) => { const target = nodes.get(id); if (target) target.textContent = String(value == null ? '' : value); },
       renderConversation: jest.fn(), openWorkspaceFile: jest.fn(),
     };
-    vm.runInNewContext(`${labels}\n${normalizeAndLoad}\n${timeline};this.load = loadConversationEvents;this.reset = resetConversationEvents;`, context);
+    vm.runInNewContext(`${outcomeLabels}\n${errorFormatter}\n${labels}\n${normalizeAndLoad}\n${timeline};this.load = loadConversationEvents;this.reset = resetConversationEvents;`, context);
 
     await context.load();
     const firstTimeline = nodes.get('a9-timeline')!;
     expect(Array.from(state.inspectorEvents.keys()).sort((a: any, b: any) => a - b)).toEqual([11, 12, 13, 14, 15]);
     expect(firstTimeline.children).toHaveLength(5);
     expect(firstTimeline.children.map((item: any) => item.textContent)).toEqual([
-      'provider.configure', '任务开始', '运行命令 echo ok …', '运行命令  · exit=0', '任务完成 · completed',
+      'provider.configure', '任务开始', '正在运行命令 echo ok', '运行命令  · 执行成功 · exit=0', '任务完成',
     ]);
     expect(nodes.get('a9-shell-output')!.textContent).toContain('session-a-output');
 
@@ -688,7 +704,7 @@ describe('A9 unified desktop workbench contract', () => {
       ingestEvents: (xs: any[]) => ingested.push(...xs), renderConversation: render, renderTimeline,
       eventsForInspector: () => ingested.slice().sort((a, b) => a.eventId - b.eventId),
       EVENT_GLOBAL_LIMIT: 2000 };
-    vm.runInNewContext(source + ';this.load = loadConversationEvents;', context);
+    vm.runInNewContext(errorFormatter + source + ';this.load = loadConversationEvents;', context);
     await context.load();
     expect(state.eventsBeforeId).toBe(301);
     await context.load(true);

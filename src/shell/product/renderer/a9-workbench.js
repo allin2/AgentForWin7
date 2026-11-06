@@ -51,6 +51,14 @@
     historyExpanded: false,
     explorerSessionId: null,
     explorerPath: '',
+    eventsLoaded: false,
+    gitWorkspace: null,
+    findMatches: [],
+    findIndex: -1,
+    findObserver: null,
+    findTimer: null,
+    gitRequest: 0,
+    explorerRequest: 0,
     viewer: null,
     running: false,
     outputGapRequests: new Set(),
@@ -373,6 +381,88 @@
     syncComposer();
   }
 
+  // 原生 DOM Range 只索引当前已加载正文，不请求更多历史或改写正文节点。
+  function refreshConversationFind(navigate = false) {
+    if (el('conversation-find').hidden) return;
+    const query = el('conversation-find-input').value;
+    const matches = [];
+    if (query) {
+      const pattern = new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
+      const walker = document.createTreeWalker(el('a9-task-stream'), root.NodeFilter.SHOW_TEXT, {
+        acceptNode(node) {
+          return node.parentElement.closest('button, [hidden], [aria-hidden="true"]')
+            ? root.NodeFilter.FILTER_REJECT : root.NodeFilter.FILTER_ACCEPT;
+        },
+      });
+      let node;
+      while ((node = walker.nextNode())) {
+        pattern.lastIndex = 0;
+        let match;
+        while ((match = pattern.exec(node.data))) {
+          matches.push({ node, start: match.index, end: match.index + match[0].length });
+        }
+      }
+    }
+    state.findMatches = matches;
+    state.findIndex = matches.length ? Math.max(0, Math.min(state.findIndex, matches.length - 1)) : -1;
+    selectConversationMatch(navigate);
+  }
+
+  function selectConversationMatch(navigate) {
+    const total = state.findMatches.length;
+    const hasQuery = Boolean(el('conversation-find-input').value);
+    text('conversation-find-count', hasQuery ? `${total ? state.findIndex + 1 : 0} / ${total} 处匹配` : '输入查找内容');
+    el('conversation-find-prev').disabled = total === 0;
+    el('conversation-find-next').disabled = total === 0;
+    const selection = root.getSelection();
+    if (selection.anchorNode && el('a9-task-stream').contains(selection.anchorNode)) selection.removeAllRanges();
+    if (!total) return;
+    const match = state.findMatches[state.findIndex];
+    const range = document.createRange();
+    range.setStart(match.node, match.start);
+    range.setEnd(match.node, match.end);
+    selection.removeAllRanges();
+    selection.addRange(range);
+    if (!navigate) return;
+    let parent = range.startContainer.parentElement;
+    while (parent && parent !== el('conversation')) {
+      if (parent.tagName === 'DETAILS') parent.open = true;
+      parent = parent.parentElement;
+    }
+    state.streamFollow = false;
+    const scroller = el('conversation');
+    const rect = range.getBoundingClientRect();
+    const viewport = scroller.getBoundingClientRect();
+    scroller.scrollTop += rect.top - viewport.top - scroller.clientHeight / 2;
+  }
+
+  function openConversationFind() {
+    if (navigationIsDrawer() && el('navigation-rail').classList.contains('open')) closeNavigation();
+    if (inspectorIsDrawer() && el('inspector').classList.contains('open')) closeInspector();
+    el('conversation-find').hidden = false;
+    el('conversation-find-open').setAttribute('aria-expanded', 'true');
+    refreshConversationFind();
+    el('conversation-find-input').focus();
+    el('conversation-find-input').select();
+  }
+
+  function closeConversationFind() {
+    el('conversation-find').hidden = true;
+    el('conversation-find-open').setAttribute('aria-expanded', 'false');
+    state.findMatches = [];
+    state.findIndex = -1;
+    const selection = root.getSelection();
+    if (selection.anchorNode && el('conversation').contains(selection.anchorNode)) selection.removeAllRanges();
+    el('task-prompt').focus();
+  }
+
+  function moveConversationMatch(direction) {
+    refreshConversationFind();
+    if (!state.findMatches.length) return;
+    state.findIndex = (state.findIndex + direction + state.findMatches.length) % state.findMatches.length;
+    selectConversationMatch(true);
+  }
+
   // ------------------------------------------------------------------
   // ADR-0114 事件数据层：归一化、去重并入、按轮次组织。
   // ------------------------------------------------------------------
@@ -563,6 +653,9 @@
     state.eventsBeforeId = null;
     state.eventsError = '';
     state.eventsLoading = false;
+    state.eventsLoaded = false;
+    state.findIndex = -1;
+    state.findMatches = [];
     state.eventsStatusNote = null;
     state.streamDom = new Map();
     state.pendingToolLabel = null;
@@ -589,7 +682,7 @@
       const response = await a9.queryEvents({ conversationId: requestedConversationId, limit,
         ...(older && state.eventsBeforeId ? { beforeEventId: state.eventsBeforeId } : {}) });
       if (requestedConversationId !== state.activeConversationId || generation !== state.historyGeneration) return;
-      if (!response || response.ok !== true) throw new Error('EVENT_HISTORY_UNAVAILABLE');
+      if (!response || response.ok !== true) throw new Error(errorMessage(response, 'EVENT_HISTORY_UNAVAILABLE'));
       const normalized = (response.events || []).map(normalizeQueriedEvent).filter(Boolean);
       ingestEvents(normalized, older);
       if (older || state.eventsBeforeId === null) {
@@ -598,9 +691,11 @@
         if (oldestRetained) state.eventsBeforeId = oldestRetained.eventId;
       }
       state.eventsError = '';
+      state.eventsLoaded = true;
     } catch (_error) {
       if (requestedConversationId === state.activeConversationId && generation === state.historyGeneration) {
-        state.eventsError = '过程记录加载失败；已有请求和结果仍保留。';
+        // 异常可能来自传输层，不把未经脱敏的 message 带入会话界面。
+        state.eventsError = '过程记录加载失败：未能获取记录，可重试。已有请求和结果仍保留。';
       }
     } finally {
       if (requestedConversationId === state.activeConversationId && generation === state.historyGeneration) {
@@ -674,14 +769,25 @@
 
   function toolEndStatus(data) {
     const shell = data.shell || {};
+    let resultError = false;
+    if (typeof data.result === 'string') {
+      try {
+        const result = JSON.parse(data.result);
+        resultError = Boolean(result && typeof result === 'object' && result.error);
+      } catch (_error) {
+        // The runtime caps result at 1000 characters, which can truncate its
+        // exception envelope. File contents remain nested in a content field.
+        resultError = /^\s*\{\s*"error"\s*:\s*\{/.test(data.result);
+      }
+    }
     if (data.residueRisk || shell.residueRisk) return ['failed', '清理未确认'];
-    if (['cancelled', 'canceled', 'interrupted'].includes(shell.status)) return ['stopped', '已停止'];
-    if (data.error || ['failed', 'error', 'timeout', 'timed_out'].includes(shell.status)
+    if (data.cancelled === true || ['cancelled', 'canceled', 'interrupted'].includes(shell.status)) return ['stopped', '已停止'];
+    if (data.denied) return ['denied', '已拒绝'];
+    if (data.error || resultError || ['failed', 'error', 'timeout', 'timed_out'].includes(shell.status)
         || (typeof shell.exitCode === 'number' && shell.exitCode !== 0)
         || /^Tool execution error:|^Error:/i.test(String(data.result || ''))) return ['failed', '失败'];
-    if (data.denied) return ['stopped', '已停止'];
     if (data.shell && shell.status !== 'completed' && shell.status !== 'success' && shell.exitCode !== 0) return ['interrupted', '结果未确认'];
-    return ['success', '成功'];
+    return ['success', ({ read: '已读取', list: '已列出', search: '已搜索' })[data.toolName] || '执行成功'];
   }
 
   function timelineEntryLabel(event) {
@@ -689,19 +795,16 @@
     const shell = data.shell && data.shell.schemaVersion === 1 ? data.shell : null;
     switch (event.type) {
       case 'turn_started': return '任务开始';
-      case 'turn_completed': return data.outcome === 'cancelled' ? '已停止' : `任务完成 · ${data.outcome || '-'}`;
+      case 'turn_completed': return `任务${OUTCOME_LABELS[data.outcome] || '结束（结果未确认）'}`;
       case 'turn_failed': return `任务失败 · ${String(data.error || '').slice(0, 120)}`;
       case 'model_note': return '模型说明';
       case 'model_chunk': return '模型输出（汇总）';
       case 'plan_updated': return '更新计划';
-      case 'approval_required': return `请求批准 · ${data.toolName || '-'}`;
+      case 'approval_required': return `准备执行 · 等待批准 · ${data.toolName || '-'}`;
       case 'approval_resolved': return `审批${data.decision === 'approved' ? '已批准' : '已拒绝'} · ${data.toolName || '-'}`;
-      case 'tool_start': return `${toolHeadline(data)} …`;
+      case 'tool_start': return `正在${toolHeadline(data)}`;
       case 'tool_end':
-        if (shell && shell.exitCode !== undefined) return `${toolHeadline(data)} · exit=${shell.exitCode}`;
-        if (data.error) return `${toolHeadline(data)} · 失败`;
-        if (data.denied) return `${toolHeadline(data)} · 已拒绝`;
-        return toolHeadline(data);
+        return `${toolHeadline(data)} · ${toolEndStatus(data)[1]}${shell && shell.exitCode !== undefined ? ` · exit=${shell.exitCode}` : ''}`;
       default: return event.type || 'event';
     }
   }
@@ -725,8 +828,11 @@
     const requestLabel = document.createElement('strong');
     requestLabel.textContent = '你';
     const requestTime = document.createElement('span');
+    const requestDuration = document.createElement('span');
+    requestDuration.className = 'turn-duration';
     requestHead.appendChild(requestLabel);
     requestHead.appendChild(requestTime);
+    requestHead.appendChild(requestDuration);
     const requestBody = document.createElement('div');
     requestBody.className = 'turn-request-body';
     request.appendChild(requestHead);
@@ -740,6 +846,7 @@
       key,
       root: rootArticle,
       requestTime,
+      requestDuration,
       requestBody,
       progressEl: progress,
       renderedEvents: 0,
@@ -816,7 +923,7 @@
 
   /** A9-30：运行中的工具项显示已运行时长，输出到达后在活动卡呈现。 */
   function markItemRunning(item, data, startedAt) {
-    item.startedAt = startedAt || Date.now();
+    item.startedAt = Number.isFinite(startedAt) ? startedAt : 0;
     const elapsed = document.createElement('span');
     elapsed.className = 'activity-elapsed';
     item.li.firstChild.insertBefore(elapsed, item.tag);
@@ -832,9 +939,10 @@
     tickRunningItems();
   }
 
-  function settleItem(item) {
+  function settleItem(item, endedAt) {
     state.runningItems.delete(item);
-    if (item.elapsedEl && item.startedAt) item.elapsedEl.textContent = formatElapsed(Date.now() - item.startedAt);
+    if (item.elapsedEl) item.elapsedEl.textContent = item.startedAt && Number.isFinite(endedAt) && endedAt >= item.startedAt
+      ? `耗时 ${formatElapsed(endedAt - item.startedAt)}` : '';
     if (item.pendingNoteEl) { item.pendingNoteEl.remove(); item.pendingNoteEl = null; }
   }
 
@@ -842,7 +950,8 @@
     const now = Date.now();
     state.runningItems.forEach((item) => {
       if (!item.li.parentNode) { state.runningItems.delete(item); return; }
-      if (item.elapsedEl) item.elapsedEl.textContent = `已运行 ${formatElapsed(now - item.startedAt)}`;
+      if (item.elapsedEl) item.elapsedEl.textContent = item.startedAt && now >= item.startedAt
+        ? `执行中 · 已运行 ${formatElapsed(now - item.startedAt)}` : '';
     });
   }
 
@@ -900,7 +1009,7 @@
       case 'approval_required': {
         closeActivityGroup(block);
         block.progressEl.appendChild(buildApprovalRecord('pending', `需要批准：${data.toolName || 'operation'}`,
-          data.summary || data.reason || ''));
+          `准备执行，等待批准。${data.summary || data.reason || ''}`));
         break;
       }
       case 'approval_resolved': {
@@ -915,7 +1024,7 @@
         ensureActivityGroup(block);
         if (!block.groupEl.dataset.eventId) block.groupEl.dataset.eventId = String(event.eventId);
         const item = addActivityItem(block, data, 'running', '执行中');
-        markItemRunning(item, data, Date.parse(event.timestamp || '') || Date.now());
+        markItemRunning(item, data, Date.parse(event.timestamp || ''));
         if (!block.outputItems) block.outputItems = new Map();
         if (data.callId) { block.pendingItems.set(String(data.callId), item); block.outputItems.set(String(data.callId), item); }
         else block.pendingItems.set('__last__', item);
@@ -967,7 +1076,7 @@
         const item = block.pendingItems.get(key) || (data.callId ? block.pendingItems.get('__last__') : null);
         if (item) {
           block.pendingItems.delete(key);
-          settleItem(item);
+          settleItem(item, Date.parse(event.timestamp || ''));
           const [status, label] = toolEndStatus(data);
           item.tag.className = `status-tag ${status}`;
           item.tag.textContent = label;
@@ -992,6 +1101,7 @@
     const title = document.createElement('p');
     title.className = 'plan-title';
     title.textContent = '计划';
+    title.title = '计划仅记录步骤，不代表工具已执行成功。';
     card.appendChild(title);
     const steps = document.createElement('ol');
     steps.className = 'plan-steps';
@@ -1183,6 +1293,14 @@
       if (fact.requestPrompt) block.requestBody.textContent = clampText(fact.requestPrompt, NOTE_LIMIT);
       if (fact.createdAt) block.requestTime.textContent = new Date(fact.createdAt).toLocaleString();
     }
+    // 仅使用同轮事件；缺失、无效或反向时间不能以 updatedAt 或当前时钟补算。
+    const turnId = block.root.dataset.turnId;
+    const started = events.find((event) => event.turnId === turnId && event.type === 'turn_started');
+    const ended = started && events.find((event) => event.turnId === turnId && event.eventId > started.eventId
+      && (event.type === 'turn_completed' || event.type === 'turn_failed'));
+    const duration = ended ? Date.parse(ended.timestamp) - Date.parse(started.timestamp) : NaN;
+    block.requestDuration.textContent = Number.isFinite(duration) && duration >= 0
+      ? `耗时 ${Math.floor(duration / 1000)} 秒` : '';
     for (; block.renderedEvents < events.length; block.renderedEvents += 1) {
       appendEventNode(block, events[block.renderedEvents]);
       block.renderedIds.push(events[block.renderedEvents].eventId);
@@ -1198,7 +1316,7 @@
       block.pendingItems.forEach((item) => {
         settleItem(item);
         item.tag.className = 'status-tag interrupted';
-        item.tag.textContent = '已中断';
+        item.tag.textContent = '结果未确认';
       });
       block.pendingItems = new Map();
       closeActivityGroup(block);
@@ -1508,6 +1626,13 @@
     const filePaths = new Set();
     let rawOutput = '';
     const visible = eventsForInspector().slice(-60);
+    const emptyText = (subject) => state.eventsError
+      ? `${state.eventsError}点击刷新可重试。`
+      : state.eventsLoading ? `${subject}正在读取…`
+        : !state.eventsLoaded && !visible.length ? `${subject}尚未读取，点击刷新。`
+          : `已加载记录中没有${subject}项。`;
+    text('activity-empty', visible.length ? (state.eventsError || '') : emptyText('活动'));
+    text('file-empty', emptyText('文件'));
     timeline.dataset.displayRule = 'LAST_60_BY_EVENT_ID_ASC';
     timeline.dataset.displayRows = String(visible.length);
     visible.forEach((event) => {
@@ -1537,7 +1662,7 @@
       fileList.appendChild(item);
     });
     el('file-empty').hidden = filePaths.size > 0;
-    if (rawOutput) text('a9-shell-output', rawOutput.slice(-64 * 1024));
+    text('a9-shell-output', rawOutput ? rawOutput.slice(-64 * 1024) : emptyText('工具输出'));
   }
 
   function checkpointKey(checkpoint) { return `${checkpoint.createdAt}\u0000${checkpoint.turnId}`; }
@@ -1729,6 +1854,11 @@
       const error = document.createElement('li');
       error.textContent = state.checkpointError;
       list.appendChild(error);
+    } else if (!total) {
+      const empty = document.createElement('li');
+      empty.textContent = Array.isArray(snapshot.checkpoints)
+        ? '没有改动记录项。' : '改动记录尚未读取，点击刷新。';
+      list.appendChild(empty);
     }
     if (shown < total) {
       const item = document.createElement('li');
@@ -1782,6 +1912,7 @@
   function conversationStatusLabel(activity) {
     if (activity === 'running') return '运行中';
     if (activity === 'waiting_approval') return '待审批';
+    if (activity === 'waiting_input') return '待回答';
     if (activity === 'interrupted') return '已中断';
     return '空闲';
   }
@@ -1830,10 +1961,15 @@
     const meta = document.createElement('small');
     const updated = conversation.updatedAt ? new Date(conversation.updatedAt).toLocaleString() : '';
     const status = conversationStatusLabel(conversation.activity);
+    const controls = snapshot.conversationControls || {};
+    const lockReason = !controls.canSwitch ? `${controls.reason || '当前任务尚未结束'}，停止或完成后可切换` : '';
+    const reason = archived ? '已归档，请先恢复对话'
+      : conversation.sessionId === snapshot.activeConversationId ? `当前对话${lockReason ? `；${lockReason}` : ''}`
+        : lockReason;
     // 状态由圆点表达；可见时间为短格式，状态与完整时间进入无障碍名称和悬停提示。
     meta.textContent = shortConversationTime(conversation.updatedAt);
-    button.setAttribute('aria-label', `${conversation.title || '新对话'}，${status}${updated ? `，更新于 ${updated}` : ''}`);
-    button.title = `${conversation.title || '新对话'}\n${status}${updated ? ` · ${updated}` : ''}`;
+    button.setAttribute('aria-label', `${conversation.title || '新对话'}，${status}${updated ? `，更新于 ${updated}` : ''}${reason ? `，${reason}` : ''}`);
+    button.title = `${conversation.title || '新对话'}\n${status}${updated ? ` · ${updated}` : ''}${reason ? `\n${reason}` : ''}`;
     button.appendChild(title);
     button.appendChild(meta);
     if (!archived) button.addEventListener('click', () => { void switchConversation(conversation.sessionId); });
@@ -1844,6 +1980,10 @@
       restore.className = 'conversation-restore';
       restore.textContent = '恢复';
       restore.disabled = !(snapshot.conversationControls && snapshot.conversationControls.canSwitch);
+      if (restore.disabled) {
+        restore.title = `${controls.reason || '当前任务尚未结束'}，停止或完成后可恢复`;
+        restore.setAttribute('aria-label', `恢复 ${conversation.title || '对话'}，${restore.title}`);
+      }
       restore.addEventListener('click', () => { void restoreConversation(conversation.sessionId); });
       item.appendChild(restore);
     }
@@ -1862,12 +2002,20 @@
     const controls = snapshot.conversationControls || { canSwitch: false, maxActive: 16 };
     const activeList = el('conversation-list');
     const archivedList = el('conversation-archive-list');
+    const waitingList = el('conversation-waiting-list');
     activeList.textContent = '';
     archivedList.textContent = '';
-    const live = active.filter((item) => item.activity && item.activity !== 'idle');
-    const older = active.filter((item) => !(item.activity && item.activity !== 'idle'));
+    waitingList.textContent = '';
+    const waiting = active.filter((item) => ['waiting_approval', 'waiting_input', 'interrupted'].includes(item.activity)
+      || (!controls.canSwitch && item.sessionId !== snapshot.activeConversationId && item.activity !== 'running'));
+    const available = active.filter((item) => !waiting.includes(item));
+    const live = available.filter((item) => item.activity && item.activity !== 'idle');
+    const older = available.filter((item) => !(item.activity && item.activity !== 'idle'));
     appendConversationGroup(activeList, '进行中', live, snapshot);
     appendConversationGroup(activeList, '更早', older, snapshot);
+    waiting.forEach((item) => appendConversationRow(waitingList, item, snapshot, false));
+    text('conversation-waiting-count', waiting.length);
+    el('conversation-waiting-section').hidden = waiting.length === 0;
     archived.forEach((item) => appendConversationRow(archivedList, item, snapshot, true));
     if (query && visible.length === 0) {
       const empty = document.createElement('li');
@@ -2005,6 +2153,11 @@
     surface.dataset.a9Status = snapshot.status || 'unknown';
     const ready = snapshot.status === 'ready';
     const workspace = snapshot.workspaceRoot || '';
+    if (state.gitWorkspace !== workspace) {
+      state.gitWorkspace = workspace;
+      state.gitRequest += 1;
+      text('a9-git-status', 'Git 状态尚未读取，点击刷新。');
+    }
     text('workspace-name', workspace ? pathName(workspace) : '选择本地工作区');
     text('workspace-path', workspace || '尚未选择');
     text('workspace-label', workspace ? pathName(workspace) : '未连接工作区');
@@ -2332,14 +2485,31 @@
 
   async function refreshWorkspace(pathValue) {
     if (!state.explorerSessionId) return;
-    const response = await api.listWorkspace(state.explorerSessionId, pathValue || '');
-    if (!response || response.ok === false || !response.result) return;
+    const request = ++state.explorerRequest;
+    const sessionId = state.explorerSessionId;
+    const tree = el('workspace-tree');
+    tree.textContent = '';
+    text('workspace-tree-empty', '文件列表正在读取…');
+    el('workspace-tree-empty').hidden = false;
+    let response;
+    try {
+      response = await api.listWorkspace(sessionId, pathValue || '');
+      if (!response || response.ok === false || !response.result) throw response;
+    } catch (error) {
+      if (request !== state.explorerRequest || sessionId !== state.explorerSessionId) return;
+      const message = `文件列表读取失败：${errorMessage(error, '服务未返回目录')}，可重试。`;
+      text('workspace-tree-empty', message);
+      showGlobalError(message, '重试', () => {
+        clearGlobalError();
+        if (sessionId === state.explorerSessionId) void refreshWorkspace(pathValue);
+      });
+      return;
+    }
+    if (request !== state.explorerRequest || sessionId !== state.explorerSessionId) return;
     const listing = response.result;
     state.explorerPath = listing.path || '';
     text('explorer-path', state.explorerPath || '/');
     el('workspace-up').disabled = !state.explorerPath;
-    const tree = el('workspace-tree');
-    tree.textContent = '';
     (listing.entries || []).forEach((entry) => {
       const item = document.createElement('li');
       const button = document.createElement('button');
@@ -2354,6 +2524,7 @@
       tree.appendChild(item);
     });
     el('workspace-tree-empty').hidden = tree.children.length > 0;
+    text('workspace-tree-empty', '此目录没有文件或子目录项。');
   }
 
   async function openWorkspaceFile(filePath, startLine, encoding) {
@@ -2363,9 +2534,14 @@
       ? (sameFile ? el('viewer-encoding').value : '')
       : encoding;
     el('viewer-encoding').value = selectedEncoding || '';
-    const response = await a9.readWorkspaceFile(filePath, startLine || 1, 500, selectedEncoding || undefined);
+    let response;
+    try { response = await a9.readWorkspaceFile(filePath, startLine || 1, 500, selectedEncoding || undefined); }
+    catch (error) { response = { ok: false, error }; }
     if (!response || response.ok === false || !response.result) {
-      showGlobalError(errorMessage(response, '文件读取失败。'), '重试', () => { void openWorkspaceFile(filePath, startLine, selectedEncoding); });
+      showGlobalError(`文件读取失败：${errorMessage(response, '服务未返回文件')}，可重试。`, '重试', () => {
+        clearGlobalError();
+        void openWorkspaceFile(filePath, startLine, selectedEncoding);
+      });
       return;
     }
     state.viewer = response.result;
@@ -2819,8 +2995,14 @@
     catch (error) { response = { ok: false, error }; }
     if (generation !== state.checkpointGeneration) return;
     text('a9-diff', response && response.ok === true
-      ? (response.diff || []).map((item) => `--- ${item.path} (${item.action})\n${item.diffText}`).join('\n') || '此 checkpoint 没有文件变更。'
-      : errorMessage(response, 'Diff 不可用。'));
+      ? (response.diff || []).map((item) => `--- ${item.path} (${item.action})\n${item.diffText}`).join('\n') || '此轮没有文件变更项。'
+      : `Diff 读取失败：${errorMessage(response, '服务未返回改动')}，可重试。`);
+    if (!response || response.ok !== true) {
+      showGlobalError(`Diff 读取失败：${errorMessage(response, '服务未返回改动')}，可重试。`, '重试', () => {
+        clearGlobalError();
+        if (generation === state.checkpointGeneration) void showDiff(turnId, filePath);
+      });
+    }
     if (state.snapshot) renderCheckpoints(state.snapshot);
     openInspector('changes');
   }
@@ -2931,15 +3113,31 @@
   }
 
   async function refreshGit() {
-    const response = await a9.gitStatus();
-    if (!response || response.ok !== true) {
-      text('a9-git-status', errorMessage(response, 'Git 状态不可用。'));
+    const request = ++state.gitRequest;
+    text('a9-git-status', 'Git 状态正在读取…');
+    let response;
+    try {
+      response = await a9.gitStatus();
+      if (!response || response.ok !== true || !response.projection) throw response;
+    } catch (error) {
+      if (request !== state.gitRequest) return;
+      const message = `Git 状态读取失败：${errorMessage(error, '服务未返回状态')}，可重试。`;
+      text('a9-git-status', message);
+      showGlobalError(message, '重试', () => { clearGlobalError(); void refreshGit(); });
       return;
     }
+    if (request !== state.gitRequest) return;
     const git = response.projection;
+    const count = (git.entries || []).length;
+    const divergence = [
+      Number.isSafeInteger(git.ahead) && git.ahead > 0 ? `本地领先 ${git.ahead} 提交` : '',
+      Number.isSafeInteger(git.behind) && git.behind > 0 ? `本地落后 ${git.behind} 提交` : '',
+    ].filter(Boolean);
+    const actions = [count > 0 ? `有 ${count} 处变更，可审阅 Diff`
+      : git.clean === true ? '工作区干净，无需审阅 Diff' : '', ...divergence].filter(Boolean);
     text('a9-git-status', git.isGit === false
       ? (git.degradedReason || '非 Git 工作区')
-      : `${git.branch || '-'} · ${git.clean ? 'clean' : `${(git.entries || []).length} 处变更`} · 外部机制：${(git.externalMechanisms || []).map((item) => item.kind).join(', ') || '无'}`);
+      : `${git.branch || '-'} · ${git.clean ? 'clean' : `${count} 处变更`} · 外部机制：${(git.externalMechanisms || []).map((item) => item.kind).join(', ') || '无'}${actions.length ? `。${actions.join('；')}。` : ''}`);
   }
 
   function providerValues() {
@@ -3320,6 +3518,8 @@
       state.snapshotGeneration += 1;
       syncSnapshotPolling();
       stopLiveTracking();
+      if (state.findObserver) state.findObserver.disconnect();
+      root.clearTimeout(state.findTimer);
       cancelPendingUndo();
     });
     el('workspace-select').addEventListener('click', () => { void chooseWorkspace(); });
@@ -3355,6 +3555,29 @@
       state.searchQuery = String(event.target.value || '').trim().toLocaleLowerCase();
       if (state.snapshot) renderConversationDirectory(state.snapshot);
     });
+    el('conversation-find-open').addEventListener('click', openConversationFind);
+    el('conversation-find-close').addEventListener('click', closeConversationFind);
+    el('conversation-find-input').addEventListener('input', () => {
+      state.findIndex = -1;
+      refreshConversationFind(true);
+    });
+    el('conversation-find-prev').addEventListener('click', () => moveConversationMatch(-1));
+    el('conversation-find-next').addEventListener('click', () => moveConversationMatch(1));
+    el('conversation-find').addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); closeConversationFind(); }
+      if (event.key === 'Enter' && event.target === el('conversation-find-input')) {
+        event.preventDefault();
+        moveConversationMatch(event.shiftKey ? -1 : 1);
+      }
+    });
+    if (typeof root.MutationObserver === 'function') {
+      state.findObserver = new root.MutationObserver(() => {
+        if (el('conversation-find').hidden) return;
+        root.clearTimeout(state.findTimer);
+        state.findTimer = root.setTimeout(() => refreshConversationFind(), 80);
+      });
+      state.findObserver.observe(el('a9-task-stream'), { childList: true, characterData: true, subtree: true });
+    }
     document.querySelectorAll('[data-prompt]').forEach((button) => button.addEventListener('click', () => {
       el('task-prompt').value = button.dataset.prompt;
       resizeComposer();
@@ -3410,6 +3633,9 @@
     el('a9-approval-approve').addEventListener('click', () => { void decideApproval('approved'); });
     el('a9-approval-deny').addEventListener('click', () => { void decideApproval('denied'); });
     el('a9-git-refresh').addEventListener('click', () => { void refreshGit(); });
+    el('workspace-refresh').addEventListener('click', () => { void refreshWorkspace(state.explorerPath); });
+    el('changes-refresh').addEventListener('click', () => { void refreshSnapshot(); });
+    ['activity-refresh', 'file-activity-refresh'].forEach((id) => el(id).addEventListener('click', () => { void loadConversationEvents(); }));
     el('a9-output-copy').addEventListener('click', copyOutput);
     el('workspace-up').addEventListener('click', () => { const parts = state.explorerPath.split(/[\\/]+/).filter(Boolean); parts.pop(); void refreshWorkspace(parts.join('/')); });
     el('viewer-search').addEventListener('input', renderViewer);
@@ -3443,6 +3669,12 @@
     document.addEventListener('keydown', (event) => {
       // ADR-0114：Ctrl+K 聚焦目录搜索；Ctrl+I 切换检查器（A9-16 桌面四态/抽屉）。
       const key = String(event.key || '').toLowerCase();
+      if (event.ctrlKey && !event.altKey && !event.shiftKey && key === 'f'
+        && !document.querySelector('.drawer:not([hidden]), dialog[open]')) {
+        event.preventDefault();
+        openConversationFind();
+        return;
+      }
       if (event.ctrlKey && !event.altKey && !event.shiftKey && key === 'k') {
         event.preventDefault();
         // 搜索框位于左侧导航内；桌面折叠态和窄屏抽屉态都必须先让容器可见，
@@ -3467,6 +3699,7 @@
       if (event.key !== 'Escape') return;
       const drawer = Array.from(document.querySelectorAll('.drawer:not([hidden])')).pop();
       if (drawer) { event.preventDefault(); closeDrawer(drawer.id); return; }
+      if (!el('conversation-find').hidden) { event.preventDefault(); closeConversationFind(); return; }
       if (el('inspector').classList.contains('open')) { event.preventDefault(); closeInspector(); return; }
       if (el('navigation-rail').classList.contains('open')) { event.preventDefault(); closeNavigation(); }
     });
@@ -3485,7 +3718,7 @@
     await refreshSnapshot();
     // History details yield to the first interactive paint. Git/diagnostics load on demand.
     root.setTimeout(() => { void loadConversationEvents(); }, 0);
-    text('a9-git-status', '打开环境页或点击刷新以读取 Git 状态。');
+    text('a9-git-status', 'Git 状态尚未读取，点击刷新。');
     if (!state.snapshot) el('workspace-select').focus();
     api.signalReady();
   }
