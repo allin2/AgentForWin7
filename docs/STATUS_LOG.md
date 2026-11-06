@@ -1,5 +1,23 @@
 # 项目状态流水（历史）
 
+## A9-46 新包真实异常链路 Win7 开发级完成（2026-11-06 UTC）
+
+负责人批准范围提交、新 Windows 开发包与 30 分钟/最多两次的 Win7 窗口。
+主代理在本地 main 提交 9 个 A9-46 文件，source `bdb28e40…`；其他任务修改保留。
+Mac 跨平台装配锁定 Windows 工件，新 ZIP `9022d25d…`、manifest `210ddb3e…`。
+3257 个 manifest 文件和八模块入口通过；原生字节未变。
+旧隔离清单缺少两个打包器静态依赖的首轮构建失败保留，补齐后新目录构建通过。
+在 DCCS-CHAIZL-PC / 7601 / 普通用户 agent / Session 1 执行 run `a3ac3882…`。
+候选外锁定 Electron 加载新包实际 main/preload/IPC/runtime/Git/SQLite，两进程共 9 组通过。
+真实 Git 三种状态、目录失败与重试、读取失败、问询取消、审批拒绝零执行和重启恢复均有直接证据。
+8 次回环请求，外部模型 0；SQLite integrity=ok，活动 task/turn/run 均为 0。
+六个回收文件复算大小/SHA 一致；最后只读核对 78 项输入哈希不变、测试临时目录为空。
+后检进程/任务 0，锁 inactive，开发根 12.47 GB；未 stop、close 或删除历史。
+一轮执行完成，第二次未使用；产品与回收后检耗时 510.554 秒，窗口已主动关闭。
+结果层级为 DEV_CHANNEL，阶段保持 A9_46_DEVELOPER_VERIFIED，不签正式 Win7 PASS。
+原生 125% DPI、真实 Shell 停止、未知生命周期终态、外部模型、同包 Win10、正式门 A/B、推送和发布未执行。
+准确输入、原始报告保守元数据说明和结果见 [A9-46 §5.9](tasks/A9_46_WORKBENCH_MINIMAL_INCREMENT.md#59-新开发包与-win7-真实异常链路窗口2026-11-06-utc)。
+
 ## A9-46 真实异常终态补证与本地修复（2026-11-06 UTC）
 
 负责人确认 GPT 重置模式，由主代理作为经理推进本地补证。

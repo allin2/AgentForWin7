@@ -447,3 +447,64 @@ Win10 A–G 交互、Mac 提交、推送和发布仍为 NOT_PERFORMED。
 
 准确输入、批准记录与后续结果在 `outputs/a9-46-workbench-r1/win7-negative-r1/`。
 本节登记时尚未开始目标窗口，不预签结果。
+
+#### 范围提交与新包准备
+
+本地范围提交为 `bdb28e402ab5a9e7fd38d55e12d389f5edb51d8e`。
+共 9 个 A9-46 文件；STATUS 和 STATUS_LOG 只提交本任务段落。
+其余 24 个原工作区文件的字节均保留，暂存区已清空。
+
+构建宿主为 Mac，使用现有跨平台装配器和原锁定 Windows 工件。
+新 ZIP 为 `9022d25d3c6aa2e1e34aaea71660cc52ce40b2bd5d40ec4b63a27089c81adfdc`，
+110,541,461 字节；manifest 为 `210ddb3e464025e3f6e1484b490328012ed2d2a077249e6b8863659b77d82663`。
+3,257 个清单文件和 8 个 JavaScript 模块入口校验通过。
+源码来自干净隔离目录，`source_dirty=false`，开发 Profile 保持 `external_acceptance_eligible=false`。
+历史 alpha.2 标签只代表既有开发打包 Profile，不是新的正式版本或候选号。
+
+与原 §5.7 包逐项比较，仅工作台 JS 和两份追溯元数据变化。
+Electron、Runner、SQLite 及其他运行时文件均保持相同字节。
+首次构建因旧隔离清单漏掉当前打包器的两个静态依赖而停止。
+只补齐隔离材料后重新构建成功；两次构建输入和日志保留，未改产品来迁就构建。
+两个构建沙箱均由 finally 清理，主工作区未改。
+
+候选外新驱动在本地真实产品链路完成 9 组检查，并通过 Electron Node16 语法检查。
+Win7 只读预检直接核对主机、7601、agent Session 1、空闲原 holder 和容量。
+Git 来自现有 `C:\acceptance\mvp_mingit\cmd\git.exe`，2.46.2.windows.1，
+SHA `02ed6549…`；没有安装或引入新依赖。
+
+本轮 run 为 `a3ac3882-f6ff-42a8-a6b8-f6b3fae9088e`，
+根为 `C:\A9-DEV\run\a3ac3882`，holder 复用本会话的空闲 `a946lanrx`。
+预算保守地从首次目标写入调用前 UTC `2026-11-06T01:31:06.297Z` 开始，
+截止 UTC `02:01:06.297Z`。准确 REQUEST、APPROVAL、驱动与通道哈希均在本轮证据目录。
+此段只登记执行输入，不预签目标结果。
+
+#### Win7 直接结果与窗口关闭
+
+本轮完成，结果为 Win7 `DEV_CHANNEL` 开发级 PASS。
+阶段保持 `A9_46_DEVELOPER_VERIFIED`，不签正式 Win7 PASS。
+摘要为 `outputs/a9-46-workbench-r1/win7-negative-r1/RESULT.json`。
+原始产品报告为 `outputs/win7-dev/a9-46-negative-a3ac3882/RESULT.json`。
+
+| 项目 | 直接结果与边界 |
+|---|---|
+| 输入与身份 | source `bdb28e40…`、ZIP `9022d25d…`、manifest `210ddb3e…`。DCCS-CHAIZL-PC / 7601，普通用户 agent，SID 尾号 1001、Session 1，退出码 0。准确身份和双流在 `outputs/win7-dev/runs/a3ac3882-negative/`。 |
+| 实际产品入口 | 候选外锁定 Electron 加载新包内真实 main/preload/Schema IPC/A9 runtime/Git/SQLite。Electron 22.3.27、Node 16.17.1、Chromium 108、ABI 110、SQLite 3.43.1。3257 个包内 manifest 条目在产品执行前校验。该链路不代替默认打包启动器的再次验收。 |
+| C 真实 Git | 通过现有 Git 2.46.2 在本 run 临时仓库生成 clean、dirty、ahead=1/behind=1。真实投影与工作台文案一致。无 fetch/push，未修改现用项目或 Git 全局配置。 |
+| F 真实文件失败 | 真实目录列表从空态到 PATH_NOT_DIRECTORY；恢复目录后点击“重试”返回空态。没有替换 Runtime 或 IPC。尚未读取初态仍未增加真实启动观察。 |
+| G 真实失败 | 不存在文件产生持久化 ENOENT 工具结果，工具卡显示“失败”。正常文件内容含 error/cancelled 字样时仍显示“已读取”。 |
+| G 真实取消 | 点击真实“取消本次问询”，同轮持久化 cancelled，工具卡显示“已停止”，轮次取消；同批后续 read 未执行。此项不是 Shell 停止。 |
+| G 真实拒绝 | 仅对本 run 临时样本发起绑定审批，并只点击“拒绝”。事件 `denied:true/sideEffects:0`，没有 tool_start，样本 SHA 未变，工具卡显示“已拒绝”。完成后恢复 Read Only。 |
+| 恢复与 SQLite | 两个独立产品进程共 9 组通过。完整重启后四类工具卡保持正确；SQLite integrity_check=ok，active task/turn/run 均为 0，重启未重放请求。原始 SQLite 副本已回收并复算 SHA。 |
+| 请求与收尾 | 8 次回环请求，外部模型 0。6 个报告、日志和数据库经通道秘密扫描、大小/SHA 校验，Mac 再次逐一复算一致。后检进程 0、任务 0、锁 inactive、无解包未知；开发根 12,473,831,858 字节，低于 20 GB。 |
+| 最后只读核对 | 新 ZIP、manifest、三份驱动输入与 73 个运行时文件共 78 项哈希不变；本 run `w/tmp` 条目为 0。测试数据由 finally 清理，产品、证据和历史输入保留；未执行 stop 或 close。 |
+| 窗口 | 只用 1 次运行，第二次未使用。产品执行与回收后检在 UTC `01:39:36.851Z` 完成，距保守窗口开始 510.554 秒，早于 UTC `02:01:06.297Z` 截止。最后只读核对完成后主动关闭窗口，不再开始新场景。 |
+
+原始驱动报告的 `sourceDirty:true` 是沿用旧本地夹具的保守常量。
+该字段没有读取包的 Git 状态，不能用于判断新包源码是否干净。
+本轮源码身份以干净隔离构建记录和新包 manifest 的 `source_dirty=false` 为准；
+准确 source、ZIP 与文件哈希均直接核对。原报告保留，不修改该字段。
+
+本轮没有新增员工调用，沿用前一阶段 Terra 的只读分析。
+原 Win7 证据和失败记录不变；新结果只绑定本轮源码、包、run 和普通身份。
+原生 125% Windows DPI、真实 Shell 停止、未知生命周期终态、真实外部模型、
+同包 Win10 运行、正式门 A/B、推送和发布仍为 NOT_PERFORMED。
