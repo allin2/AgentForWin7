@@ -7,8 +7,8 @@ Target Branch: main
 Source Baseline: b0af55d283b2796fe83b9635f8ff6a2dc1ef30fc
 Target Version: 0.3.0-alpha.5
 Candidate: WIN7-58
-Phase-Gate: NOT_PERFORMED
-Win7-Validation: NOT_PERFORMED
+Phase-Gate: A9_48_READY_FOR_OWNER_ACCEPTANCE
+Win7-Validation: DEV_CHANNEL
 ```
 
 ## 1. 授权与结果
@@ -56,3 +56,53 @@ Win7-Validation: NOT_PERFORMED
 同包 Win10、原生 125% DPI、外部后端、完整 Review、完整 batch2 和跨机可重复性仍为
 NOT_PERFORMED/既有已知限制，不宣称完整 Alpha、RC 或稳定版。
 本轮证据集中在本机 `outputs/alpha5-r1/` 与现有开发通道账本。
+
+## 5. 源码与本地结果（2026-11-06 UTC）
+
+源码收口提交为 `ac8ef955…`；后继候选外驱动发布包判据修正为 `498a8f5d…`，后者是本轮候选源码。
+只暂存 15 个明确路径；共享文档通过准确段落暂存，ADR-0312/0313 和其他会话 dirty 保持未提交。
+本轮未修改系统、原生、依赖、Runner、Core 或 State。
+
+| 直接检查 | 结果与本机证据 |
+|---|---|
+| 七模块编译、Shell 静态与两项合同 | 103/103 PASS，`shell-targeted.log` |
+| 新 Profile / suite 身份 | 2/2 PASS；历史套件判据和原生绑定保持；`identity-test-r2.log` |
+| 实际 Electron 22 main/preload/IPC/runtime/SQLite | 7+2 组 PASS，5 次回环、外部模型 0；Mac 仅内存降级，`local-combined-r2/RESULT.json` |
+| 发布规则集合 | 422 项：406 PASS、0 FAIL、16 项按原规则 NOT_PERFORMED；`release-check.log` |
+| 发布准备的基线扫描 | 6000 文件容量与事件循环检查 3/3 PASS；`workspace-capacity.log` |
+| 新包完整性 | 3275 项 manifest、ZIP 闭包、七模块加载、包内 runtime 身份与驱动输入验证 PASS；`dev-3-record.json` |
+| 双独立干净构建 | dev-3 / freeze-a / freeze-b 三个 ZIP 逐字节一致，`DOUBLE_BUILD.json` |
+
+候选 ZIP 为 111,170,123 字节，SHA-256 `d1ba4d37d003d91449eb55b2121ca5cce9d6cb84528f221ffbf501ba4f86e391`。
+两个正式一致性构建均为全新系统临时目录内的独立源码克隆，共享只读已安装依赖；退出后沙箱已删除。
+跨机器可重复性未执行。未重编原生工件。
+
+首个外层构建工具因 Mac `/var` 临时路径与 ESM 的 `/private/var` 规范路径不一致，入口未执行却退出 0，
+后续闭包读取拒绝该结果；该失败保留在 `dev-1-record.json`。工具改用 realpath 后构建成功。
+新候选外驱动的旧开发包 eligibility 预期在上机前修正，并增加实际发布包的 verify-only 准入。
+dev-2 的旧源码包保留为准备记录，未当作当前候选或复用其实机结论。
+Win7 组合执行与冻结结果在完成后补录；当前不预签通过，不替负责人接受。
+
+## 6. 同包 Win7 通过与冻结完成
+
+首个 run `f02ad7e8…` 在准备阶段因 ZIP_IDENTITY_MISMATCH 停止，产品启动次数为 0。
+原因是代理生成 setup 时先替换短哈希，破坏了完整 ZIP SHA 常量；工具独立上传校验的实际 ZIP 身份正确。
+保留原失败和后检，修正候选外脚本，并在本地核对完整常量。产品与包未改，判据未放宽。
+新 run `2061ce92-32c6-4d55-a545-cc2d3c6b8958` 复用同一已验证不可变包，在原窗口内执行，未重置时间预算。
+
+Win7 普通 agent / Session 1、Electron 22.3.27 / Node 16.17.1 / ABI 110，两进程 7+2 组 PASS。
+本轮直接覆盖实际包内 main/preload/Schema IPC/runtime/SQLite、运行中草稿、原生 Enter、选择/刷新保留、
+手动发送仅一轮、停止保留、DPAPI 密文保存及重启恢复、零重放、正文查找与焦点、真实读取成功/历史耗时、
+主题切换/重启恢复，以及严格模板首句/真实工具续步的单条开头 system。
+四个 CSS 视口全部达到请求尺寸；DPR=1，900/780 两张暗色截图已查看。
+5 次回环请求、外部模型 0；SQLite integrity=ok，活动 task/turn/run 均为 0，样本未变，测试沙箱已删除。
+11 个产品/任务/身份回收文件按 SHA 和大小复核；后检根内进程/任务 0、锁 inactive，无解包未知。
+开发根 15,262,513,393 字节，C: 剩余 864,921,550,848 字节。
+窗口 UTC 07:52:18.796 至 08:06:07.461 提前关闭，包含失败准备、修复和回收；未使用 stop/close。
+
+同一测试包与两次干净构建字节一致，现只读冻结在 `.acceptance/candidates/WIN7-58/`，共 13 个文件。
+冻结状态 FROZEN_NOT_FORMALLY_ACCEPTED；准确冻结 SHA、source/tree、ZIP/manifest/SBOM/锁、run 与驱动绑定
+见本机 `outputs/alpha5-r1/FREEZE_RESULT.json` 和候选内 FROZEN_CANDIDATE.json。
+候选内预执行 NOT_PERFORMED 保留为构建时快照，不回写包或旧失败。
+当前技术准备完成，负责人接受仍 PENDING。发布材料在本机 `outputs/alpha5-r1/publication/`，人工步骤见
+`outputs/alpha5-r1/ACCEPTANCE.md`。不宣称正式门 A/B、Win10、原生 125% DPI 或外部后端通过。

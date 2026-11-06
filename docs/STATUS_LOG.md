@@ -1,5 +1,52 @@
 # 项目状态流水（历史）
 
+## A9-48 alpha.5 / WIN7-58 冻结并准备负责人验收（2026-11-06 UTC）
+
+负责人授权按已说明流程推进，并委托关键决定、保留本人验收。
+执行代理选定 alpha.5 / WIN7-58，普通合并远端下载说明与本地 A9-46，保留双方历史和其他会话 dirty。
+A9-47 与准确发布身份收口提交为 ac8ef955…，外部驱动准入修正后候选源码为 498a8f5d…。
+103 项定向合同、3 项 6000 文件容量检查通过；发布集合 422 项，406 PASS、0 FAIL、16 按原规则 NOT_PERFORMED。
+首个构建外层工具未规范化 Mac 临时路径，未进入构建，失败保留；修正后有效构建闭包 3275 项与包内 runtime 自加载通过。
+初次 Win7 setup 生成的完整 SHA 常量被短前缀替换破坏，身份检查阻止产品启动；实际 ZIP 独立校验正确。
+保留 f02ad7e8… 的原始失败，在原窗口内用新 run 2061ce92… 和修正的候选外 setup 重试，产品/ZIP 未变。
+Win7 普通 agent / Session 1 同包 9 组 DEV_CHANNEL PASS，5 次回环、外部模型 0，草稿/DPAPI、主题、查找/耗时/工具终态、严格模板续步通过。
+窗口 UTC 07:52:18.796 至 08:06:07.461 提前关闭；SQLite integrity=ok，11 文件回收复核，沙箱删除，后检零进程/任务、锁 inactive。
+dev-3 / freeze-a / freeze-b 三份 ZIP 字节一致，SHA d1ba4d37…、111170123 字节，只读冻结 WIN7-58 共 13 文件。
+技术状态 A9_48_READY_FOR_OWNER_ACCEPTANCE，负责人接受仍 PENDING，准备 GitHub Draft，尚未公开 alpha.5。
+当前公开 alpha.4 不变；准确证据、限制、回退与人工清单见 [A9-48](tasks/A9_48_ALPHA5_WORKBENCH_RELEASE.md) 和本机 outputs/alpha5-r1。
+
+## A9-47 Win7 草稿与 DPAPI 开发验证通过（2026-11-06 UTC）
+
+负责人在本地交付后要求继续实机验证、重试并继续同范围任务。
+执行代理保留原 main `305c100b…` 和已有 dirty，沿用此前开发包 source `8d97d182…` / ZIP `9eeaa9ff…`。
+修正候选外驱动的 DPAPI 预期、视口最小尺寸、无限动画等待和诊断表达式；产品/原生字节未改。
+最小探针确认 Mac Electron 22 的 setMinimumSize(0,0) 保留原下限；新驱动本地 6 组直接通过。
+Win7 普通 agent / Session 1 的新 run `24d96c23…` 两进程 6 组 PASS，直接覆盖起草、选择、手动发送、停止、
+DPAPI 密文保存与重启恢复、零重放；四个准确 CSS 视口通过，当前 DPR=1。
+5 次回环请求、外部模型 0，SQLite integrity=ok，活动 task/turn/run 均为 0，样本字节不变。
+7 个产品文件与 4 个任务双流/身份文件回收复核；正常退出，沙箱已删除，后检进程/任务 0、锁 inactive。
+窗口 UTC 07:18:14.869 至 07:23:58.120 提前关闭，未使用 stop/close，旧报告与目标根保留。
+阶段为 A9_47_DEVELOPER_VERIFIED，Win7 为 DEV_CHANNEL；旧本地阶段的 NOT_PERFORMED 不改写。
+同包 Win10、原生 125% DPI、外部模型、正式门 A/B、推送/发布仍为 NOT_PERFORMED。
+准确绑定与证据见 [A9-47 §6.1](tasks/A9_47_DRAFT_WHILE_RUNNING.md#61-结果win7-dev_channel-通过)
+及本机 `outputs/a9-47-draft-r1/win7-r4/RESULT.json`。
+
+## A9-47 运行中草稿本地开发验证完成（2026-11-06 UTC）
+
+负责人明确选择推进运行中草稿，结束后手动发送。
+执行代理在 main `305c100b…` 加原 dirty 上完成本地实现。
+产品只改工作台 JS、HTML 和 CSS；保留停止、审批、问询与对话锁。
+草稿与当前请求、事件隔离；结束和停止后保留文本与选择，不自动发送。
+七模块编译、Shell lint、51/51 定向合同通过。
+真实 Electron 22.3.27 / Node16 两进程共 6 组通过，四个准确视口检查通过。
+最终运行 5 次回环请求、外部模型 0，重启零重放，SQLite integrity=ok。
+活动 task/turn/run 均为 0；样本不变，测试沙箱和相关进程无残留。
+原始断言失败、驱动字符事件缺口及截图过渡态的各轮证据保留。
+Mac 仅内存草稿符合既有产品合同，不升级为 Windows DPAPI 持久化证据。
+阶段为 A9_47_DEVELOPER_VERIFIED；Windows DPAPI、Win7、同包 Win10 为 NOT_PERFORMED。
+本轮未提交、打包、连接目标机、推送、发布或签正式门；未新增员工。
+准确范围与本机证据见 [A9-47 §5](tasks/A9_47_DRAFT_WHILE_RUNNING.md#5-本地交付结果2026-11-06-utc)。
+
 ## A9-46 新包真实异常链路 Win7 开发级完成（2026-11-06 UTC）
 
 负责人批准范围提交、新 Windows 开发包与 30 分钟/最多两次的 Win7 窗口。
