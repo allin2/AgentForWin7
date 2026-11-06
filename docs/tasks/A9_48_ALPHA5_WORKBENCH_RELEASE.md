@@ -106,3 +106,18 @@ Win7 普通 agent / Session 1、Electron 22.3.27 / Node 16.17.1 / ABI 110，两�
 候选内预执行 NOT_PERFORMED 保留为构建时快照，不回写包或旧失败。
 当前技术准备完成，负责人接受仍 PENDING。发布材料在本机 `outputs/alpha5-r1/publication/`，人工步骤见
 `outputs/alpha5-r1/ACCEPTANCE.md`。不宣称正式门 A/B、Win10、原生 125% DPI 或外部后端通过。
+
+## 7. 发布草稿与附件回下载核验
+
+准确源码及标签 `v0.3.0-alpha.5-win7-58` 已推送；标签指向冻结源码 `498a8f5d…`，后继提交只补验收记录。
+GitHub release ID `436252681` 为 Draft / Prerelease，published_at=null，未公开。
+[负责人验收草稿](https://github.com/allin2/AgentForWin7/releases/tag/untagged-8999c509e9acb17788ce)。
+
+四个附件为安装 ZIP、SHA256SUMS、WIN7-58-RELEASE-EVIDENCE.json 和 ACCEPTANCE.md。
+全部回下载，与本地冻结/发布材料按大小、SHA-256 及 GitHub asset digest 三方核验一致。
+记录见本机 `outputs/alpha5-r1/PUBLICATION_VERIFICATION.json`；回下载在 `roundtrip/`。
+证据附件是验收前技术快照，负责人后续接受及公开状态以发布说明和候选外接受记录为准，不重写冻结文件。
+
+交付过程中直连 GitHub 的 HTTP2/传输曾失败。只读确认系统现有代理后，交付命令显式复用该代理并成功，
+未修改系统、全局 Git、远端或 TLS 设置。没有 force-push、重写历史、删除或后台遗留任务。
+当前状态 A9_48_READY_FOR_OWNER_ACCEPTANCE。负责人保留人工验收；通过后公开这组同字节附件，不重建。
