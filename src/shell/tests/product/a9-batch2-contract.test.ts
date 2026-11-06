@@ -2929,6 +2929,8 @@ describe('A9-33 batch-2 smoke pieces', () => {
       let resize: () => void = () => undefined;
       const node = (id: string) => (nodes[id] = nodes[id] || {
         id, value: '', hidden: false, disabled: false, textContent: '', dataset: {}, style: {},
+        attributes: {} as Record<string, string>, classList: { toggle: jest.fn() },
+        setAttribute(name: string, value: string) { this.attributes[name] = String(value); },
         scrollHeight: 20,
         dispatchEvent(event: any) { if (id === 'task-prompt' && event.type === 'input') resize(); },
         click() { if (!this.disabled) clicks.push(`${id}:${nodes['task-prompt'].value}`); },
@@ -2977,7 +2979,7 @@ describe('A9-33 batch-2 smoke pieces', () => {
       const p = page(ready(), true);
       p.box.sync();
       const d = driverComposer(p);
-      expect(await d.composerState()).toEqual({ send_hidden: true, send_disabled: true, prompt_disabled: true });
+      expect(await d.composerState()).toEqual({ send_hidden: true, send_disabled: true, prompt_disabled: false });
       setTimeout(() => { p.box.state.running = false; p.box.sync(); }, 30);
       await d.submit('b2:after-turn');
       expect(p.clicks).toEqual(['run-task:b2:after-turn']);

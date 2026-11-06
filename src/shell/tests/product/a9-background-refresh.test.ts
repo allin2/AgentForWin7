@@ -318,7 +318,12 @@ describe('A9-40 background snapshot refresh lifecycle', () => {
       timeline: [event(1, 'turn_started', {})], liveModelPreview: { turnId: 'turn', text: '前台进展', updatedAt: 1 } });
     await jest.advanceTimersByTimeAsync(500);
     expect(view.node('a9-task-stream').textContent).toContain('前台进展');
-    expect(view.node('task-prompt').disabled).toBe(true);
+    // ADR-0314 permits drafting while running; submission stays blocked and Stop remains available.
+    expect(view.node('task-prompt').disabled).toBe(false);
+    expect(view.node('run-task').hidden).toBe(true);
+    expect(view.node('run-task').disabled).toBe(true);
+    expect(view.node('cancel-task').hidden).toBe(false);
+    expect(view.node('cancel-task').disabled).toBe(false);
     view.a9.stop.mockImplementationOnce(async () => {
       view.current = snapshot({ agentStatus: 'cancelled', conversation: [{ ...fact, outcome: 'cancelled' }] });
       return { ok: true };

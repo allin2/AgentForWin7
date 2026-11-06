@@ -7,6 +7,17 @@
 历史合同保留原状态与未关闭义务；不构成当前实施授权，也不改判原候选。
 任务书路径保持稳定，不通过移动文件表达生命周期。
 
+本轮 CI 维护范围（负责人回复“按照上面的建议推进”）：`APPROVED_FOR_IMPLEMENTATION`，实际分支 `main`，基线 `82729c35…`。
+交付两组旧测试与 ADR-0314 对齐、[A9-48 §9](A9_48_ALPHA5_WORKBENCH_RELEASE.md#9-发布时公开仓库-ci-失败补记与本地修复)事实补记，以及公开仓库暗色主题工作流改为手动触发。
+仅修改测试夹具、断言、工作流触发条件与相关文档；产品、冻结候选和历史证据保持原字节。
+必要验证为 Shell 编译/静态门与完整模块测试、`docs:check`、`git diff --check`；结果只记开发机。
+本轮本地交付后由负责人决定提交、公开推送与 PR #14 合并；不新建 Box、不取消已有任务。
+出现产品缺陷、权限/依赖变化或无关改动冲突时停止依赖动作，报告具体边界。
+本轮本地交付 COMPLETE：开发机 main `82729c35…` 加本次补丁，完整 Shell 63 个文件、1445 项用例 PASS；
+七模块依赖编译、Shell 静态门、文档/格式与工作流 YAML 检查 PASS，测试临时目录已删除。
+原有其他任务改动保留，远端尚无本次修复结果，详见 A9-48 §9。
+后继负责人回复“推送”，授权单独提交本轮改动并推送公开 `origin/main`；PR #14 合并仍待决定。
+
 | 任务书 | 类型 | 状态 | Phase-Gate | Win7 验证 |
 |---|---|---|---|---|
 | [ENGINEERING_06（InstaBox 开发环境接入；§1.13 暗色主题含 CI 串跑）](ENGINEERING_06_INSTABOX_ENVIRONMENT.md) | ENGINEERING_TOOLING | APPROVED_FOR_IMPLEMENTATION | ENGINEERING_06_WORKFLOW_DEVELOPER_VERIFIED | NOT_PERFORMED |
