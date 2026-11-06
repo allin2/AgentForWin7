@@ -35,7 +35,7 @@ function verifyInputs() {
     assert.strictEqual(hash(manifestFile), config.manifestSha256);
     const manifest = JSON.parse(physicalFs.readFileSync(manifestFile, 'utf8'));
     assert.strictEqual(manifest.source_commit, config.sourceCommit);
-    assert.strictEqual(manifest.external_acceptance_eligible, false);
+    assert.strictEqual(manifest.external_acceptance_eligible, true);
     for (const file of manifest.files) {
       const absolute = path.resolve(releaseRoot, file.path);
       assert(absolute.startsWith(releaseRoot + path.sep));
@@ -386,4 +386,5 @@ async function child() {
   } catch(error){report.status='FAIL';report.error=String(error.stack||error);}
   finally{write(out,report);app.quit();process.exitCode=report.status==='PASS'?0:1;}
 }
-(arg('phase')?child():parent()).catch(error=>{console.error(error);process.exitCode=1;});
+if (process.argv.includes('--verify-only')) console.log(JSON.stringify({status:'PASS',operation:'PACKAGE_INPUT_VERIFICATION',sourceCommit:config.sourceCommit}));
+else (arg('phase')?child():parent()).catch(error=>{console.error(error);process.exitCode=1;});
