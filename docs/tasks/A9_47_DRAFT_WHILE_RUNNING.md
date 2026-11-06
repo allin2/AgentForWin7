@@ -1,11 +1,11 @@
 # A9-47 — 运行中起草下一条消息
 
 ```text
-Status: APPROVED_FOR_IMPLEMENTATION
+Status: COMPLETE
 Task Type: PRODUCT_EXPERIENCE
 Target Branch: main
 Source Baseline: 305c100bf821c932f3bc529a8f08b84efca1aeef
-Phase-Gate: A9_47_DEVELOPER_VERIFIED
+Phase-Gate: A9_48_WIN7_58_PASS_WITH_KNOWN_LIMITS
 Win7-Validation: DEV_CHANNEL
 ```
 
@@ -158,3 +158,10 @@ A9-46 已关闭的目标窗口未复用；历史候选和证据未修改。
 候选源码为 `498a8f5d…`；原本地与开发包结果保持原绑定，不改写。
 新版准确发布身份和同包 Win7 组合运行另见 [A9-48 §6](A9_48_ALPHA5_WORKBENCH_RELEASE.md#6-同包-win7-通过与冻结完成)。
 WIN7-58 同包直接重验草稿与 DPAPI，技术准备完成，负责人验收仍 PENDING。
+
+## 8. 随 WIN7-58 验收并发布
+
+负责人后继回复“验证通过，可以发版”，接受准确 WIN7-58 和已知限制。
+本功能随 `v0.3.0-alpha.5-win7-58` 于 UTC `2026-11-06T09:48:19Z` 公开。
+本任务范围 COMPLETE，结论沿用 `A9_48_WIN7_58_PASS_WITH_KNOWN_LIMITS`；原 DEV_CHANNEL 证据和未验证边界不升级。
+准确候选、接受与发布校验见 [A9-48 §8](A9_48_ALPHA5_WORKBENCH_RELEASE.md#8-负责人验收通过与公开发布)。

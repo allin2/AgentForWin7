@@ -1,11 +1,11 @@
 # A9-46 — 工作台最小增量与可读性（UX 建议 r2 ① 批）
 
 ```text
-Status: APPROVED_FOR_IMPLEMENTATION
+Status: COMPLETE
 Task Type: PRODUCT_EXPERIENCE
 Target Branch: main
 Source Baseline: 836a96fe…
-Phase-Gate: A9_46_DEVELOPER_VERIFIED
+Phase-Gate: A9_48_WIN7_58_PASS_WITH_KNOWN_LIMITS
 Win7-Validation: DEV_CHANNEL
 ```
 
@@ -508,3 +508,13 @@ SHA `02ed6549…`；没有安装或引入新依赖。
 原 Win7 证据和失败记录不变；新结果只绑定本轮源码、包、run 和普通身份。
 原生 125% Windows DPI、真实 Shell 停止、未知生命周期终态、真实外部模型、
 同包 Win10 运行、正式门 A/B、推送和发布仍为 NOT_PERFORMED。
+
+## 6. 随 WIN7-58 验收并发布
+
+本任务工作台改动与 A9-47 草稿一并纳入 alpha.5 / WIN7-58，准确源码 `498a8f5d…`。
+同包 Win7 增量直接检查正文查找/焦点、历史耗时、真实读取终态和新 Composer，其他适用历史证据保持原绑定。
+负责人回复“验证通过，可以发版”，接受准确候选及已知限制。
+`v0.3.0-alpha.5-win7-58` 于 UTC `2026-11-06T09:48:19Z` 公开，四个附件回下载 SHA 一致。
+本任务已批准范围 COMPLETE，结论 `A9_48_WIN7_58_PASS_WITH_KNOWN_LIMITS`；原 DEV_CHANNEL 标签、
+失败及未验证事项保留，不能据发布升级为完整 Alpha/RC 或 FORMAL。
+准确接受与发布记录见 [A9-48 §8](A9_48_ALPHA5_WORKBENCH_RELEASE.md#8-负责人验收通过与公开发布)。

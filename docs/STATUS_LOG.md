@@ -1,5 +1,18 @@
 # 项目状态流水（历史）
 
+## A9-48 alpha.5 / WIN7-58 负责人接受并公开发布（2026-11-06 UTC）
+
+负责人明确回复“验证通过，可以发版”，接受准确候选及已说明限制。
+结论 A9_48_WIN7_58_PASS_WITH_KNOWN_LIMITS，A9-46/47/48 在本版批准范围内 COMPLETE。
+源码 498a8f5db5ababc0efe32a2a1b139777ef79bb39，ZIP d1ba4d37d003d91449eb55b2121ca5cce9d6cb84528f221ffbf501ba4f86e391，111170123 字节。
+冻结记录与 Win7 DEV_CHANNEL run 2061ce92… 保持，接受记录写在候选外 publish/OWNER_ACCEPTANCE.json。
+预发布于 UTC 2026-11-06T09:48:19Z 公开，release ID 436252681，标签 v0.3.0-alpha.5-win7-58。
+四个附件未改 asset ID、大小或 SHA，公开后回下载与原草稿/冻结材料/GitHub digest 一致。
+没有重建、重传、替换附件或修改冻结快照；附件中的待验收字段为验收前快照，以发布说明和任务书当前接受记录为准。
+README、当前发布状态和任务索引已更新；其他未提交工作保留，不新增目标运行或签发 FORMAL 门 A/B。
+同包 Win10、原生 125% DPI、外部后端、完整 Review/batch2 和跨机可重复性限制保留。
+见 [A9-48 §8](tasks/A9_48_ALPHA5_WORKBENCH_RELEASE.md#8-负责人验收通过与公开发布) 与本机 outputs/alpha5-r1/publish/PUBLICATION_VERIFICATION.json。
+
 ## A9-48 alpha.5 / WIN7-58 冻结并准备负责人验收（2026-11-06 UTC）
 
 负责人授权按已说明流程推进，并委托关键决定、保留本人验收。

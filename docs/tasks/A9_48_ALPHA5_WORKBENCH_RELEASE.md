@@ -1,13 +1,13 @@
 # A9-48 — alpha.5 工作台与运行中草稿发布
 
 ```text
-Status: APPROVED_FOR_IMPLEMENTATION
+Status: COMPLETE
 Task Type: PRODUCT_RELEASE
 Target Branch: main
 Source Baseline: b0af55d283b2796fe83b9635f8ff6a2dc1ef30fc
 Target Version: 0.3.0-alpha.5
 Candidate: WIN7-58
-Phase-Gate: A9_48_READY_FOR_OWNER_ACCEPTANCE
+Phase-Gate: A9_48_WIN7_58_PASS_WITH_KNOWN_LIMITS
 Win7-Validation: DEV_CHANNEL
 ```
 
@@ -121,3 +121,23 @@ GitHub release ID `436252681` 为 Draft / Prerelease，published_at=null，未�
 交付过程中直连 GitHub 的 HTTP2/传输曾失败。只读确认系统现有代理后，交付命令显式复用该代理并成功，
 未修改系统、全局 Git、远端或 TLS 设置。没有 force-push、重写历史、删除或后台遗留任务。
 当前状态 A9_48_READY_FOR_OWNER_ACCEPTANCE。负责人保留人工验收；通过后公开这组同字节附件，不重建。
+
+## 8. 负责人验收通过与公开发布
+
+负责人在收到准确候选、验收包及已知限制后，明确回复“验证通过，可以发版”。
+据此接受 WIN7-58，结论 `A9_48_WIN7_58_PASS_WITH_KNOWN_LIMITS`。
+准确接受绑定 source `498a8f5db5ababc0efe32a2a1b139777ef79bb39`、ZIP
+`d1ba4d37d003d91449eb55b2121ca5cce9d6cb84528f221ffbf501ba4f86e391`、
+冻结记录 `79ec8f53…` 与 Win7 DEV_CHANNEL run `2061ce92…`。
+接受记录位于本机 `outputs/alpha5-r1/publish/OWNER_ACCEPTANCE.json`，不改候选内冻结快照。
+
+预发布于 UTC `2026-11-06T09:48:19Z` 公开，release ID `436252681`；
+[v0.3.0-alpha.5-win7-58](https://github.com/allin2/AgentForWin7/releases/tag/v0.3.0-alpha.5-win7-58)。
+四个附件保持原 asset ID、大小和 SHA-256，公开后全部回下载，与批准草稿/本地冻结材料及 GitHub digest 一致。
+ZIP 仍为 111,170,123 字节；未重建、未重传或替换附件，标签仍指向相同候选源码。
+发布后校验见本机 `outputs/alpha5-r1/publish/PUBLICATION_VERIFICATION.json`。
+
+本次为负责人按 ADR-0315 接受限定范围与已知限制，不将原 DEV_CHANNEL 升为 FORMAL，正式门 A/B 未补签。
+同包 Win10、原生 125% DPI、外部后端、完整 Review/batch2 和跨机可重复性仍未验证。
+附件中的待验收/草稿字段是验收前快照，为保持 SHA256SUMS 不变而保留；当前状态以本节及公开发布说明为准。
+README 和当前状态下载入口同步到 alpha.5；保留其他未提交工作。本任务在本版范围内 COMPLETE。
