@@ -1,0 +1,27 @@
+name: Reliability fixes on InstaBox
+
+on:
+  push:
+    branches: ['box/relfix1a']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  reliability:
+    runs-on: instabox-medium
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Verify source and run gateway and shell tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          bash scripts/instabox/prepare-linux.sh "$PWD"
+          source scripts/instabox/env.sh
+          test "$(node --version)" = "v20.17.0"
+          npm run test:local -- --module gateway --module shell

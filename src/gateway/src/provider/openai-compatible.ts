@@ -52,6 +52,9 @@ import { imageContent, ModelImageInput } from './image-input';
 /** A9-21 M2 G-1：单响应内容上限（UTF-8 字节）。 */
 const MAX_RESPONSE_CONTENT_BYTES = 1024 * 1024;
 
+/** HTTP >=400: retain at most a 64 KiB diagnostic prefix during receipt. */
+const MAX_HTTP_ERROR_BODY_BYTES = 64 * 1024;
+
 /**
  * 按 UTF-8 字符边界截断到不超过 limitBytes 的最长前缀。
  * 不切开多字节序列，不产生 U+FFFD。
@@ -446,6 +449,7 @@ export class OpenAICompatibleProvider {
       let totalTimer: NodeJS.Timeout | undefined;
 
       let activeRequest: http.ClientRequest | undefined;
+      let interruptHttpError: (() => void) | undefined;
 
       const settle = (error: Error | undefined, response?: ModelResponse) => {
         if (settled) return;
@@ -603,18 +607,42 @@ export class OpenAICompatibleProvider {
       };
 
       const handleResponse = (res: http.IncomingMessage) => {
+        if (settled) { res.destroy(); return; }
         const statusCode = res.statusCode || 0;
         if (statusCode >= 400) {
-          let errBody = '';
-          res.on('data', (d) => { errBody += d.toString('utf8'); });
-          res.on('end', () => {
+          const errorSocket = res.socket;
+          const prefix = Buffer.alloc(MAX_HTTP_ERROR_BODY_BYTES);
+          let retainedBytes = 0;
+          const finishHttpError = (marker = '') => {
+            if (settled) return;
+            // Decode retained bytes once: network chunks may split UTF-8 characters.
+            // Redact before applying the existing 500-character UI diagnostic bound.
+            const diagnostic = this.redact(prefix.toString('utf8', 0, retainedBytes));
             const err = new GatewayError(
               statusCode === 401 || statusCode === 403 ? ErrorCode.AUTH_INVALID_CREDENTIALS : ErrorCode.INVALID_FRAME,
-              `Server returned status ${statusCode}: ${this.redact(errBody.slice(0, 500))}`,
+              `Server returned status ${statusCode}: ${diagnostic.slice(0, 500 - marker.length)}${marker}`,
             );
             (err as any).statusCode = statusCode;
+            // Latch settlement and clear timers/abort listener before destroying the
+            // response, so the resulting aborted/error events cannot replace HTTP status.
             settle(err);
+            res.destroy();
+            // Node may detach res.socket on end and keep the socket in its Agent pool.
+            // Close the original error-response socket rather than leaving that lease idle.
+            errorSocket?.destroy();
+          };
+          interruptHttpError = () => finishHttpError(' [response interrupted]');
+          res.on('data', (chunk: Buffer) => {
+            if (settled) return;
+            armNoDataTimer();
+            const keepBytes = Math.min(chunk.length, MAX_HTTP_ERROR_BODY_BYTES - retainedBytes);
+            chunk.copy(prefix, retainedBytes, 0, keepBytes);
+            retainedBytes += keepBytes;
+            if (keepBytes < chunk.length) finishHttpError(' [truncated: 64 KiB limit]');
           });
+          res.on('end', () => finishHttpError());
+          res.on('aborted', interruptHttpError);
+          res.on('error', interruptHttpError);
           return;
         }
 
@@ -744,6 +772,7 @@ export class OpenAICompatibleProvider {
       };
 
       const onReqError = (err: any) => {
+        if (interruptHttpError) { interruptHttpError(); return; }
         const gwErr = new GatewayError(ErrorCode.GATEWAY_UNREACHABLE, `Network request failed: ${this.redact(err.message)}`);
         (gwErr as any).networkCode = err.code ?? 'NETWORK_ERROR';
         settle(gwErr);
