@@ -43,8 +43,8 @@ async function parent(){
  try{
   await new Promise(r=>server.listen(0,'127.0.0.1',r));const fixture=`http://127.0.0.1:${server.address().port}`;
   for(const phase of ['first','restored']){
-   const env={...process.env,WIN7AGENT_A9_DATAROOT:path.join(temporary,'data'),WIN7AGENT_A9_ELECTRON_SQLITE:config.nativeRoot};
-   delete env.ELECTRON_RUN_AS_NODE;delete env.NODE_OPTIONS;delete env.WIN7AGENT_A9_WORKSPACE;
+   const env={...process.env,WIN7AGENT_A9_DATAROOT:path.join(temporary,'data'),WIN7AGENT_A9_ELECTRON_SQLITE:config.nativeRoot,LOCALAPPDATA:path.join(temporary,'local')};
+   delete env.ELECTRON_RUN_AS_NODE;delete env.NODE_OPTIONS;delete env.WIN7AGENT_A9_WORKSPACE;delete env.WIN7AGENT_PORTABLE;
    const log=fs.openSync(path.join(out,phase+'.log'),'wx');
    const args=[__filename,`--config=${arg('config')}`,`--out=${path.join(out,phase+'.json')}`,`--phase=${phase}`,`--temporary=${temporary}`,`--fixture=${fixture}`,`--evidence=${out}`];
    if(phase==='first')args.push(`--a9-smoke-workspace=${workspace}`);
