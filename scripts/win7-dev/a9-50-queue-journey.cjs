@@ -23,19 +23,20 @@ verifyInputs();
 async function parent(){
  fs.mkdirSync(out);const temporary=fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'win7-a9-50-product-')));
  const workspace=path.join(temporary,'中文 workspace');fs.mkdirSync(workspace);fs.writeFileSync(path.join(workspace,'note.txt'),'fixture\n','utf8');
- const requests=[],sockets=new Set();let held=null,child=null;
+ const requests=[],sockets=new Set();let held=null,heldPrompt='',child=null;
  const report={status:'RUNNING',sourceCommit:config.sourceCommit,sourceDirty:config.sourceDirty!==false,evidenceLevel:process.platform==='win32'?'Win7 DEV_CHANNEL':'Mac development Electron22',externalModelRequests:0,zipSha256:config.zipSha256,manifestSha256:config.manifestSha256,driverSha256:hash(__filename),sourceFiles:(config.sourceFiles||[]).map(file=>({path:file.path,sha256:hash(path.join(config.productRoot,file.path))})),phases:[]};
  const send=(res,delta,reason='stop')=>{res.writeHead(200,{'Content-Type':'text/event-stream'});res.end(`data: ${JSON.stringify({choices:[{delta,finish_reason:reason}]})}\n\ndata: [DONE]\n\n`);};
  const server=http.createServer((req,res)=>{
   if(req.url==='/facts'){res.end(JSON.stringify({count:requests.length,prompts:requests.map(r=>r.prompt),held:!!held}));return;}
-  if(req.url==='/release'||req.url==='/fail'){const old=held;held=null;if(!old){res.writeHead(409);res.end('NOT_HELD');return;}if(req.url==='/fail'){old.writeHead(400);old.end('fixture failure');}else send(old,{content:'first complete'});res.end('released');return;}
+  if(req.url==='/release'||req.url==='/fail'){const old=held;held=null;if(!old){res.writeHead(409);res.end('NOT_HELD');return;}if(req.url==='/fail'){old.writeHead(400);old.end('fixture failure');}else if(heldPrompt==='A950_HOLD_BACKGROUND')send(old,{tool_calls:[{index:0,id:'background-start',function:{name:'start_process',arguments:JSON.stringify({command:'ping.exe -n 30 127.0.0.1'})}}]},'tool_calls');else send(old,{content:'first complete'});res.end('released');return;}
   if(req.url!=='/v1/chat/completions'){res.writeHead(404);res.end();return;}
   let body='';req.on('data',b=>body+=b);req.on('end',()=>{
    try{const data=JSON.parse(body);const probe=data.tools?.[0]?.function?.name==='probe_test_echo';
     const prompt=probe?'probe':data.messages.filter(m=>m.role==='user').pop().content;
     requests.push({prompt,body});assert(!body.includes('A950_PRIVATE'),'DRAFT_LEAK');
     if(probe)return send(res,{tool_calls:[{index:0,id:'probe',function:{name:'probe_test_echo',arguments:'{"message":"probe_ok"}'}}]},'tool_calls');
-    if(prompt.startsWith('A950_HOLD')){held=res;res.once('close',()=>{if(held===res)held=null;});}
+    const lastUser=data.messages.map(m=>m.role).lastIndexOf('user');const hasTool=data.messages.slice(lastUser+1).some(m=>m.role==='tool');
+    if(prompt.startsWith('A950_HOLD')&&!hasTool){held=res;heldPrompt=prompt;res.once('close',()=>{if(held===res)held=null;});}
     else send(res,{content:'queued complete'});
    }catch(e){report.providerError=String(e.stack);res.writeHead(500);res.end('fixture invalid');}
   });
@@ -53,7 +54,7 @@ async function parent(){
   }
   const db=new(require(config.hostDatabase))(path.join(temporary,'data/a9-state.db'),{readonly:true});
   try{report.sqlite={integrity:db.pragma('integrity_check',{simple:true}),activeTasks:db.prepare("SELECT count(*) n FROM a9_tasks WHERE status='active'").get().n,activeTurns:db.prepare("SELECT count(*) n FROM a9_turns WHERE status='active'").get().n,activeRuns:db.prepare("SELECT count(*) n FROM a9_runs WHERE status='active'").get().n};assert.strictEqual(report.sqlite.integrity,'ok');assert.strictEqual(report.sqlite.activeTasks+report.sqlite.activeTurns+report.sqlite.activeRuns,0);assert(!JSON.stringify(db.prepare('SELECT payload_json FROM a9_events').all()).includes('A950_PRIVATE'));}finally{db.close();}
-  assert.strictEqual(requests.length,process.platform==='win32'?9:8);assert(!report.providerError);report.status='PASS';
+  assert.strictEqual(requests.length,process.platform==='win32'?12:8);assert(!report.providerError);report.status='PASS';
  }catch(e){report.status='FAIL';report.error=String(e.stack||e);}
  finally{for(const s of sockets)s.destroy();if(server.listening)await new Promise(r=>server.close(r));assert(!child);fs.rmSync(temporary,{recursive:true,force:true});report.temporaryRemoved=!fs.existsSync(temporary);report.requestPrompts=requests.map(r=>r.prompt);write(path.join(out,'RESULT.json'),report);}
  console.log(JSON.stringify({status:report.status,error:report.error,requests:requests.length}));process.exitCode=report.status==='PASS'?0:1;
@@ -107,22 +108,32 @@ async function child(){
    await evaluate(()=>document.querySelector('#queue-items button').click());await until(async()=>(await snapshot()).queue.items.length===0,'remove');
    await submit('A950_HOLD_FAIL');await queue('A950_AFTER_FAIL');await control('/fail');await until(async()=>(await snapshot()).agentStatus==='failed','failure');
    await check('failure_requires_explicit_resume',async()=>{let s=await snapshot();assert(s.queue.paused&&s.queue.items.length===1);assert.strictEqual((await control('/facts')).count,6);await evaluate(()=>window.win7AgentA9Workbench.refreshSnapshot());await click('queue-toggle');await until(async()=>(await control('/facts')).count===7&&(await snapshot()).agentStatus==='completed','resumed');return {before:6,after:7};});
+   if(process.platform==='win32')await check('queued_followup_runs_with_real_owned_background_then_stop_cleans_it',async()=>{
+    await evaluate(()=>{document.querySelector('input[name="a9-mode-choice"][value="full_access"]').checked=true;document.getElementById('a9-mode-apply').click();});
+    await until(async()=>(await snapshot()).mode==='full_access','full access for real background');
+    await submit('A950_HOLD_BACKGROUND');await queue('A950_AFTER_BACKGROUND');await control('/release');
+    await until(async()=>{const s=await snapshot();return (await control('/facts')).count===10&&!s.queue.items.length&&['completed','completed_with_warnings'].includes(s.agentStatus);},'queued followup with real background');
+    const s=await snapshot();assert(s.managedProcesses.some(p=>p.lastProbeStatus==='running'&&p.ownershipState==='owned'));
+    assert(s.conversationControls.canSwitch===false);await evaluate(()=>window.win7AgentA9Workbench.refreshSnapshot());await click('cancel-task');
+    await until(async()=>{const s=await snapshot();return s.conversationControls.canSwitch&&s.controls.canStop===false;},'real background stopped');
+    return {loopbackRequests:10,healthyBackgroundDidNotBlockQueue:true,realRunnerStopped:true};
+   });
    await submit('A950_HOLD_RESTART');await queue('A950_AFTER_RESTART');await input('A950_PRIVATE_restart');
    await until(async()=>(await snapshot()).draft.text==='A950_PRIVATE_restart','restart draft saved');await click('cancel-task');
    await until(async()=>(await snapshot()).agentStatus==='cancelled','restart current cancelled');
    const pending=await snapshot();assert(pending.queue.paused&&pending.queue.items.length===1);
-   assert.strictEqual((await control('/facts')).count,8);
+   assert.strictEqual((await control('/facts')).count,process.platform==='win32'?11:8);
   }else{
    await check('restart_never_replays_and_windows_dpapi_restores_paused_content',async()=>{
-    const s=await snapshot();assert.strictEqual((await control('/facts')).count,8);
+    const s=await snapshot();assert.strictEqual((await control('/facts')).count,process.platform==='win32'?11:8);
     if(process.platform==='win32'){
      assert.strictEqual(s.queue.persistence,'dpapi');assert(s.queue.paused);assert.strictEqual(s.queue.items.length,1);
      assert.strictEqual(s.queue.items[0].text,'A950_AFTER_RESTART');assert.strictEqual(s.draft.text,'A950_PRIVATE_restart');
      await evaluate(()=>window.win7AgentA9Workbench.refreshSnapshot());await click('queue-toggle');
-     await until(async()=>(await control('/facts')).count===9&&(await snapshot()).agentStatus==='completed','explicit restored queue resume');
+     await until(async()=>(await control('/facts')).count===12&&(await snapshot()).agentStatus==='completed','explicit restored queue resume');
      assert.strictEqual((await snapshot()).draft.text,'A950_PRIVATE_restart');
     }else{assert.strictEqual(s.queue.items.length,0);assert.strictEqual(s.queue.persistence,'memory');assert.strictEqual(s.draft.text,'');}
-    return {beforeExplicitResume:8,afterExplicitResume:(await control('/facts')).count,persistence:s.queue.persistence,dpapi:process.platform==='win32'?'PASS':'NOT_PERFORMED'};
+    return {beforeExplicitResume:process.platform==='win32'?11:8,afterExplicitResume:(await control('/facts')).count,persistence:s.queue.persistence,dpapi:process.platform==='win32'?'PASS':'NOT_PERFORMED'};
    });
   }
   await evaluate(()=>window.win7AgentA9Workbench.refreshSnapshot());assert((await snapshot()).conversationControls.canSwitch);assert.strictEqual(report.errors.length,0);report.status='PASS';
