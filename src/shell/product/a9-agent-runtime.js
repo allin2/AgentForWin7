@@ -346,7 +346,14 @@ function createA9AgentRuntime(options) {
       && !shellConfigurationInFlight
       && ['full_access', 'read_only'].includes(permissionMode)
       && providerConfig && providerProbe && providerProbe.classification === 'tool_calling'
-      && !conversationBlockReason();
+      // A healthy owned background process blocks conversation switching, not
+      // another turn in that conversation. Unknown cleanup still fails closed.
+      && !loopTrustedRunner.getBackgroundManager().list().some(handle => {
+        const healthy = handle.status === 'running' && handle.ownershipState === 'owned'
+          && handle.pidReusePossible !== true && handle.owner && handle.owner.conversationId === a9SessionId;
+        return !healthy && (handle.cleanupRequired === true || handle.status === 'starting'
+          || ['running_unknown', 'identity_mismatch'].includes(handle.status));
+      });
   }
   function scheduleQueue() {
     if (queueScheduled || !queueReady()) return;

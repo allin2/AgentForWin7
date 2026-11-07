@@ -16,7 +16,7 @@ function testPlatform(value: NodeJS.Platform) {
 
 async function scenario(auditFailure = false, releaseFailure = false, options: {
   workspace?: string; canonicalize?: (workspace: string) => string; startingAuditFailure?: boolean;
-  startFailure?: 'confirmed' | 'unknown'; terminalAuditFailure?: boolean; builtRunner?: boolean; commandCwd?: string;
+  startFailure?: 'confirmed' | 'unknown'; terminalAuditFailure?: boolean; builtRunner?: boolean; commandCwd?: string; queuedPrompt?: string;
 } = {}) {
   const workspace = options.workspace ?? '/memory/workspace';
   const disk = new Map<string, unknown>();
@@ -24,7 +24,7 @@ async function scenario(auditFailure = false, releaseFailure = false, options: {
     readFileSync: (p: string) => disk.get(p), renameSync: (a: string, b: string) => { disk.set(b, disk.get(a)); disk.delete(a); } };
   const file = path.resolve(__dirname, '../../product/a9-agent-runtime.js'), req = createRequire(file);
   const box: any = { module: { exports: {} }, exports: {}, require: (n: string) => n === 'fs' ? memoryFs : req(n), __dirname: path.dirname(file),
-    Buffer, URL, process, AbortController, setTimeout, clearTimeout, setInterval, clearInterval, console };
+    Buffer, URL, process, AbortController, setTimeout, clearTimeout, setInterval, clearInterval, setImmediate, clearImmediate, console };
   vm.runInNewContext(fs.readFileSync(file, 'utf8'), box, { filename: file });
   const projected: string[] = []; let audited = 0;
   let db: any, manager!: BackgroundProcessManager, publish!: (c: any) => Promise<void>;
@@ -69,7 +69,7 @@ async function scenario(auditFailure = false, releaseFailure = false, options: {
     }
     getBackgroundManager() { return manager; }
   }
-  class Provider { async sendStreamRequest() { return ++requests === 1
+  class Provider { async probeCapability() { return { ok: true, hasToolCalling: true, hasStreaming: true }; } async sendStreamRequest() { return ++requests === 1
     ? { id: 'tools', content: '', finishReason: 'tool_calls', toolCalls: [{ id: 'start-call', name: 'start_process', arguments: JSON.stringify({ command: 'echo tick', ...(options.commandCwd ? { cwd: options.commandCwd } : {}) }) }] }
     : { id: 'done', content: 'done', finishReason: 'stop' }; } }
   const runtime = box.module.exports.createA9AgentRuntime({ workspaceRoot: workspace, dataRoot: '/memory/data', ownerId: 'managed-test',
@@ -89,7 +89,11 @@ async function scenario(auditFailure = false, releaseFailure = false, options: {
   await runtime.configureProvider({ baseUrl: 'http://example.invalid', model: 'fixture', skipProbe: true });
   if (options.startingAuditFailure) db.exec("CREATE TRIGGER fail_intent BEFORE INSERT ON a9_events WHEN NEW.event_type='managed_process_ownership' BEGIN SELECT RAISE(FAIL,'intent disk failed'); END");
   if (options.terminalAuditFailure) db.exec("CREATE TRIGGER fail_terminal BEFORE INSERT ON a9_managed_processes WHEN NEW.last_probe_status='failed' BEGIN SELECT RAISE(FAIL,'terminal disk failed'); END");
-  const result = await runtime.submitTurn('start background');
+  if (options.queuedPrompt) await runtime.probeProvider();
+  const pending = runtime.submitTurn('start background');
+  if (options.queuedPrompt) expect(runtime.updateQueue({ conversationId: runtime.getSnapshot().activeConversationId,
+    operation: 'add', text: options.queuedPrompt }).ok).toBe(true);
+  const result = await pending;
   if (!options.startingAuditFailure && !options.startFailure && !result.ok) { db.close(); expect(result.ok).toBe(true); }
   if (auditFailure) db.exec("CREATE TRIGGER fail_output BEFORE INSERT ON a9_events WHEN NEW.event_type='tool_output' BEGIN SELECT RAISE(FAIL,'disk failed'); END");
   async function output(text: string) { const b = Buffer.from(text); bytes += b.length; await publish({ type: 'output_chunk', requestId: 'req', stream: 'stdout', seq: ++seq, streamOffset: bytes - b.length, byteLength: b.length, dataBase64: b.toString('base64') }); }
@@ -273,4 +277,18 @@ it.each(['preflight', 'confirmed', 'unknown'] as const)('A9-35 current-dist cons
       expect(f.trace().requests).toBe(before);
     }
   } finally { f.close(); }
+});
+
+it('A9-50 sends a queued follow-up while a healthy owned background process stays active', async () => {
+  const f = await scenario(false, false, { queuedPrompt: 'next task' });
+  try {
+    expect(f.result.ok).toBe(true);
+    expect(f.manager.getActiveCount()).toBe(1);
+    const deadline = Date.now() + 1000;
+    while (f.trace().requests < 3 && Date.now() < deadline) await new Promise(resolve => setImmediate(resolve));
+    expect(f.trace().requests).toBe(3);
+    expect(f.runtime.getSnapshot().queue.items).toHaveLength(0);
+    expect(f.manager.getActiveCount()).toBe(1);
+    expect(f.runtime.getSnapshot().conversationControls.canSwitch).toBe(false);
+  } finally { await f.runtime.shutdown(); f.close(); }
 });
