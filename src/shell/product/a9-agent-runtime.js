@@ -16,6 +16,7 @@ const crypto = require('crypto');
 const os = require('os');
 const { serializeError } = require('./desktop-host');
 const { createDpapiCredentialVault } = require('./credential-vault');
+const { createComposerState } = require('./a9-composer-state');
 
 function requireModule(relativeName) {
   const candidates = [
@@ -311,9 +312,6 @@ function createA9AgentRuntime(options) {
   let checkpointRecoveryFatal = false;
 
   // ----- 按对话草稿（D-020：DPAPI Current User；失败时仅内存） -----
-  const memoryDrafts = new Map();
-  const draftDiagnostics = new Map();
-
   function draftEncryptionAvailable() {
     try {
       return (config.vaultPlatform || process.platform) === 'win32'
@@ -325,57 +323,83 @@ function createA9AgentRuntime(options) {
     }
   }
 
-  function readDraft(sessionId) {
-    if (memoryDrafts.has(sessionId)) {
-      return {
-        text: memoryDrafts.get(sessionId),
-        persistence: 'memory',
-        note: draftDiagnostics.get(sessionId) || '草稿仅保存在当前进程内存中。',
-      };
-    }
-    const ciphertext = persistence.getConversationDraftCiphertext(sessionId);
-    if (!ciphertext) {
-      return draftEncryptionAvailable()
-        ? { text: '', persistence: 'dpapi' }
-        : { text: '', persistence: 'memory', note: 'Windows DPAPI 不可用，草稿仅在当前进程保留。' };
-    }
-    if (!draftEncryptionAvailable()) {
-      const note = 'Windows DPAPI 不可用，已保存草稿无法解密；原密文未被覆盖。';
-      draftDiagnostics.set(sessionId, note);
-      return { text: '', persistence: 'memory', note };
-    }
-    try {
-      return {
-        text: config.safeStorage.decryptString(Buffer.from(ciphertext, 'base64')),
-        persistence: 'dpapi',
-      };
-    } catch (_err) {
-      const note = 'DPAPI 草稿解密失败；原密文未被覆盖，本次降级为仅内存。';
-      memoryDrafts.set(sessionId, '');
-      draftDiagnostics.set(sessionId, note);
-      return { text: '', persistence: 'memory', note };
-    }
+  const composer = createComposerState({
+    available: draftEncryptionAvailable,
+    read: id => persistence.getConversationDraftCiphertext(id),
+    write: (id, value) => persistence.setConversationDraftCiphertext(id, value),
+    encrypt: value => config.safeStorage.encryptString(value).toString('base64'),
+    decrypt: value => config.safeStorage.decryptString(Buffer.from(value, 'base64')),
+  });
+  function readDraft(sessionId) { return composer.draft(sessionId); }
+  function saveDraft(text) { return composer.saveDraft(a9SessionId, text); }
+  let queueScheduled = false;
+  let queueEpoch = 0;
+  let queueClosed = false;
+  function pauseQueue(error = null) {
+    queueEpoch += 1;
+    queueScheduled = false;
+    composer.pause(a9SessionId, error);
+  }
+  function queueReady() {
+    return !queueClosed && !workspaceLockReleased && lockHeld && !activeController
+      && !currentPendingApproval && !currentPendingQuestion && !managedAuditFailure && !auditFailureBlock
+      && !shellConfigurationInFlight
+      && ['full_access', 'read_only'].includes(permissionMode)
+      && providerConfig && providerProbe && providerProbe.classification === 'tool_calling'
+      && !conversationBlockReason();
+  }
+  function scheduleQueue() {
+    if (queueScheduled || !queueReady()) return;
+    const sessionId = a9SessionId;
+    const queue = composer.snapshot(sessionId);
+    if (queue.paused || !queue.items.length) return;
+    queueScheduled = true;
+    const epoch = queueEpoch;
+    setImmediate(async () => {
+      try {
+        if (epoch !== queueEpoch || sessionId !== a9SessionId) return;
+        queueScheduled = false;
+        if (!queueReady()) { pauseQueue(); return; }
+        const item = composer.take(sessionId);
+        if (!item) return;
+        // Automatic dispatch consumes only the queued item, never the draft.
+        await finishQueueOperation(submitTurn(item.text, { preserveDraft: true }));
+      } catch (_error) {
+        pauseQueue({ code: 'A9_QUEUE_DISPATCH_FAILED', message: '队列调度失败，已暂停。请核对任务记录后继续。' });
+      }
+    });
   }
 
-  function saveDraft(text) {
-    const draft = String(text == null ? '' : text).slice(0, 32_000);
-    if (draftEncryptionAvailable()) {
-      try {
-        const ciphertext = draft.length > 0
-          ? config.safeStorage.encryptString(draft).toString('base64')
-          : null;
-        persistence.setConversationDraftCiphertext(a9SessionId, ciphertext);
-        memoryDrafts.delete(a9SessionId);
-        draftDiagnostics.delete(a9SessionId);
-        return { ok: true, persistence: 'dpapi' };
-      } catch (_err) {
-        // 不覆盖旧密文；当前草稿改为进程内存保留。
-      }
+  async function finishQueueOperation(request) {
+    let response;
+    try {
+      response = await request;
+      const outcome = response && response.result && response.result.outcome;
+      if (response && response.ok === true && ['completed', 'completed_with_warnings'].includes(outcome)) scheduleQueue();
+      else if (!['needs_approval', 'needs_input'].includes(outcome)) pauseQueue();
+      return response;
+    } catch (error) {
+      pauseQueue();
+      return { ok: false, error: presentError(error) };
     }
-    memoryDrafts.set(a9SessionId, draft);
-    const note = 'Windows DPAPI 不可用或加密失败，草稿仅在当前进程保留。';
-    draftDiagnostics.set(a9SessionId, note);
-    return { ok: true, persistence: 'memory', note };
+  }
+  function updateQueue(input) {
+    try {
+      if (!input || input.conversationId !== a9SessionId) throw new Error('A9_QUEUE_CONVERSATION_MISMATCH');
+      if (queueClosed || !lockHeld || workspaceLockReleased || managedAuditFailure || auditFailureBlock) throw new Error('A9_QUEUE_UNAVAILABLE');
+      if (input.operation === 'add') {
+        if (!activeController || agentStatus !== 'running' || currentPendingApproval || currentPendingQuestion) throw new Error('A9_QUEUE_REQUIRES_RUNNING_TURN');
+        composer.add(a9SessionId, crypto.randomBytes(12).toString('hex'), input.text);
+      } else if (input.operation === 'remove') composer.remove(a9SessionId, input.itemId);
+      else if (input.operation === 'pause') pauseQueue();
+      else if (input.operation === 'resume') {
+        if (!queueReady() && !activeController) throw new Error('A9_QUEUE_UNAVAILABLE');
+        composer.resume(a9SessionId); scheduleQueue();
+      } else throw new Error('A9_QUEUE_OPERATION_INVALID');
+      return { ok: true, queue: composer.snapshot(a9SessionId) };
+    } catch (error) {
+      return { ok: false, error: { code: /^A9_QUEUE_[A-Z_]+$/.test(error.message) ? error.message : 'A9_QUEUE_FAILED', message: '队列更新失败，内容未发送。' } };
+    }
   }
 
   // ----- Provider（R4：非秘密配置版本化持久化；秘密仅 DPAPI；未配置即拒绝执行） -----
@@ -1025,6 +1049,7 @@ function createA9AgentRuntime(options) {
   }
 
   async function configureShell(input) {
+    pauseQueue();
     if (shellConfigurationInFlight) {
       throw Object.assign(new Error('A9_SHELL_RECONFIGURE_BUSY: Shell 设置正在等待用户选择'), {
         code: 'A9_SHELL_RECONFIGURE_BUSY',
@@ -1209,6 +1234,7 @@ function createA9AgentRuntime(options) {
 
   function conversationBlockReason() {
     if (activeController) return '当前任务正在执行';
+    if (queueScheduled) return '下一条排队消息正在准备执行';
     if (currentPendingApproval) return '当前对话正在等待审批';
     if (currentPendingQuestion) return '当前对话正在等待回答';
     if (loopTrustedRunner.getBackgroundManager().getActiveCount() > 0) return '当前对话仍有托管后台进程';
@@ -1224,6 +1250,7 @@ function createA9AgentRuntime(options) {
   }
 
   function loadConversation(record) {
+    pauseQueue();
     activeConversation = record;
     a9SessionId = record.sessionId;
     loop = null;
@@ -1557,6 +1584,7 @@ function createA9AgentRuntime(options) {
    * tool_calling / chat_only / unavailable；模型切换保留会话上下文。
    */
   async function configureProvider(input) {
+    pauseQueue();
     if (loopTrustedRunner.getBackgroundManager().getActiveCount() > 0) {
       throw Object.assign(new Error('A9_PROVIDER_MANAGED_ACTIVE: 请先停止后台进程，再修改 Provider 凭据或配置。'), { code: 'A9_PROVIDER_MANAGED_ACTIVE' });
     }
@@ -2209,7 +2237,7 @@ function createA9AgentRuntime(options) {
     }
   }
 
-  async function submitTurn(prompt) {
+  async function submitTurn(prompt, options = {}) {
     if (managedAuditFailure) return presentAuditFailure(managedAuditFailure);
     if (auditFailureBlock) return presentAuditFailure(auditFailureBlock);
     if (activeController) {
@@ -2244,7 +2272,7 @@ function createA9AgentRuntime(options) {
         requestPrompt: persistedRequestPrompt,
       });
       activeConversation = persistence.maybeSetAutomaticTitle(a9SessionId, persistedRequestPrompt);
-      saveDraft('');
+      if (!options.preserveDraft) saveDraft('');
       activeLifecycle = { taskId: createdTaskId, turnId: null, runId: null, requestPrompt: persistedRequestPrompt };
       const activeLoop = ensureRuntime();
       const result = await activeLoop.runTurn(requestPrompt, { signal: ownedController.signal });
@@ -2552,6 +2580,7 @@ function createA9AgentRuntime(options) {
   }
 
   function stop() {
+    pauseQueue();
     if (activeController) {
       activeController.abort();
       agentStatus = 'cancelling';
@@ -2591,6 +2620,7 @@ function createA9AgentRuntime(options) {
   }
 
   function setMode(mode) {
+    pauseQueue();
     if (mode !== 'full_access' && mode !== 'review' && mode !== 'read_only') {
       // F6：精确 A9_MODE_INVALID（serializeError 依赖 error.code 透传）。
       const err = new Error('A9_MODE_INVALID: 权限模式必须是 full_access/review/read_only');
@@ -2693,6 +2723,7 @@ function createA9AgentRuntime(options) {
       },
       contextWindow: { ...restoredContext.stats, budgetChars: providerConfig?.contextBudgetChars ?? DEFAULT_CONTEXT_BUDGET_CHARS },
       draft: readDraft(a9SessionId),
+      queue: composer.snapshot(a9SessionId),
       ...(persistenceOutcome.backupPath ? {
         migrationBackup: {
           path: persistenceOutcome.backupPath,
@@ -2917,6 +2948,8 @@ function createA9AgentRuntime(options) {
   }
 
   function shutdown(options = {}) {
+    queueClosed = true;
+    pauseQueue();
     if (imageService) imageService.clear();
     const officeClose = officeService ? officeService.close() : Promise.resolve();
     if (shutdownPromise && options.stopManaged !== false) return shutdownPromise;
@@ -2978,11 +3011,20 @@ function createA9AgentRuntime(options) {
     configureProvider,
     probeProvider,
     configureShell,
-    submitTurn,
+    submitTurn: prompt => queueScheduled
+      ? Promise.resolve({ ok: false, error: { code: 'A9_QUEUE_DISPATCH_PENDING' } })
+      : finishQueueOperation(submitTurn(prompt)),
+    updateQueue,
     continueTask,
     dismissRecovered,
-    resumeApproval,
-    answerQuestion,
+    resumeApproval: input => {
+      if (input && input.decision === 'denied') pauseQueue();
+      return finishQueueOperation(resumeApproval(input));
+    },
+    answerQuestion: input => {
+      if (input && input.decision === 'cancelled') pauseQueue();
+      return finishQueueOperation(answerQuestion(input));
+    },
     stop,
     saveDraft,
     createConversation,
@@ -3103,6 +3145,7 @@ function createSqliteUnavailableRuntime(reason) {
     configureShell() { throw new Error('ELECTRON_SQLITE_UNAVAILABLE'); },
     async continueTask() { return { ok: false, error: { code: 'ELECTRON_SQLITE_UNAVAILABLE' } }; },
     dismissRecovered() { return { ok: false, error: { code: 'ELECTRON_SQLITE_UNAVAILABLE' } }; },
+    updateQueue() { return { ok: false, error: { code: 'A9_QUEUE_UNAVAILABLE' } }; },
     async submitTurn() { return { ok: false, error: { code: 'ELECTRON_SQLITE_UNAVAILABLE', message: 'Electron-ABI better-sqlite3 预检失败，A9 持久化不可用。' } }; },
     async resumeApproval() { return { ok: false, error: { code: 'ELECTRON_SQLITE_UNAVAILABLE' } }; },
     async answerQuestion() { return { ok: false, error: { code: 'ELECTRON_SQLITE_UNAVAILABLE' } }; },
@@ -3146,6 +3189,7 @@ function createDiagnosticsRuntime(outcome) {
     configureShell() { throw new Error('A9_DIAGNOSTICS_MODE'); },
     async continueTask() { return { ok: false, error: { code: 'A9_DIAGNOSTICS_MODE' } }; },
     dismissRecovered() { return { ok: false, error: { code: 'A9_DIAGNOSTICS_MODE' } }; },
+    updateQueue() { return { ok: false, error: { code: 'A9_QUEUE_UNAVAILABLE' } }; },
     async submitTurn() { return { ok: false, error: { code: 'A9_DIAGNOSTICS_MODE', message: '数据库受限诊断模式，禁止执行任务。' } }; },
     async resumeApproval() { return { ok: false, error: { code: 'A9_DIAGNOSTICS_MODE' } }; },
     async answerQuestion() { return { ok: false, error: { code: 'A9_DIAGNOSTICS_MODE' } }; },

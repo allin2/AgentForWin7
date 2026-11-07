@@ -71,6 +71,7 @@ const MANAGED_PROFILE = 'D-013-v26-managed-a9-trusted-shell-current-user';
 const A9_32_LOCK_ID = 'A9-32-DEVELOPER-INPUTS-D013-V26-MANAGED';
 // Formal batch-2 locks and the exact release identity each one may carry (alpha.3 WIN7-56, alpha.4 WIN7-57).
 const FORMAL_IDENTITIES = Object.freeze({
+  'A9-ALPHA6-INPUTS-D013-V26-MANAGED': Object.freeze({ version: '0.3.0-alpha.6', releaseId: 'WIN7-CODING-AGENT-A9-ALPHA6', candidate: 'WIN7-59' }),
   'A9-BATCH2-INPUTS-D013-V26-MANAGED': Object.freeze({ version: '0.3.0-alpha.3', releaseId: 'WIN7-CODING-AGENT-A9-ALPHA3', candidate: 'WIN7-56' }),
   'A9-ALPHA4-INPUTS-D013-V26-MANAGED': Object.freeze({ version: '0.3.0-alpha.4', releaseId: 'WIN7-CODING-AGENT-A9-ALPHA4', candidate: 'WIN7-57' }),
   'A9-ALPHA5-INPUTS-D013-V26-MANAGED': Object.freeze({ version: '0.3.0-alpha.5', releaseId: 'WIN7-CODING-AGENT-A9-ALPHA5', candidate: 'WIN7-58' }),

@@ -24,6 +24,14 @@ describe('A9 preload capability boundary', () => {
     return { api: exposed!, invoke };
   }
 
+  it('exposes only the versioned conversation queue operation', async () => {
+    const { api, invoke } = loadPreload(['electron', 'main.js']);
+    await api.a9.updateQueue({ conversationId: 'current', operation: 'pause' });
+    expect(invoke).toHaveBeenCalledWith('product:a9-request', {
+      schemaVersion: 8, action: 'a9.queue.update', payload: { conversationId: 'current', operation: 'pause' },
+    });
+  });
+
   it('does not expose deferred A8 Review mutation methods to the normal A9 renderer', () => {
     const { api } = loadPreload(['electron', 'main.js']);
     expect(api.a9).toBeDefined();

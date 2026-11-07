@@ -95,6 +95,7 @@
     draftHydratedConversationId: null,
     draftTimer: null,
     draftSaving: false,
+    queueBusy: false,
     undoConfirmations: Object.create(null),
     // ADR-0114：事件数据层与过程渲染状态。
     inspectorEvents: new Map(),
@@ -204,15 +205,7 @@
   }
 
   function canSubmit() {
-    const snapshot = state.snapshot;
-    return Boolean(
-      snapshot && snapshot.status === 'ready' &&
-      SUPPORTED_MODES.has(snapshot.mode) &&
-      snapshot.provider && snapshot.provider.configured &&
-      snapshot.provider.probe && snapshot.provider.probe.classification === 'tool_calling' &&
-      !state.running && snapshot.agentStatus !== 'needs_approval' && snapshot.agentStatus !== 'needs_input' &&
-      el('task-prompt').value.trim(),
-    );
+    return root.win7AgentComposerController.controls(state.snapshot, state.running, el('task-prompt').value).canSend;
   }
 
   function activeManagedProcesses(snapshot) {
@@ -341,7 +334,7 @@
     const stopKind = state.running
       ? 'turn'
       : snapshot && snapshot.controls ? snapshot.controls.stopKind : hasManaged ? 'managed_process' : 'none';
-    prompt.disabled = blockedMode || blockedApproval || blockedQuestion;
+    prompt.disabled = !root.win7AgentComposerController.controls(snapshot, state.running, prompt.value).canDraft;
     const draftingWhileRunning = state.running && !prompt.disabled;
     prompt.placeholder = draftingWhileRunning
       ? '起草下一条消息，当前任务结束后手动发送…'
@@ -351,6 +344,12 @@
     el('composer-draft-guidance').hidden = !draftingWhileRunning;
     el('composer-guidance').classList.toggle('drafting', draftingWhileRunning);
     send.hidden = state.running;
+    const queueButton = el('queue-task');
+    if (queueButton) {
+      queueButton.hidden = !state.running;
+      queueButton.disabled = state.queueBusy || !root.win7AgentComposerController.controls(snapshot, state.running, prompt.value).canQueue;
+    }
+    renderQueue(snapshot);
     stop.hidden = !canStop;
     // ADR-0314：运行中可编辑下一条草稿，执行动作仍只有停止；不自动发送。
     railStop.hidden = true;
@@ -2605,6 +2604,59 @@
    * ADR-0114：轮次提交复用事件流——本地先建请求卡，过程经 timeline 增量
    * 入流，终态由 turn_completed/事实渲染；不再双写结果卡。
    */
+  function renderQueue(snapshot) {
+    const panel = el('composer-queue');
+    if (!panel) return;
+    const queue = snapshot && snapshot.queue;
+    panel.hidden = !queue || !queue.items.length;
+    if (panel.hidden) return;
+    text('queue-state', `${queue.paused ? '已暂停' : '顺序发送'} · ${queue.items.length}/8`);
+    text('queue-note', queue.note || '仅排队内容会在上一轮正常完成后发送；停止、失败或重启后暂停。');
+    const toggle = el('queue-toggle');
+    toggle.textContent = queue.paused ? '继续队列' : '暂停队列';
+    toggle.disabled = state.queueBusy || !snapshot || snapshot.status !== 'ready'
+      || Boolean(snapshot.pendingApproval || snapshot.pendingQuestion);
+    const list = el('queue-items');
+    const signature = JSON.stringify([queue.items, state.queueBusy]);
+    if (list.dataset.signature === signature) return;
+    list.dataset.signature = signature;
+    list.textContent = '';
+    queue.items.forEach((item, index) => {
+      const row = document.createElement('li');
+      const copy = document.createElement('span');
+      copy.textContent = `${index + 1}. ${item.text}`;
+      const remove = document.createElement('button');
+      remove.type = 'button'; remove.textContent = '移除';
+      remove.setAttribute('aria-label', `移除第 ${index + 1} 条排队消息`);
+      remove.disabled = state.queueBusy;
+      remove.addEventListener('click', () => { void updateQueue('remove', { itemId: item.id }); });
+      row.appendChild(copy); row.appendChild(remove); list.appendChild(row);
+    });
+  }
+
+  async function updateQueue(operation, fields = {}) {
+    const snapshot = state.snapshot;
+    if (state.queueBusy || !snapshot || !snapshot.activeConversationId) return;
+    const conversationId = snapshot.activeConversationId;
+    const prompt = el('task-prompt');
+    const originalText = prompt.value;
+    if (operation === 'add') {
+      if (!root.win7AgentComposerController.controls(snapshot, state.running, originalText).canQueue) return;
+      if (state.draftTimer) { root.clearTimeout(state.draftTimer); state.draftTimer = null; }
+    }
+    state.queueBusy = true; syncComposer();
+    try {
+      const response = await a9.updateQueue({ conversationId, operation, ...fields,
+        ...(operation === 'add' ? { text: originalText } : {}) });
+      if (!response || response.ok !== true) {
+        setFieldError('a9-turn-error', errorMessage(response, '队列更新失败，输入仍保留。'));
+      } else if (state.activeConversationId === conversationId && operation === 'add' && prompt.value === originalText) {
+        prompt.value = ''; resizeComposer(); await saveDraftNow();
+      }
+    } catch (error) { setFieldError('a9-turn-error', errorMessage(error, '队列更新结果未知，请刷新核对后再操作。')); }
+    finally { state.queueBusy = false; await refreshSnapshot(); syncComposer(); }
+  }
+
   async function submitPrompt() {
     const prompt = el('task-prompt').value.trim();
     if (!prompt || !canSubmit()) return null;
@@ -2751,7 +2803,8 @@
         ['running', 'starting'].includes(item.lastProbeStatus) && item.pidReusePossible !== true
         && !['released', 'release_unknown'].includes(item.ownershipState)));
     const needed = state.snapshotPollingRequests > 0 || hasLiveManaged
-      || Boolean(snapshot && ['running', 'cancelling'].includes(snapshot.agentStatus));
+      || Boolean(snapshot && ['running', 'cancelling'].includes(snapshot.agentStatus))
+      || Boolean(snapshot && snapshot.queue && !snapshot.queue.paused && snapshot.queue.items.length);
     if (state.snapshotPollingClosed || state.snapshotPollingPauses > 0 || !needed) {
       if (state.stopSnapshotPolling) {
         void state.stopSnapshotPolling();
@@ -3554,6 +3607,11 @@
       }
     });
     el('run-task').addEventListener('click', () => { void submitPrompt(); });
+    el('queue-task').addEventListener('click', () => { void updateQueue('add'); });
+    el('queue-toggle').addEventListener('click', () => {
+      const queue = state.snapshot && state.snapshot.queue;
+      if (queue) void updateQueue(queue.paused ? 'resume' : 'pause');
+    });
     el('cancel-task').addEventListener('click', () => { void stopTurn(); });
     el('rail-stop').addEventListener('click', () => { void stopTurn(); });
     el('conversation-new').addEventListener('click', () => { void createConversation(); });

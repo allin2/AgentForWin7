@@ -705,3 +705,13 @@ summary:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--focus
 :root[data-theme="dark"] .composer-guidance { opacity: 1; }
 :root[data-theme="dark"] .a9-question-actions button:disabled { opacity: 1; }
 .a9-question-actions button:hover:not(:disabled) { border-color: var(--accent); background: var(--soft); }
+
+/* A9-50: bounded queue, sharing the existing composer palette. */
+.composer-queue { border-top: 1px solid var(--line); margin-top: 8px; padding-top: 8px; }
+.composer-queue header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.composer-queue ol { list-style: none; margin: 6px 0; padding: 0; max-height: 104px; overflow-y: auto; }
+.composer-queue li { display: flex; align-items: start; gap: 8px; padding: 4px 0; }
+.composer-queue li span { flex: 1; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 52px; overflow-y: auto; }
+.composer-queue button, .queue-add { flex-shrink: 0; padding: 5px 9px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: inherit; cursor: pointer; }
+.composer-queue button:disabled, .queue-add:disabled { opacity: .5; cursor: default; }
+.composer-queue p { margin: 4px 0; font-size: 11px; }

@@ -27,6 +27,7 @@ const A9_ACTIONS = Object.freeze({
   CONVERSATION_ARCHIVE: 'a9.conversation.archive',
   CONVERSATION_RESTORE: 'a9.conversation.restore',
   DRAFT_SAVE: 'a9.draft.save',
+  QUEUE_UPDATE: 'a9.queue.update',
   CHECKPOINT_LIST: 'a9.checkpoint.list',
   CHECKPOINT_UNDO_TURN: 'a9.checkpoint.undoTurn',
   CHECKPOINT_UNDO_FILE: 'a9.checkpoint.undoFile',
@@ -42,7 +43,7 @@ const A9_ACTIONS = Object.freeze({
  * v6（ADR-0114）：在 v5 有界文件读取基础上增加按会话有界查询持久化事件
  * （a9.events.query，UI 过程回看；跨会话请求由 runtime 拒绝）。
  */
-const A9_IPC_SCHEMA_VERSION = 7; // ADR-0123: compact snapshot and UI history paging
+const A9_IPC_SCHEMA_VERSION = 8; // ADR-0316: conversation-bound explicit queue
 
 function exactObject(value, keys, code, optionalKeys = []) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
@@ -65,7 +66,7 @@ function createA9ProductRequestHandler(options) {
     }
     try {
       exactObject(request, ['schemaVersion', 'action', 'payload'], 'A9_REQUEST_SCHEMA_INVALID');
-      if (![6, A9_IPC_SCHEMA_VERSION].includes(request.schemaVersion)) {
+      if (![6, 7, A9_IPC_SCHEMA_VERSION].includes(request.schemaVersion)) {
         throw Object.assign(new Error(`A9_SCHEMA_VERSION_UNSUPPORTED:${request.schemaVersion}`), { code: 'A9_SCHEMA_VERSION_UNSUPPORTED' });
       }
       if (!Object.values(A9_ACTIONS).includes(request.action)) {
@@ -194,6 +195,17 @@ function createA9ProductRequestHandler(options) {
         case A9_ACTIONS.CONVERSATION_RESTORE:
           exactObject(payload, ['conversationId'], 'A9_PAYLOAD_INVALID');
           return await runtime.restoreConversation(payload.conversationId);
+        case A9_ACTIONS.QUEUE_UPDATE: {
+          exactObject(payload, ['conversationId', 'operation'], 'A9_PAYLOAD_INVALID', ['text', 'itemId']);
+          const validId = value => typeof value === 'string' && value.length > 0 && value.length <= 256;
+          if (request.schemaVersion < 8 || !validId(payload.conversationId)
+            || !['add', 'remove', 'pause', 'resume'].includes(payload.operation)
+            || (payload.operation === 'add' ? typeof payload.text !== 'string' || !payload.text.trim() || payload.text.length > 8000 : payload.text !== undefined)
+            || (payload.operation === 'remove' ? !validId(payload.itemId) : payload.itemId !== undefined)) {
+            throw Object.assign(new Error('A9_PAYLOAD_INVALID: invalid queue operation'), { code: 'A9_PAYLOAD_INVALID' });
+          }
+          return await runtime.updateQueue(payload);
+        }
         case A9_ACTIONS.DRAFT_SAVE:
           exactObject(payload, ['text'], 'A9_PAYLOAD_INVALID');
           return await runtime.saveDraft(payload.text);

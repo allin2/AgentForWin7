@@ -30,7 +30,7 @@ function a8Request(action, sessionId, payload) {
 
 function a9Request(action, payload) {
   return ipcRenderer.invoke('product:a9-request', {
-    schemaVersion: 7, // ADR-0123：首屏快照与对话分页
+    schemaVersion: action === 'a9.queue.update' ? 8 : 7, // ADR-0316；旧动作保持 v7
     action,
     payload: payload || {},
   });
@@ -78,6 +78,7 @@ const productApi = Object.freeze({
     archiveConversation: (conversationId) => a9Request('a9.conversation.archive', { conversationId }),
     restoreConversation: (conversationId) => a9Request('a9.conversation.restore', { conversationId }),
     saveDraft: (text) => a9Request('a9.draft.save', { text }),
+    updateQueue: (values) => a9Request('a9.queue.update', values),
     listCheckpoints: (options) => a9Request('a9.checkpoint.list', options || {}),
     undoTurn: (turnId, confirmationId) => a9Request('a9.checkpoint.undoTurn', { turnId, ...(confirmationId ? { confirmationId } : {}) }),
     undoFile: (turnId, path, confirmationId) => a9Request('a9.checkpoint.undoFile', { turnId, path, ...(confirmationId ? { confirmationId } : {}) }),

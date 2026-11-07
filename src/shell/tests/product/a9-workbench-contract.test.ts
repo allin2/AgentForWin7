@@ -431,7 +431,7 @@ describe('A9 unified desktop workbench contract', () => {
     };
     const ready = { status: 'ready', mode: 'read_only', agentStatus: 'running',
       provider: { configured: true, probe: { classification: 'tool_calling' } } };
-    const context: any = { state: { snapshot: ready, running: true }, el: node,
+    const context: any = { root: { win7AgentComposerController: require('../../product/renderer/a9-composer-controller') }, renderQueue: () => {}, state: { snapshot: ready, running: true }, el: node,
       text: (id: string, value: string) => { node(id).textContent = value; },
       SUPPORTED_MODES: new Set(['read_only', 'full_access']), activeManagedProcesses: () => [], runtimeDiagnostic: () => 'restricted' };
     const source = script.slice(script.indexOf('  function canSubmit('), script.indexOf('  function activeManagedProcesses('))

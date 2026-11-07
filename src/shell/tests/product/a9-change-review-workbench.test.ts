@@ -69,6 +69,7 @@ function mount() {
   const instrumented = source.replace('  root.win7AgentA9Workbench = Object.freeze({',
     '  root.__review = { state, syncCheckpointScope, renderCheckpoints, loadRecentSummaries, updateSummaryForTurn, queueUndo, cancelPendingUndo, executeUndo, undoResultText, syncComposer };\n  root.win7AgentA9Workbench = Object.freeze({');
   expect(instrumented).not.toBe(source);
+  root.win7AgentComposerController = require('../../product/renderer/a9-composer-controller');
   vm.runInNewContext(instrumented, { window: root, document, Date, Map, Set, Promise });
   const hooks = root.__review;
   const snapshot = { workspaceRoot: 'C:\\中文 空格', activeConversationId: 'conversation-1',

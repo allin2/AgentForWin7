@@ -2941,6 +2941,8 @@ describe('A9-33 batch-2 smoke pieces', () => {
         state: { snapshot, running }, SUPPORTED_MODES: new Set(['full_access', 'read_only']), el: node,
         text: (id: string, value: any) => { node(id).textContent = String(value); }, runtimeDiagnostic: () => 'diagnostic',
       };
+      box.root = { win7AgentComposerController: require('../../product/renderer/a9-composer-controller') };
+      box.renderQueue = () => {};
       vm.runInNewContext(`${code}\n;this.sync = syncComposer; this.resize = resizeComposer;`, box);
       resize = box.resize;
       box.sync();

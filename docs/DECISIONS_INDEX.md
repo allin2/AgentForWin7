@@ -317,3 +317,5 @@
 | ADR-0311 | WIN7-56 同字节实机证据的一次性审核与验收决定 | Accepted |
 | ADR-0314 | A9-47 运行中草稿与手动发送 | Accepted |
 | ADR-0315 | A9-48 alpha.5 同包增量验证与合并验收 | Accepted |
+| ADR-0316 | A9-50 显式排队与 Composer 状态 | Accepted |
+| ADR-0317 | A9-51 alpha.6 发布身份与标准 Gate | Accepted |

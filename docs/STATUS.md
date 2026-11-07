@@ -15,6 +15,10 @@
 
 ## 当前交付、进行中的工作与授权
 
+- [A9-51](tasks/A9_51_ALPHA6_QUEUE_RELEASE.md)：负责人要求“推进发布”，已登记 alpha.6 / WIN7-59 的源码、版本身份、干净包与同包增量验证准备。当前仍为开发准备，Win7 新版本未运行；main 目标窗口、现有 holder 沿用和正式门按适用合同待确认。旧 alpha.5 用户进程与其他会话修改保留。
+
+- [A9-50](tasks/A9_50_QUEUED_INPUT.md#4-开发交付结果2026-11-07-utc)：`A9_50_DEVELOPER_VERIFIED`。Mac / Linux 开发机绑定 main `ef6a6922…` 加本轮未提交补丁。Composer 状态与显式 FIFO 队列完成，停止、失败和恢复后暂停；草稿不自动消费。cw Shell 集合 1465 PASS / 12 NOT_PERFORMED，最后 Stop/存储修正由 Mac 与 cw 各 142 项直接复验，其余未变组记 INHERITED_EVIDENCE。真实 Electron 22 main/preload/IPC/runtime/SQLite 两进程 6 组 PASS；三视口、草稿隔离、停止和重启不重放通过。cw 源码哈希与回收日志核验，任务进程与临时目录无残留，租约释放；原实例与登录保留，ci/monster 未操作。原 dirty 和 HEAD 保留。真实 Win7 DPAPI、Windows、正式门 A/B、提交、推送和发布均 NOT_PERFORMED。准确回执见本机 `outputs/a9-50-queue-r1/RESULT.json`。
+
 - [A9-48](tasks/A9_48_ALPHA5_WORKBENCH_RELEASE.md#8-负责人验收通过与公开发布)：COMPLETE，`A9_48_WIN7_58_PASS_WITH_KNOWN_LIMITS`。负责人已验收并授权发布 alpha.5 / WIN7-58；源码 `498a8f5d…`、ZIP `d1ba4d37…`、111,170,123 字节、Win7 run `2061ce92…`。公开标签指向同一冻结源码，4 个附件保持原 ID/大小/SHA，发布后全部回下载核验一致。原同包 9 组 DEV_CHANNEL、103 项合同、3 项容量检查和发布规则 406 PASS / 16 NOT_PERFORMED 保留；三份构建字节一致。未重建、未替换附件或修改冻结快照。准确接受与发布后校验在本机 `outputs/alpha5-r1/publish/`。同包 Win10、原生 125% DPI、外部后端、正式门 A/B、完整 batch2/Review 与跨机可重复性仍未验证。
 - [A9-47](tasks/A9_47_DRAFT_WHILE_RUNNING.md#61-结果win7-dev_channel-通过)：`A9_47_DEVELOPER_VERIFIED`，Win7 草稿链路取得 `DEV_CHANNEL` PASS。沿用开发包 source `8d97d182…` / ZIP `9eeaa9ff…` / manifest `223bddd2…`，本轮产品源码和包未改；main `305c100b…` 及已有 dirty 保留。普通 agent / Session 1 的 run `24d96c23…` 以候选外锁定 Electron 加载包内真实 main/preload/IPC/runtime/SQLite，两进程 6 组通过：运行中起草与 Enter、草稿隔离和选择保留、结束后手动发送、停止、DPAPI 密文保存及重启恢复，零自动发送或重放。四个准确 CSS 视口通过，实际 DPR=1；5 次回环请求、外部模型 0。SQLite integrity=ok，活动 task/turn/run 均为 0；11 个回收文件 SHA/大小复核，沙箱已删除，后检进程/任务 0、锁 inactive。新驱动本地 6 组直接通过；原七模块编译、Shell lint、51/51 定向合同按未变字节记 INHERITED_EVIDENCE。原失败保留，窗口已关闭。摘要在本机 `outputs/a9-47-draft-r1/win7-r4/RESULT.json`；原 Mac 结果在 `outputs/a9-47-draft-r1/RESULT.json`。同包 Win10、原生 125% DPI、外部模型、正式门 A/B、推送与发布仍为 NOT_PERFORMED。 本次功能已随 alpha.5 / WIN7-58 验收并发布；此前段落中的未发布记录是该开发阶段事实，当前结论见 A9-48 §8。
 

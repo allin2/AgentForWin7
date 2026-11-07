@@ -865,7 +865,7 @@ describe('A9-06: a9 product IPC schema validation', () => {
   });
 
   it('validates and forwards only conversation-bounded A9 event queries (ADR-0114)', async () => {
-    expect(A9_IPC_SCHEMA_VERSION).toBe(7);
+    expect(A9_IPC_SCHEMA_VERSION).toBe(8);
     const queryEvents = jest.fn(() => ({ ok: true, conversationId: 'a9c-1', events: [], hasMore: false }));
     const eventsHandler = createA9ProductRequestHandler({
       getA9Runtime: () => ({ queryEvents }),
