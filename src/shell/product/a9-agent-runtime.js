@@ -351,8 +351,9 @@ function createA9AgentRuntime(options) {
       && !loopTrustedRunner.getBackgroundManager().list().some(handle => {
         const healthy = handle.status === 'running' && handle.ownershipState === 'owned'
           && handle.pidReusePossible !== true && handle.owner && handle.owner.conversationId === a9SessionId;
-        return !healthy && (handle.cleanupRequired === true || handle.status === 'starting'
-          || ['running_unknown', 'identity_mismatch'].includes(handle.status));
+        return handle.pidReusePossible === true
+          || ['running_unknown', 'identity_mismatch'].includes(handle.recoveryStatus)
+          || (!healthy && (handle.cleanupRequired === true || ['starting', 'running'].includes(handle.status)));
       });
   }
   function scheduleQueue() {

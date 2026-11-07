@@ -16,7 +16,7 @@ function testPlatform(value: NodeJS.Platform) {
 
 async function scenario(auditFailure = false, releaseFailure = false, options: {
   workspace?: string; canonicalize?: (workspace: string) => string; startingAuditFailure?: boolean;
-  startFailure?: 'confirmed' | 'unknown'; terminalAuditFailure?: boolean; builtRunner?: boolean; commandCwd?: string; queuedPrompt?: string;
+  startFailure?: 'confirmed' | 'unknown'; terminalAuditFailure?: boolean; builtRunner?: boolean; commandCwd?: string; queuedPrompt?: string; recoveredQueueBlock?: boolean;
 } = {}) {
   const workspace = options.workspace ?? '/memory/workspace';
   const disk = new Map<string, unknown>();
@@ -90,6 +90,8 @@ async function scenario(auditFailure = false, releaseFailure = false, options: {
   if (options.startingAuditFailure) db.exec("CREATE TRIGGER fail_intent BEFORE INSERT ON a9_events WHEN NEW.event_type='managed_process_ownership' BEGIN SELECT RAISE(FAIL,'intent disk failed'); END");
   if (options.terminalAuditFailure) db.exec("CREATE TRIGGER fail_terminal BEFORE INSERT ON a9_managed_processes WHEN NEW.last_probe_status='failed' BEGIN SELECT RAISE(FAIL,'terminal disk failed'); END");
   if (options.queuedPrompt) await runtime.probeProvider();
+  if (options.recoveredQueueBlock) manager.adoptRecoveredFact('recovered', { pid: process.pid, command: 'recovered fact', cwd: workspace,
+    startTime: new Date().toISOString(), cleanupRequired: false });
   const pending = runtime.submitTurn('start background');
   if (options.queuedPrompt) expect(runtime.updateQueue({ conversationId: runtime.getSnapshot().activeConversationId,
     operation: 'add', text: options.queuedPrompt }).ok).toBe(true);
@@ -291,4 +293,21 @@ it('A9-50 sends a queued follow-up while a healthy owned background process stay
     expect(f.manager.getActiveCount()).toBe(1);
     expect(f.runtime.getSnapshot().conversationControls.canSwitch).toBe(false);
   } finally { await f.runtime.shutdown(); f.close(); }
+});
+
+it('A9-50 refuses automatic queue dispatch beside a recovered live PID even without cleanupRequired', async () => {
+  const f = await scenario(false, false, { queuedPrompt: 'must wait for lifecycle resolution', recoveredQueueBlock: true });
+  try {
+    const recovered = f.manager.list().find(handle => handle.handleId === 'recovered')!;
+    expect(recovered.pidReusePossible).toBe(true);
+    expect(recovered.recoveryStatus).toBe('running_unknown');
+    expect(recovered.cleanupRequired).not.toBe(true);
+    await new Promise(resolve => setImmediate(resolve));
+    expect(f.trace().requests).toBe(2);
+    expect(f.runtime.getSnapshot().queue.items).toHaveLength(1);
+  } finally {
+    // A recovered PID fact is never signalled. The actual managed helper from
+    // this test is stopped; memory-only recovered facts are left to the OS.
+    await f.manager.stop('h'); await f.runtime.shutdown({ stopManaged: false }); f.close();
+  }
 });
