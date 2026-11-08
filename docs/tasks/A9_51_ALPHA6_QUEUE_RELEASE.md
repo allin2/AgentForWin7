@@ -7,8 +7,8 @@ Target Branch: main
 Source Baseline: ef6a692294fa4e0403b2d1e00ea188b2e79749f8
 Target Version: 0.3.0-alpha.6
 Candidate: WIN7-59
-Phase-Gate: A9_51_IMPLEMENTATION_AUTHORIZED
-Win7-Validation: NOT_PERFORMED
+Phase-Gate: A9_51_WIN7_59_PASS_WITH_KNOWN_LIMITS
+Win7-Validation: DEV_CHANNEL
 ```
 
 ## 1. 当前范围
@@ -53,3 +53,62 @@ Win10 同包、原生 125% DPI、外部模型、完整 Review/batch2 和跨机�
 版本为内部试用预发布，不宣称完整 Alpha、RC 或稳定版。
 本轮保留现有 alpha.5 用户进程、他人锁、所有历史候选和证据；不执行删除或根外终止。
 发布范围不授权接管活动锁、扩容、安装、修改系统或复制目标凭据。
+
+## 5. main 工作区、Win7 窗口与 holder 沿用批准
+
+负责人对准确源码 `6d43e43a…`、ZIP `5bc6f96a…` 的执行请求回复：
+“批准本版 Win7 开发验证及 holder 沿用”。
+据此仅本版本允许从 main 使用 r2 通道，沿用 inactive holder `a946lanrx`；不使用 --steal。
+目标为 `192.168.1.9` / DCCS-CHAIZL-PC / Win7 build 7601 / 普通 agent Session 1。
+60 分钟内最多 2 次有界运行；最后 10 分钟不开始新场景。
+零外部模型；预期 34 次回环请求，每 run 最多 50 次、窗口最多 100 次。
+只写 `C:\A9-DEV` 本 run、候选缓存与通道记录；开发根不超过 20 GB，剩余至少 50 GB。
+保留现有 alpha.5 四个进程及身份，前后直接核对；不 close、不改系统、不读取用户凭据或配置。
+只使用新数据根、当前用户 DPAPI 与本机回环夹具。
+身份、完整性、安全、必需审计或未知生命周期失败停止下游；普通同范围修复以新输入和 run 在原窗口内重试。
+该批准仅为 DEV_CHANNEL，不授权正式门 A/B、公开发布或删除历史。
+准确请求及批准在本机 `outputs/alpha6-r1/target-ready-r3/REQUEST.json`、`OWNER_TARGET_APPROVAL.json`。
+
+## 6. 首次独立源码审核与局部修复
+
+负责人批准一个只读审核代理，审核准确源码 `6d43e43a…` / ZIP `5bc6f96a…`。
+独立源码审核未发现 P0/P1，报告两项 P2；不代表正式门 A/B。
+健康后台进程误用对话切换阻断，导致队列不消费；实际 BackgroundProcessManager/SQLite 的反例先失败，
+主代理分离同对话派发与会话切换条件，未知状态或 cleanupRequired 仍拒绝自动发送。
+新信封不是旧 alpha.5 可读格式；发布说明明确回退须还原升级前数据备份或使用独立新数据根，不能只换 EXE。
+本轮属已批准范围内局部修复；新源码与新包另存，旧包、双构建和第一 run 证据保留。
+第二 run 若执行，沿用 §5 原始开始和截止时间，不重置 60 分钟或两次上限。
+
+## 7. 恢复身份边界的追加反例
+
+主代理进一步核对 BackgroundProcessManager，发现恢复身份由 recoveryStatus/pidReusePossible 表达，
+正常 status 仍可为 running，且旧事实可能没有 cleanupRequired。
+新反例在原修复源码得到 3 次请求，期望为 2，直接证明未知恢复事实旁仍消费了队列。
+源码 `484baff4…` 按实际字段拒绝自动派发；四个相关文件 132 项通过，普通 PID 事实不发送终止信号。
+原包、两次干净构建与正在运行的第二 run 均保留原源码身份，不升格为该修复的 Win7 证据。
+该修复形成新包；超出 §5 两次上限的新目标执行须先准备准确材料并由负责人追加批准。
+不借更换 run 或包重置已消耗次数、原窗口或容量限额。
+
+## 8. 已批准窗口收尾与当前证据（2026-11-07 UTC）
+
+负责人追加批准一次同范围有界运行后，第三 run `94df7e6d-02d3-4927-b87d-1265a3010902` 在原窗口内完成，状态为 `DEV_CHANNEL` `PASS`。最终源码为 `484baff4e1c972399aafffbf0b93f7c92abb0835`，ZIP SHA-256 为 `241af4ca9e251362062d95957e0cf67011476be4adb1909fc097862c76370a36`，manifest SHA-256 为 `6abb2618e5310dbff7319dff5fc289c90972afcc02a29e6c76cbea1efd1a86db`。目标端完成新包逐文件重建校验、队列恢复与真实 Windows DPAPI、显式继续后无重放、临时文件回收、后检零任务及 alpha.5 四进程集合不变；结果见 `outputs/alpha6-r1/TARGET_RUN_RECOVERY.json` 与 `outputs/win7-dev/alpha6-94df7e6d/`。
+
+第二 run `4cfd8ee9-69fd-4077-8a33-0265fe9d02da` 绑定 `0aded040…`，队列/DPAPI、可靠性受限运行和收尾均为 `PASS`；其可靠性目标证据只绑定该源码与对应 ZIP。最终 `484baff4…` 的可靠性链路在本地同包结果中通过，未把第二 run 的可靠性结果改绑到最终源码。开发机最终 132 项定向 Shell 测试、424 项发布合同检查均为 `PASS`（发布检查保留 16 项 `NOT_PERFORMED`）。三份 `recovery-dev`/`recovery-a`/`recovery-b` 构建的 ZIP 与 manifest 逐字节一致，汇总见 `outputs/alpha6-r1/DOUBLE_BUILD_RECOVERY.json`。
+
+独立只读审核仍绑定原始 `6d43e43a…`，结论为 P0/P1 零项、两项 P2；后续 `0aded040…` 与 `484baff4…` 修复由主代理定向复现和验证，记录为主代理证据，不升格为最终提交的独立审核。正式冻结、门 A、门 B、负责人接受、推送及公开发布继续为 `NOT_PERFORMED`。
+
+## 9. alpha.6 发布材料准备（2026-11-07 UTC）
+
+负责人要求开始发布后，已按最终源码 `484baff4…`、ZIP `241af4ca…` 和 manifest `6abb2618…` 重新生成发布材料，旧的 `publication/` 目录仍保留且不作为当前发布输入。新材料位于 `outputs/alpha6-r1/publication-final/`，包含 `PUBLICATION_PREPARATION.json`、`RELEASE_NOTES.md`、`SHA256SUMS` 和 `PUBLICATION_BLOCKERS.json`，并绑定 recovery-dev 包内 manifest、输入锁、验证套件和 SBOM。
+
+最终源码采用旧基线审核加全部后继差异独立复核。P0/P1 为零，旧两项 P2 关闭，未发现新增 P2。组合审核见 `review/FINAL_SUCCESSOR_REVIEW.json`。审核索引的测试路径笔误以候选外 `publication-final/REVIEW_PATH_ERRATUM.json` 勘误，冻结字节保持不变。
+
+同一包已在 `.acceptance/candidates/WIN7-59/` 只读冻结，共 14 文件。冻结记录 SHA 为 `77397a75…`，状态 FROZEN_NOT_FORMALLY_ACCEPTED。后继负责人接受记录保存在候选外，不回写冻结快照。GitHub 直连认证检查通过；先前代理连接错误不能证明凭据无效。
+
+## 10. 负责人限定接受（2026-11-08 UTC）
+
+负责人明确选择：“本版限定接受并发布：接受 484baff4… / ZIP 241af4ca… 的现有 Win7 DEV_CHANNEL 证据和已知限制，明确以负责人接受替代本版 Gate A/B”。后继 ADR-0318 仅对本版替代 §2 与 ADR-0317 的标准签发顺序；原 ADR 正文与历史证据保留。
+
+结论为 `A9_51_WIN7_59_PASS_WITH_KNOWN_LIMITS`。接受记录在 `outputs/alpha6-r1/publish/OWNER_ACCEPTANCE.json`，绑定源码、ZIP/manifest、冻结身份与 run。原实机报告保持 DEV_CHANNEL，正式门 A/B 未执行。未知恢复 PID 负向用例只有开发机直接证据，最终包 Windows 可靠性组未重跑；旧 `0aded040…` 报告不改绑。§4 其他已知限制和数据回退要求保持。
+
+负责人授权推送源码、准确标签与同一冻结产物的内部试用预发布。公开与回下载核验结果完成后补录，不预签未来操作。

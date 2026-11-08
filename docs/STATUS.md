@@ -15,7 +15,7 @@
 
 ## 当前交付、进行中的工作与授权
 
-- [A9-51](tasks/A9_51_ALPHA6_QUEUE_RELEASE.md)：负责人要求“推进发布”，已登记 alpha.6 / WIN7-59 的源码、版本身份、干净包与同包增量验证准备。当前仍为开发准备，Win7 新版本未运行；main 目标窗口、现有 holder 沿用和正式门按适用合同待确认。旧 alpha.5 用户进程与其他会话修改保留。
+- [A9-51](tasks/A9_51_ALPHA6_QUEUE_RELEASE.md)：负责人已按 ADR-0318 限定接受 alpha.6 / WIN7-59，结论 `A9_51_WIN7_59_PASS_WITH_KNOWN_LIMITS`。源码 `484baff4…` / ZIP `241af4ca…` / manifest `6abb2618…`，同包三份干净构建一致。Win7 run `94df7e6d…` 队列、DPAPI、恢复无重放及收尾通过；10 份回收文件和 426 个加载模块哈希核验通过。旧基线加全部后继差异独审 P0/P1 为 0，旧两项 P2 关闭。14 文件只读冻结记录 `77397a75…` 保持。原证据为 DEV_CHANNEL，负责人准确接受替代本版门 A/B，正式门未执行。未知恢复 PID 负向用例和最终包 Windows 可靠性组的覆盖限制见任务书 §10。正在公开同一冻结产物；事实与输入在 `outputs/alpha6-r1/`。
 
 - [A9-50](tasks/A9_50_QUEUED_INPUT.md#4-开发交付结果2026-11-07-utc)：`A9_50_DEVELOPER_VERIFIED`。Mac / Linux 开发机绑定 main `ef6a6922…` 加本轮未提交补丁。Composer 状态与显式 FIFO 队列完成，停止、失败和恢复后暂停；草稿不自动消费。cw Shell 集合 1465 PASS / 12 NOT_PERFORMED，最后 Stop/存储修正由 Mac 与 cw 各 142 项直接复验，其余未变组记 INHERITED_EVIDENCE。真实 Electron 22 main/preload/IPC/runtime/SQLite 两进程 6 组 PASS；三视口、草稿隔离、停止和重启不重放通过。cw 源码哈希与回收日志核验，任务进程与临时目录无残留，租约释放；原实例与登录保留，ci/monster 未操作。原 dirty 和 HEAD 保留。真实 Win7 DPAPI、Windows、正式门 A/B、提交、推送和发布均 NOT_PERFORMED。准确回执见本机 `outputs/a9-50-queue-r1/RESULT.json`。
 

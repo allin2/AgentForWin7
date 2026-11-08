@@ -5431,3 +5431,13 @@ Claude P2-1、P2-3 已补测试，P2-4 已修复；P2-2 按裁决保留为 K7。
 - 顺序：干净源码与开发包 → 同包开发验证 → 正式准备、双干净构建与冻结 → 门 A/B → 同字节内部试用预发布。门 A/B 逐次等待负责人准确批准；ADR-0315 的 WIN7-58 合并验收例外不迁移。
 - 边界：允许本次必要的本地提交与发布材料准备；目标执行先满足本版本的 main 工作区与窗口授权。新权限、系统配置、超预算、删除或正式 Gate 不从“推进发布”推导。
 - 证据：当前队列只有 Mac/Linux 开发机结果，真实 Win7 DPAPI 必须直接补证。未知与未执行继续明确记录，不以包可构建替代目标通过。
+
+## ADR-0318 A9-51 alpha.6 准确候选限定接受与同字节发布
+
+- 状态：Accepted（2026-11-08 UTC，负责人明确选择“本版限定接受并发布”）。
+- 决定：仅接受源码 `484baff4e1c972399aafffbf0b93f7c92abb0835`、ZIP SHA-256 `241af4ca9e251362062d95957e0cf67011476be4adb1909fc097862c76370a36`、manifest SHA-256 `6abb2618e5310dbff7319dff5fc289c90972afcc02a29e6c76cbea1efd1a86db` 的 alpha.6 / WIN7-59。
+- 适用替代：本版以负责人对现有 Win7 DEV_CHANNEL 证据、独立组合审核和已知限制的准确接受，替代 ADR-0317 与 A9-51 §2 的门 A/B 顺序。未来版本仍按各自合同；不自动沿用此例外。
+- 结论：`A9_51_WIN7_59_PASS_WITH_KNOWN_LIMITS`。原证据保持 DEV_CHANNEL，正式门 A/B 为 NOT_PERFORMED，不补签 FORMAL，不改冻结包、历史 FAIL/UNKNOWN 或旧审核绑定。
+- 限制：恢复未知 PID 的负向用例只有开发机真实 manager/SQLite 加合成传输证据；最终包 Windows 可靠性组未重跑，旧报告仍绑定 `0aded040…`。同包 Win10、原生 125% DPI、外部模型、完整 Review/batch2 和跨机可重复性均未执行。
+- 发布：负责人已授权推送准确源码、标签 `v0.3.0-alpha.6-win7-59` 和同一冻结产物的内部试用预发布。附件回下载核验，不重建、不替换冻结字节；回退须恢复升级前数据备份或使用独立新数据根。
+- 依据：`outputs/alpha6-r1/publish/OWNER_ACCEPTANCE.json`、`FREEZE_RECOVERY_RESULT.json`、`review/FINAL_SUCCESSOR_REVIEW.json` 与候选外 `publication-final/REVIEW_PATH_ERRATUM.json`。
