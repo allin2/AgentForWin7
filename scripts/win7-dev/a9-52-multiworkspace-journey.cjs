@@ -8,6 +8,8 @@ const arg = name => process.argv.find(value => value.startsWith(`--${name}=`))?.
 const config = JSON.parse(fs.readFileSync(arg('config'), 'utf8'));
 const product = config.productRoot;
 const windows = process.platform === 'win32';
+// The packaged runner helper is a Windows executable: a Mac run of the packaged product cannot execute real shells.
+const packagedProduct = root => /[\\/]resources[\\/]app[\\/]product$/.test(root);
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const physicalFs = process.versions.electron ? require('original-fs') : fs;
 const sha = file => crypto.createHash('sha256').update(physicalFs.readFileSync(file)).digest('hex');
@@ -92,8 +94,10 @@ async function parent() {
     if (!arg('geometry-only')) {
     assert.strictEqual(fs.readFileSync(path.join(b, 'result.txt'), 'utf8'), 'B-WRITE');
     assert.strictEqual(fs.readFileSync(path.join(a, 'result.txt'), 'utf8'), 'A-WRITE');
+    if (windows || !packagedProduct(config.productRoot)) {
     assert.strictEqual(fs.readFileSync(path.join(a, 'shell-result.txt'), 'utf8').trim(), 'A-SHELL');
     assert.strictEqual(fs.readFileSync(path.join(b, 'shell-result.txt'), 'utf8').trim(), 'B-SHELL');
+    } else report.shellFiles = 'NOT_PERFORMED: Mac packaged product has only the Windows runner helper';
     }
     const Database = require(config.hostDatabase);
     const db = new Database(path.join(temporary, 'data', 'a9-state.db'), { readonly: true });
@@ -293,7 +297,10 @@ async function child() {
         const facts = (await snapshot()).conversation;
         assert(facts.some(fact => fact.requestPrompt === 'A-SHELL' && ['completed', 'completed_with_warnings'].includes(fact.outcome)));
         await selectWorkspace(b.scope.workspaceId);
-        return windows ? { shell: 'automatic system shell', evidence: 'Win7 D-013 helper' } : { shell: '/bin/bash', evidence: 'Mac development POSIX runner only; Windows helper NOT_PERFORMED' };
+        if (windows) return { shell: 'automatic system shell', evidence: 'Win7 D-013 helper' };
+        return packagedProduct(config.productRoot)
+          ? { shell: 'NOT_PERFORMED', evidence: 'Mac packaged product: Windows runner helper cannot run; dispatch and turn completion only' }
+          : { shell: '/bin/bash', evidence: 'Mac development POSIX runner only; Windows helper NOT_PERFORMED' };
       });
       await check('responsive_directory_and_composer', responsive);
       const ownedRunning = s => (s.managedProcesses || []).some(item => item.lastProbeStatus === 'running' && item.ownershipState === 'owned');

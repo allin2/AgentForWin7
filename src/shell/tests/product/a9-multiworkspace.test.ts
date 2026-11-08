@@ -259,3 +259,36 @@ describe('A9-52 real SQLite/runtime multiworkspace isolation', () => {
     } finally { await f.close(); }
   });
 });
+
+describe('A9-52 scoped IPC with A9-49 restricted runtimes', () => {
+  const id = 'a'.repeat(64);
+  function handlerFor(status: string) {
+    const calls: string[] = [];
+    const runtime = { status, getSnapshot: () => ({ schemaVersion: 1, status }),
+      async submitTurn() { calls.push('submit'); return { ok: false, error: { code: 'RESTRICTED_OWN_REFUSAL' } }; } };
+    const registry = { getActive: () => ({ workspaceId: id, runtime }), directory: () => [], accounting: () => ({}),
+      resolve: () => { throw Object.assign(new Error('A9_SCOPE_STALE'), { code: 'A9_SCOPE_STALE' }); } };
+    const handler = createA9ProductRequestHandler({ workspaceRegistry: registry, isValidRendererSender: () => true, getA9Runtime: () => runtime });
+    const submit = (scope: any) => handler({}, { schemaVersion: 9, action: 'a9.turn.submit', payload: { prompt: 'x' }, scope });
+    return { calls, submit, snapshot: () => handler({}, { schemaVersion: 9, action: 'a9.snapshot.get', payload: {} }) };
+  }
+
+  it('routes the workspace-only snapshot scope of a restricted runtime to its own refusal', async () => {
+    for (const status of ['electron_sqlite_unavailable', 'diagnostics', 'schema_refused']) {
+      const env = handlerFor(status);
+      const snapshot = await env.snapshot();
+      expect(snapshot.snapshot.scope).toEqual({ workspaceId: id, conversationId: undefined });
+      expect(await env.submit({ workspaceId: id })).toEqual({ ok: false, error: { code: 'RESTRICTED_OWN_REFUSAL' } });
+      expect(env.calls).toEqual(['submit']);
+    }
+  });
+
+  it('keeps rejecting workspace-only, foreign or widened scopes outside restricted runtimes', async () => {
+    const ready = handlerFor('ready');
+    expect((await ready.submit({ workspaceId: id })).error.code).toBe('A9_SCOPE_INVALID');
+    const restricted = handlerFor('diagnostics');
+    expect((await restricted.submit({ workspaceId: 'b'.repeat(64) })).error.code).toBe('A9_SCOPE_INVALID');
+    expect((await restricted.submit({ workspaceId: id, extra: true })).error.code).toBe('A9_SCOPE_INVALID');
+    expect([...ready.calls, ...restricted.calls]).toEqual([]);
+  });
+});

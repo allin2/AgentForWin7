@@ -61,6 +61,19 @@ function exactObject(value, keys, code, optionalKeys = []) {
   }
 }
 
+// A9-49 restricted runtimes hold no conversation; their snapshot scope carries only the workspace.
+const A9_RESTRICTED_STATUSES = Object.freeze(['electron_sqlite_unavailable', 'diagnostics', 'schema_refused']);
+
+function restrictedScopeRuntime(registry, request) {
+  const scope = request.scope;
+  if (!registry || request.schemaVersion !== 9 || !scope || typeof scope !== 'object' || Array.isArray(scope)) return null;
+  const keys = Object.keys(scope);
+  if (keys.length !== 1 || keys[0] !== 'workspaceId') return null;
+  const active = registry.getActive();
+  if (!active || active.workspaceId !== scope.workspaceId || !active.runtime) return null;
+  return A9_RESTRICTED_STATUSES.includes(active.runtime.status) ? active.runtime : null;
+}
+
 function createA9ProductRequestHandler(options) {
   const config = options || {};
   let selectionInFlight = false;
@@ -78,7 +91,8 @@ function createA9ProductRequestHandler(options) {
       }
       const registry = config.workspaceRegistry;
       const workspaceActions = [A9_ACTIONS.WORKSPACE_LIST, A9_ACTIONS.WORKSPACE_ACTIVATE, A9_ACTIONS.WORKSPACE_CLOSE];
-      if (request.scope !== undefined) {
+      const restrictedRuntime = restrictedScopeRuntime(registry, request);
+      if (request.scope !== undefined && !restrictedRuntime) {
         exactObject(request.scope, ['workspaceId', 'conversationId'], 'A9_SCOPE_INVALID');
         if (request.schemaVersion !== 9 || !/^[a-f0-9]{64}$/.test(request.scope.workspaceId)
           || typeof request.scope.conversationId !== 'string' || !request.scope.conversationId || request.scope.conversationId.length > 256) {
@@ -142,8 +156,8 @@ function createA9ProductRequestHandler(options) {
       if (registry && request.schemaVersion === 9 && request.action !== A9_ACTIONS.SNAPSHOT_GET && !request.scope) {
         throw Object.assign(new Error('A9_SCOPE_REQUIRED'), { code: 'A9_SCOPE_REQUIRED' });
       }
-      const runtime = registry && request.scope ? registry.resolve(request.scope)
-        : config.getA9Runtime ? await config.getA9Runtime() : null;
+      const runtime = restrictedRuntime || (registry && request.scope ? registry.resolve(request.scope)
+        : config.getA9Runtime ? await config.getA9Runtime() : null);
       if (runtime && runtime.__a9WorkspaceRequired === true) {
         return {
           ok: false,
