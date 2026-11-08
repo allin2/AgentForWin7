@@ -13,7 +13,16 @@
  */
 (function startA9Workbench(root) {
   const api = root.win7Agent;
-  const a9 = api && api.a9;
+  // Capture the view identity when a method is read. Each IPC stays bound to
+  // that workspace even if the user switches before the response arrives.
+  const a9 = api && api.a9 && new Proxy({}, {
+    get(_target, key) {
+      const target = api.a9;
+      const scoped = state.snapshot && state.snapshot.scope && typeof target.forScope === 'function'
+        ? target.forScope(state.snapshot.scope) : target;
+      return scoped[key];
+    },
+  });
   const SUPPORTED_MODES = new Set(['full_access', 'read_only']);
   const MODE_LABELS = Object.freeze({
     full_access: 'Full Access',
@@ -113,6 +122,8 @@
     eventsLoading: false,
     eventsStatusNote: null,
     workspaceSelectionGeneration: 0,
+    workspaceOperation: false,
+    workspaceDirectory: [],
     snapshotGeneration: 0,
     snapshotRequest: null,
     snapshotPollingRequests: 0,
@@ -201,6 +212,8 @@
     text('task-state', label);
     el('task-state').className = `task-pill ${kind || 'idle'}`;
     text('rail-task-value', label);
+    const railState = el('rail-task-state');
+    if (railState && railState.dataset) railState.dataset.state = kind || 'idle';
     text('rail-task-detail', detail || '任务事实会记录在中央时间线。');
   }
 
@@ -1918,6 +1931,10 @@
 
   function conversationStatusLabel(activity) {
     if (activity === 'running') return '运行中';
+    if (activity === 'cancelling') return '正在停止';
+    if (activity === 'needs_approval') return '待审批';
+    if (activity === 'needs_input') return '待回答';
+    if (activity === 'failed') return '失败';
     if (activity === 'waiting_approval') return '待审批';
     if (activity === 'waiting_input') return '待回答';
     if (activity === 'interrupted') return '已中断';
@@ -1937,49 +1954,214 @@
     return `${date.getFullYear()}/${date.getMonth() + 1}/${date.getDate()}`;
   }
 
-  function appendConversationGroup(list, label, items, snapshot) {
-    if (!items.length) return;
+  // A9-52 收件箱：所有驻留工作区的对话混排。顺序为置顶 → 活跃 → 已结束（默认折叠）。
+  // 活跃 = 有实时状态（运行/待审批/待回答/中断/失败）、后台完成未查看，或有未发送草稿。
+  const LIVE_ACTIVITY = Object.freeze({ running: 'running', cancelling: 'cancelling', needs_approval: 'needs_approval',
+    needs_input: 'needs_input', waiting_approval: 'needs_approval', waiting_input: 'needs_input', failed: 'failed', interrupted: 'interrupted' });
+  const PIN_STORAGE_KEY = 'a9.pinnedConversations.v1';
+
+  function inboxActivity(value) { return LIVE_ACTIVITY[value] || 'idle'; }
+
+  /** 徽标：中文名取前两个字；拉丁名取首字母加第一个数字，否则取前两个词的首字母。 */
+  function workspaceBadge(name) {
+    const value = String(name || '').trim();
+    if (!value) return '?';
+    if (/^[㐀-鿿]/.test(value)) return Array.from(value).slice(0, 2).join('');
+    const digit = (value.match(/\d/) || [])[0];
+    if (digit) return (value[0] + digit).toUpperCase();
+    const words = value.split(/[-_\s.]+/).filter(Boolean);
+    return ((words[0] || value)[0] + (words[1] ? words[1][0] : (words[0] || value).slice(1, 2))).toUpperCase();
+  }
+  function workspaceColor(id) {
+    let hash = 0;
+    for (const char of String(id || '')) hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
+    return `ws-c${hash % 6}`;
+  }
+  function workspaceBadgeNode(workspace) {
+    const badge = document.createElement('span');
+    badge.className = `ws-badge ${workspaceColor(workspace.workspaceId)}`;
+    badge.setAttribute('aria-hidden', 'true');
+    badge.textContent = workspaceBadge(workspace.displayName);
+    return badge;
+  }
+
+  function readPinnedConversations() {
+    try {
+      const value = JSON.parse(root.localStorage.getItem(PIN_STORAGE_KEY) || '[]');
+      return new Set(Array.isArray(value) ? value.filter((item) => typeof item === 'string').slice(0, 64) : []);
+    } catch (_error) { return new Set(); }
+  }
+  function togglePinnedConversation(sessionId) {
+    if (!sessionId) return;
+    const pinned = readPinnedConversations();
+    if (pinned.has(sessionId)) pinned.delete(sessionId); else pinned.add(sessionId);
+    try { root.localStorage.setItem(PIN_STORAGE_KEY, JSON.stringify(Array.from(pinned).slice(-64))); } catch (_error) { /* 偏好不可写时只影响置顶。 */ }
+    if (state.snapshot) renderConversationDirectory(state.snapshot);
+  }
+
+  /** 把当前快照与工作区目录合成一张列表；当前对话的状态以运行时实时状态为准。 */
+  function inboxConversations(snapshot) {
+    const controls = snapshot.conversationControls || {};
+    const currentId = (snapshot.scope && snapshot.scope.workspaceId) || 'current';
+    const current = { workspaceId: currentId, workspaceRoot: snapshot.workspaceRoot || '', displayName: pathName(snapshot.workspaceRoot) || '当前工作区' };
+    const items = [];
+    const add = (workspace, conversation, live, activeId, canSwitch, isCurrent) => {
+      const bound = conversation.sessionId === activeId;
+      const viewed = isCurrent && bound;
+      items.push({
+        key: `${workspace.workspaceId}:${conversation.sessionId}`,
+        workspace, isCurrent, viewed, bound,
+        sessionId: conversation.sessionId,
+        title: conversation.title || '新对话',
+        updatedAt: conversation.updatedAt,
+        hasDraft: conversation.hasDraft === true,
+        activity: bound && live ? inboxActivity(live) : inboxActivity(conversation.activity),
+        switchable: !viewed && (bound ? !isCurrent : canSwitch),
+      });
+    };
+    (snapshot.conversations || []).filter((item) => item.state === 'active')
+      .forEach((item) => add(current, item, snapshot.agentStatus, snapshot.activeConversationId, Boolean(controls.canSwitch), true));
+    (snapshot.workspaces || []).filter((workspace) => workspace.opened && workspace.workspaceId !== currentId).forEach((workspace) => {
+      (workspace.conversations || []).forEach((item) => add(workspace, item, workspace.status, workspace.activeConversationId, Boolean(workspace.canSwitch), false));
+    });
+    return items;
+  }
+
+  function inboxRank(item) {
+    if (item.activity === 'needs_approval' || item.activity === 'needs_input') return 0;
+    if (item.activity === 'failed' || item.activity === 'interrupted') return 1;
+    if (item.activity === 'running' || item.activity === 'cancelling') return 2;
+    if (item.unread) return 3;
+    return 4;
+  }
+
+  function classifyInbox(items) {
+    if (!state.inboxSeen) state.inboxSeen = new Map();
+    if (!state.inboxUnread) state.inboxUnread = new Set();
+    if (!state.inboxBuckets) state.inboxBuckets = new Map();
+    const pinned = readPinnedConversations();
+    for (const item of items) {
+      const previous = state.inboxSeen.get(item.key);
+      // 后台完成且没有在看：像未读邮件一样保留在活跃组，直到被打开。
+      if (!item.viewed && item.activity === 'idle' && (previous === 'running' || previous === 'cancelling')) state.inboxUnread.add(item.key);
+      if (item.viewed) state.inboxUnread.delete(item.key);
+      state.inboxSeen.set(item.key, item.activity);
+      item.unread = state.inboxUnread.has(item.key);
+      item.pinned = pinned.has(item.sessionId);
+      let bucket = item.pinned ? 'pinned' : (item.activity !== 'idle' || item.unread || item.hasDraft) ? 'active' : 'settled';
+      // 正在查看的对话不立即折叠，离开后才归入“已结束”。
+      if (item.viewed && bucket === 'settled' && state.inboxBuckets.get(item.key) === 'active') bucket = 'active';
+      state.inboxBuckets.set(item.key, bucket);
+      item.bucket = bucket;
+    }
+    return items;
+  }
+
+  function inboxStatus(item) {
+    if (item.activity === 'running') return { text: '运行中', kind: 'running' };
+    if (item.activity === 'cancelling') return { text: '正在停止', kind: 'running' };
+    if (item.activity === 'needs_approval') return { text: '待审批', kind: 'attention' };
+    if (item.activity === 'needs_input') return { text: '待回答', kind: 'attention' };
+    if (item.activity === 'interrupted') return { text: '已中断', kind: 'error' };
+    if (item.activity === 'failed') return { text: '失败', kind: 'error' };
+    if (item.unread) return { text: '已完成', kind: 'unread' };
+    return null;
+  }
+
+  function appendConversationGroup(list, label, items, snapshot, collapsible) {
+    if (!items.length && label !== '活跃') return;
     const head = document.createElement('li');
     head.className = 'conversation-group-head';
     const name = document.createElement('span');
     name.textContent = label;
     const count = document.createElement('span');
     count.textContent = String(items.length);
-    head.appendChild(name);
-    head.appendChild(count);
-    list.appendChild(head);
-    items.forEach((item) => appendConversationRow(list, item, snapshot, false));
+    if (collapsible) {
+      const open = state.inboxSettledOpen === true || Boolean(state.searchQuery);
+      const toggle = document.createElement('button');
+      toggle.type = 'button';
+      toggle.className = 'conversation-group-toggle';
+      toggle.setAttribute('aria-expanded', String(open));
+      toggle.appendChild(name);
+      toggle.appendChild(count);
+      toggle.addEventListener('click', () => {
+        state.inboxSettledOpen = !open;
+        renderConversationDirectory(state.snapshot);
+      });
+      head.appendChild(toggle);
+      list.appendChild(head);
+      if (!open) return;
+    } else {
+      head.appendChild(name);
+      head.appendChild(count);
+      list.appendChild(head);
+    }
+    if (!items.length) {
+      const empty = document.createElement('li');
+      empty.className = 'conversation-empty-note';
+      empty.textContent = '没有需要关注的对话。';
+      list.appendChild(empty);
+    }
+    items.forEach((item) => appendConversationRow(list, item, snapshot, false, collapsible));
   }
 
-  function appendConversationRow(list, conversation, snapshot, archived) {
+  function appendConversationRow(list, conversation, snapshot, archived, compact) {
     const item = document.createElement('li');
     const button = document.createElement('button');
     button.type = 'button';
-    button.disabled = archived || !(snapshot.conversationControls && snapshot.conversationControls.canSwitch)
-      || conversation.sessionId === snapshot.activeConversationId;
-    button.setAttribute('aria-current', String(conversation.sessionId === snapshot.activeConversationId));
-    button.title = conversation.title;
+    const workspace = conversation.workspace || { workspaceId: 'current', displayName: pathName(snapshot.workspaceRoot) };
+    const viewed = archived ? false : conversation.viewed === true;
+    button.className = `conversation-row${compact || archived ? ' compact' : ''}${conversation.unread ? ' unread' : ''}`;
+    button.disabled = archived || !conversation.switchable;
+    button.setAttribute('aria-current', String(viewed));
+    button.dataset.workspaceId = workspace.workspaceId;
+    button.dataset.conversationId = conversation.sessionId;
     const title = document.createElement('strong');
-    const dot = document.createElement('span');
-    dot.className = `conversation-dot ${conversation.activity || ''}`;
-    dot.setAttribute('aria-hidden', 'true');
-    title.appendChild(dot);
-    title.appendChild(document.createTextNode(conversation.title || '新对话'));
+    title.className = 'conversation-title';
     const meta = document.createElement('small');
-    const updated = conversation.updatedAt ? new Date(conversation.updatedAt).toLocaleString() : '';
-    const status = conversationStatusLabel(conversation.activity);
-    const controls = snapshot.conversationControls || {};
-    const lockReason = !controls.canSwitch ? `${controls.reason || '当前任务尚未结束'}，停止或完成后可切换` : '';
-    const reason = archived ? '已归档，请先恢复对话'
-      : conversation.sessionId === snapshot.activeConversationId ? `当前对话${lockReason ? `；${lockReason}` : ''}`
-        : lockReason;
-    // 状态由圆点表达；可见时间为短格式，状态与完整时间进入无障碍名称和悬停提示。
+    meta.className = 'conversation-time';
     meta.textContent = shortConversationTime(conversation.updatedAt);
-    button.setAttribute('aria-label', `${conversation.title || '新对话'}，${status}${updated ? `，更新于 ${updated}` : ''}${reason ? `，${reason}` : ''}`);
-    button.title = `${conversation.title || '新对话'}\n${status}${updated ? ` · ${updated}` : ''}${reason ? `\n${reason}` : ''}`;
-    button.appendChild(title);
-    button.appendChild(meta);
-    if (!archived) button.addEventListener('click', () => { void switchConversation(conversation.sessionId); });
+    const status = archived ? null : inboxStatus(conversation);
+    const updated = conversation.updatedAt ? new Date(conversation.updatedAt).toLocaleString() : '';
+    const controls = snapshot.conversationControls || {};
+    const lockReason = conversation.isCurrent && !controls.canSwitch && !viewed
+      ? `${controls.reason || '当前任务尚未结束'}，停止或完成后可切换`
+      : !conversation.isCurrent && !conversation.switchable ? '该工作区任务尚未结束，停止或完成后可切换到其他对话' : '';
+    const reason = archived ? '已归档，请先恢复对话' : viewed ? '当前对话' : lockReason;
+    const statusText = status ? status.text : '空闲';
+    const label = `${conversation.title || '新对话'}，${workspace.displayName}，${statusText}${conversation.hasDraft ? '，有未发送草稿' : ''}${updated ? `，更新于 ${updated}` : ''}${reason ? `，${reason}` : ''}`;
+    button.setAttribute('aria-label', label);
+    button.title = `${conversation.title || '新对话'}\n${workspace.workspaceRoot || workspace.displayName}\n${statusText}${updated ? ` · ${updated}` : ''}${reason ? `\n${reason}` : ''}`;
+    if (status) { meta.textContent = status.text; meta.className = `conversation-state ${status.kind}`; }
+    if (compact || archived) {
+      title.appendChild(workspaceBadgeNode(workspace));
+      title.appendChild(document.createTextNode(conversation.title || '新对话'));
+      button.appendChild(title);
+      button.appendChild(meta);
+    } else {
+      const line = document.createElement('span');
+      line.className = 'conversation-workspace';
+      line.appendChild(workspaceBadgeNode(workspace));
+      line.appendChild(document.createTextNode(workspace.displayName));
+      title.textContent = conversation.title || '新对话';
+      const flags = document.createElement('span');
+      flags.className = 'conversation-flags';
+      if (conversation.hasDraft && !viewed) {
+        flags.className += ' draft';
+        flags.title = '有未发送草稿';
+        flags.textContent = '草稿';
+      }
+      button.appendChild(line);
+      button.appendChild(meta);
+      button.appendChild(title);
+      button.appendChild(flags);
+    }
+    if (!archived) {
+      button.addEventListener('click', () => {
+        if (conversation.isCurrent) void switchConversation(conversation.sessionId);
+        else void activateWorkspace({ workspaceId: workspace.workspaceId, conversationId: conversation.sessionId });
+      });
+    }
     item.appendChild(button);
     if (archived) {
       const restore = document.createElement('button');
@@ -2000,31 +2182,30 @@
   function renderConversationDirectory(snapshot) {
     const conversations = snapshot.conversations || [];
     const query = state.searchQuery;
-    const visible = query
-      ? conversations.filter((item) => String(item.title || '').toLocaleLowerCase().includes(query))
-      : conversations;
-    const active = visible.filter((item) => item.state === 'active');
-    const archived = visible.filter((item) => item.state === 'archived');
-    const allActive = conversations.filter((item) => item.state === 'active');
     const controls = snapshot.conversationControls || { canSwitch: false, maxActive: 16 };
+    const filter = state.inboxFilter && (snapshot.workspaces || []).some((item) => item.opened && item.workspaceId === state.inboxFilter)
+      ? state.inboxFilter : null;
+    state.inboxFilter = filter;
+    const currentId = (snapshot.scope && snapshot.scope.workspaceId) || 'current';
+    const all = classifyInbox(inboxConversations(snapshot));
+    const visible = all.filter((item) => (!filter || item.workspace.workspaceId === filter)
+      && (!query || String(item.title).toLocaleLowerCase().includes(query) || String(item.workspace.displayName).toLocaleLowerCase().includes(query)));
+    const byTime = (a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || ''));
+    const pinned = visible.filter((item) => item.bucket === 'pinned').sort(byTime);
+    const active = visible.filter((item) => item.bucket === 'active').sort((a, b) => inboxRank(a) - inboxRank(b) || byTime(a, b));
+    const settled = visible.filter((item) => item.bucket === 'settled').sort(byTime);
+    const archived = (!filter || filter === currentId) ? conversations.filter((item) => item.state === 'archived'
+      && (!query || String(item.title || '').toLocaleLowerCase().includes(query))) : [];
+    const allActive = conversations.filter((item) => item.state === 'active');
     const activeList = el('conversation-list');
     const archivedList = el('conversation-archive-list');
-    const waitingList = el('conversation-waiting-list');
     activeList.textContent = '';
     archivedList.textContent = '';
-    waitingList.textContent = '';
-    const waiting = active.filter((item) => ['waiting_approval', 'waiting_input', 'interrupted'].includes(item.activity)
-      || (!controls.canSwitch && item.sessionId !== snapshot.activeConversationId && item.activity !== 'running'));
-    const available = active.filter((item) => !waiting.includes(item));
-    const live = available.filter((item) => item.activity && item.activity !== 'idle');
-    const older = available.filter((item) => !(item.activity && item.activity !== 'idle'));
-    appendConversationGroup(activeList, '进行中', live, snapshot);
-    appendConversationGroup(activeList, '更早', older, snapshot);
-    waiting.forEach((item) => appendConversationRow(waitingList, item, snapshot, false));
-    text('conversation-waiting-count', waiting.length);
-    el('conversation-waiting-section').hidden = waiting.length === 0;
-    archived.forEach((item) => appendConversationRow(archivedList, item, snapshot, true));
-    if (query && visible.length === 0) {
+    appendConversationGroup(activeList, '置顶', pinned, snapshot, false);
+    appendConversationGroup(activeList, '活跃', active, snapshot, false);
+    appendConversationGroup(activeList, '已结束', settled, snapshot, true);
+    archived.forEach((item) => appendConversationRow(archivedList, { ...item, workspace: { workspaceId: currentId, displayName: pathName(snapshot.workspaceRoot) } }, snapshot, true));
+    if (query && visible.length === 0 && archived.length === 0) {
       const empty = document.createElement('li');
       empty.className = 'conversation-empty-note';
       empty.textContent = '没有匹配的对话。';
@@ -2032,16 +2213,68 @@
     }
     text('conversation-archive-count', archived.length);
     el('conversation-archive-section').hidden = archived.length === 0;
-    el('conversation-new').disabled = !controls.canSwitch || allActive.length >= controls.maxActive;
+    el('conversation-new').disabled = !snapshot.scope && (!controls.canSwitch || allActive.length >= controls.maxActive);
     el('conversation-rename').disabled = !snapshot.activeConversationId;
     el('conversation-archive').disabled = !controls.canSwitch || !snapshot.activeConversationId;
+    const pin = el('conversation-pin');
+    if (pin) {
+      pin.disabled = !snapshot.activeConversationId;
+      pin.textContent = readPinnedConversations().has(snapshot.activeConversationId) ? '取消置顶' : '置顶当前对话';
+    }
+    renderInboxFilterChip(snapshot);
     text('conversation-directory-note', query
-      ? `找到 ${visible.length} 个匹配的对话（含已归档）`
+      ? `找到 ${visible.length + archived.length} 个匹配的对话（含当前工作区已归档）`
       : controls.canSwitch
-        ? `${allActive.length}/${controls.maxActive} 个未归档对话`
-        : `已锁定：${controls.reason || '当前任务尚未结束'}`);
+        ? `当前工作区 ${allActive.length}/${controls.maxActive} 个未归档对话`
+        : `当前工作区已锁定：${controls.reason || '当前任务尚未结束'}`);
     const current = conversations.find((item) => item.sessionId === snapshot.activeConversationId);
     if (current) text('workbench-title', current.title || '和工作区一起完成任务');
+  }
+
+  function renderInboxFilterChip(snapshot) {
+    const chip = el('conversation-filter-chip');
+    if (!chip) return;
+    const workspace = state.inboxFilter && (snapshot.workspaces || []).find((item) => item.workspaceId === state.inboxFilter);
+    chip.hidden = !workspace;
+    el('conversation-filter') && el('conversation-filter').classList.toggle('active', Boolean(workspace));
+    chip.textContent = '';
+    if (!workspace) return;
+    const label = document.createElement('span');
+    label.className = 'conversation-filter-label';
+    label.textContent = '仅看';
+    const name = document.createElement('span');
+    name.className = 'conversation-filter-name';
+    name.textContent = workspace.displayName;
+    name.title = workspace.workspaceRoot;
+    const clear = document.createElement('button');
+    clear.type = 'button';
+    clear.setAttribute('aria-label', '显示全部工作区的对话');
+    clear.textContent = '×';
+    clear.addEventListener('click', () => { state.inboxFilter = null; renderConversationDirectory(state.snapshot); });
+    chip.appendChild(label);
+    chip.appendChild(workspaceBadgeNode(workspace));
+    chip.appendChild(name);
+    chip.appendChild(clear);
+  }
+
+  /** 输入框旁固定显示执行目录；有工作区后隐藏左上角的选择卡片，把高度让给对话列表。 */
+  function renderComposerWorkspace(snapshot) {
+    const workspace = snapshot && snapshot.workspaceRoot;
+    const chip = el('composer-workspace');
+    if (chip) {
+      chip.hidden = !workspace;
+      chip.title = workspace ? `执行目录：${workspace}` : '';
+      const badge = el('composer-workspace-badge');
+      if (badge && workspace) {
+        const id = (snapshot.scope && snapshot.scope.workspaceId) || 'current';
+        badge.className = `ws-badge ${workspaceColor(id)}`;
+        badge.textContent = workspaceBadge(pathName(workspace));
+      }
+      // Name first so truncation keeps the recognisable part; the full path follows and stays in the title.
+      text('composer-workspace-path', workspace ? `${pathName(workspace)} · ${workspace}` : '');
+    }
+    const card = el('workspace-select');
+    if (card) card.hidden = Boolean(workspace);
   }
 
   function hydrateDraft(snapshot) {
@@ -2155,6 +2388,7 @@
       snapshot = { ...snapshot, conversation: sortedConversationFacts() };
     }
     state.snapshot = snapshot;
+    if (snapshot.workspaces) { state.workspaceDirectory = snapshot.workspaces; renderWorkspaceDirectory(); }
     const surface = el('a9-surface');
     surface.hidden = false;
     surface.dataset.a9Status = snapshot.status || 'unknown';
@@ -2168,6 +2402,9 @@
     text('workspace-name', workspace ? pathName(workspace) : '选择本地工作区');
     text('workspace-path', workspace || '尚未选择');
     text('workspace-label', workspace ? pathName(workspace) : '未连接工作区');
+    el('workspace-label').title = workspace;
+    el('task-prompt').setAttribute('aria-description', workspace ? `执行目录：${workspace}` : '尚未选择工作区');
+    renderComposerWorkspace(snapshot);
     text('a9-workspace-value', workspace || '-');
     text('a9-mode-value', modeLabel(snapshot.mode));
     const shell = snapshot.shell || {};
@@ -2297,6 +2534,39 @@
           const code = response && response.error && response.error.code;
           if (code === 'A9_WORKSPACE_REQUIRED') {
             state.snapshot = null;
+            state.activeConversationId = null;
+            state.renderedConversationId = null;
+            state.running = false;
+            state.localRequest = null;
+            state.explorerSessionId = null;
+            state.explorerRequest += 1;
+            state.draftHydratedConversationId = null;
+            stopLiveTracking();
+            resetConversationEvents();
+            closeDialog(el('a9-mode-dialog'));
+            text('workspace-name', '选择本地工作区');
+            text('workspace-path', '尚未选择');
+            text('workspace-label', '未连接工作区');
+            renderComposerWorkspace(null);
+            text('task-prompt', '');
+            el('task-prompt').value = '';
+            el('a9-empty-state').hidden = false;
+            el('a9-mode-open').hidden = true;
+            el('a9-approval-card').hidden = true;
+            el('a9-question-host').hidden = true;
+            el('a9-managed-processes').hidden = true;
+            el('viewer-panel').hidden = true;
+            el('workspace-tree').replaceChildren();
+            el('conversation-list').replaceChildren();
+            el('conversation-archive-section').hidden = true;
+            el('conversation-new').disabled = false;
+            text('conversation-directory-note', '尚未打开工作区，点“+”选择目录');
+            setTaskState('空闲', 'idle', '选择一个工作区开始。');
+            if (typeof a9.listWorkspaces === 'function') {
+              const directory = await a9.listWorkspaces();
+              if (!isFresh()) return null;
+              if (directory?.ok) { state.workspaceDirectory = directory.workspaces; renderWorkspaceDirectory(); }
+            }
             const surface = el('a9-surface');
             surface.hidden = false;
             surface.dataset.a9Status = 'workspace_required';
@@ -2407,8 +2677,286 @@
     }
   }
 
+  function workspaceSummary(workspace) {
+    const isCurrent = state.snapshot && state.snapshot.scope && state.snapshot.scope.workspaceId === workspace.workspaceId;
+    const items = isCurrent ? classifyInbox(inboxConversations(state.snapshot)).filter((item) => item.isCurrent)
+      : (workspace.conversations || []).map((item) => ({ activity: item.sessionId === workspace.activeConversationId && workspace.status ? inboxActivity(workspace.status) : inboxActivity(item.activity) }));
+    const attention = items.filter((item) => inboxRank(item) <= 1).length;
+    const running = items.filter((item) => item.activity === 'running' || item.activity === 'cancelling').length;
+    return { attention, running };
+  }
+
+  function pickerOption(list, index, options) {
+    const item = document.createElement('li');
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.id = `conversation-workspace-option-${index}`;
+    button.className = `project-picker-item${options.other ? ' project-picker-other' : ''}`;
+    button.setAttribute('role', 'option');
+    button.setAttribute('aria-selected', 'false');
+    button.dataset.index = String(index);
+    button.dataset.value = options.value;
+    if (options.workspace) button.appendChild(workspaceBadgeNode(options.workspace));
+    else { const plus = document.createElement('span'); plus.className = 'ws-badge project-picker-plus'; plus.setAttribute('aria-hidden', 'true'); plus.textContent = '+'; button.appendChild(plus); }
+    const main = document.createElement('span');
+    main.className = 'project-picker-main';
+    const title = document.createElement('strong');
+    title.textContent = options.title;
+    const meta = document.createElement('small');
+    meta.textContent = options.meta;
+    main.appendChild(title);
+    main.appendChild(meta);
+    button.appendChild(main);
+    if (options.summary) {
+      const summary = document.createElement('span');
+      summary.className = 'project-picker-summary';
+      if (options.summary.attention) { const node = document.createElement('b'); node.className = 'attention'; node.textContent = `${options.summary.attention} 待处理`; summary.appendChild(node); }
+      if (options.summary.running) { const node = document.createElement('b'); node.className = 'running'; node.textContent = `${options.summary.running} 运行中`; summary.appendChild(node); }
+      if (!options.summary.attention && !options.summary.running) summary.textContent = '空闲';
+      button.appendChild(summary);
+    }
+    if (options.shortcut) { const kbd = document.createElement('kbd'); kbd.textContent = options.shortcut; button.appendChild(kbd); }
+    button.addEventListener('click', () => { void chooseWorkspaceFromPicker(options.value); });
+    button.addEventListener('mousemove', () => { if (state.pickerIndex !== index) highlightPickerOption(index); });
+    item.appendChild(button);
+    list.appendChild(item);
+  }
+
+  function pickerSection(list, label) {
+    const head = document.createElement('li');
+    head.className = 'project-picker-section';
+    head.setAttribute('role', 'presentation');
+    head.textContent = label;
+    list.appendChild(head);
+  }
+
+  function highlightPickerOption(index) {
+    const options = Array.from(el('conversation-workspace-list').querySelectorAll('.project-picker-item'));
+    if (!options.length) return;
+    state.pickerIndex = (index + options.length) % options.length;
+    options.forEach((option, position) => option.setAttribute('aria-selected', String(position === state.pickerIndex)));
+    const current = options[state.pickerIndex];
+    el('conversation-workspace-search').setAttribute('aria-activedescendant', current.id);
+    if (typeof current.scrollIntoView === 'function') current.scrollIntoView({ block: 'nearest' });
+  }
+
+  /** 命令面板：已打开工作区按当前优先，其后是最近使用但未打开的目录，最后是“打开其他文件夹”。 */
+  function renderProjectPicker() {
+    const list = el('conversation-workspace-list');
+    if (!list) return;
+    const query = String(el('conversation-workspace-search').value || '').trim().toLocaleLowerCase();
+    const match = (workspace) => !query || String(workspace.displayName).toLocaleLowerCase().includes(query)
+      || String(workspace.workspaceRoot).toLocaleLowerCase().includes(query);
+    const opened = state.workspaceDirectory.filter((workspace) => workspace.opened !== false && match(workspace))
+      .sort((a, b) => Number(Boolean(b.active)) - Number(Boolean(a.active)));
+    const recent = state.workspaceDirectory.filter((workspace) => workspace.opened === false && match(workspace));
+    list.textContent = '';
+    let index = 0;
+    pickerSection(list, '已打开的工作区');
+    if (!opened.length) {
+      const empty = document.createElement('li');
+      empty.className = 'project-picker-empty';
+      empty.textContent = query ? '没有匹配的工作区。'
+        : state.workspaceDirectory.length ? '当前没有打开的工作区。' : '还没有工作区，选择下方“打开其他文件夹…”。';
+      list.appendChild(empty);
+    }
+    opened.forEach((workspace) => {
+      pickerOption(list, index, { workspace, value: workspace.workspaceId, title: workspace.displayName,
+        meta: `本地 · ${workspace.workspaceRoot}${workspace.active ? ' · 正在查看' : ''}`,
+        summary: workspaceSummary(workspace), shortcut: index < 9 ? `Ctrl ${index + 1}` : '' });
+      index += 1;
+    });
+    if (recent.length) {
+      pickerSection(list, '最近使用（未打开）');
+      recent.forEach((workspace) => {
+        pickerOption(list, index, { workspace, value: workspace.workspaceId, title: workspace.displayName,
+          meta: `选择即打开 · ${workspace.workspaceRoot}` });
+        index += 1;
+      });
+    }
+    pickerSection(list, '其他');
+    pickerOption(list, index, { other: true, value: '__choose__', title: '打开其他文件夹…', meta: '从系统对话框选择本地目录', shortcut: 'Ctrl O' });
+    highlightPickerOption(Math.min(state.pickerIndex || 0, index));
+  }
+
   function createConversation() {
-    return runConversationOperation(() => a9.createConversation());
+    if (typeof api.a9.activateWorkspace !== 'function') return runConversationOperation(() => a9.createConversation());
+    setFieldError('conversation-new-error', '');
+    setWorkspaceMenu(false);
+    el('conversation-workspace-search').value = '';
+    state.pickerIndex = 0;
+    renderProjectPicker();
+    openDialog(el('conversation-new-dialog'));
+    el('conversation-workspace-search').focus();
+  }
+
+  function handlePickerKey(event) {
+    const options = Array.from(el('conversation-workspace-list').querySelectorAll('.project-picker-item'));
+    const key = String(event.key || '');
+    if (key === 'ArrowDown' || key === 'ArrowUp') {
+      event.preventDefault();
+      highlightPickerOption((state.pickerIndex || 0) + (key === 'ArrowDown' ? 1 : -1));
+    } else if (key === 'Enter' && !event.isComposing) {
+      event.preventDefault();
+      const option = options[state.pickerIndex || 0];
+      if (option && !option.disabled) option.click();
+    } else if (event.ctrlKey && /^[1-9]$/.test(key)) {
+      event.preventDefault();
+      const option = options[Number(key) - 1];
+      if (option && !option.classList.contains('project-picker-other') && option.querySelector('kbd')) option.click();
+    } else if (event.ctrlKey && key.toLowerCase() === 'o') {
+      event.preventDefault();
+      void chooseWorkspaceFromPicker('__choose__');
+    }
+  }
+
+  /** 筛选与管理菜单：按工作区筛选对话列表；关闭入口只针对已打开的工作区。 */
+  function renderWorkspaceDirectory() {
+    if (state.snapshot) renderConversationDirectory(state.snapshot);
+    const menu = el('workspace-menu');
+    if (!menu || menu.hidden) return;
+    menu.textContent = '';
+    const head = document.createElement('p');
+    head.className = 'workspace-menu-head';
+    head.textContent = '按工作区筛选';
+    menu.appendChild(head);
+    const option = (workspace) => {
+      const row = document.createElement('div');
+      row.className = 'workspace-menu-row';
+      const pick = document.createElement('button');
+      pick.type = 'button';
+      pick.setAttribute('role', 'menuitemradio');
+      pick.setAttribute('aria-checked', String((state.inboxFilter || null) === (workspace ? workspace.workspaceId : null)));
+      if (workspace) pick.appendChild(workspaceBadgeNode(workspace));
+      const name = document.createElement('span');
+      name.textContent = workspace ? workspace.displayName : '全部工作区';
+      if (workspace) pick.title = workspace.workspaceRoot;
+      pick.appendChild(name);
+      pick.addEventListener('click', () => {
+        state.inboxFilter = workspace ? workspace.workspaceId : null;
+        setWorkspaceMenu(false);
+        if (state.snapshot) renderConversationDirectory(state.snapshot);
+      });
+      row.appendChild(pick);
+      if (workspace) {
+        const close = document.createElement('button');
+        close.type = 'button';
+        close.className = 'workspace-menu-close';
+        close.dataset.workspaceId = workspace.workspaceId;
+        close.setAttribute('role', 'menuitem');
+        close.textContent = '关闭…';
+        close.setAttribute('aria-label', `停止并关闭工作区 ${workspace.displayName}`);
+        close.disabled = state.workspaceOperation;
+        close.addEventListener('click', () => { setWorkspaceMenu(false); openWorkspaceClose(workspace); });
+        row.appendChild(close);
+      }
+      menu.appendChild(row);
+    };
+    option(null);
+    state.workspaceDirectory.filter((workspace) => workspace.opened !== false).forEach(option);
+  }
+
+  function setWorkspaceMenu(open) {
+    const menu = el('workspace-menu');
+    const toggle = el('conversation-filter');
+    if (!menu || !toggle) return;
+    menu.hidden = !open;
+    toggle.setAttribute('aria-expanded', String(open));
+    if (open) {
+      renderWorkspaceDirectory();
+      const first = menu.querySelector('button');
+      if (first) first.focus();
+    }
+  }
+
+  async function activateWorkspace(values) {
+    if (state.workspaceOperation) return null;
+    state.workspaceOperation = true;
+    state.workspaceSelectionGeneration += 1;
+    state.snapshotGeneration += 1;
+    state.snapshotPollingPauses += 1;
+    syncSnapshotPolling(); renderWorkspaceDirectory();
+    cancelPendingUndo(); clearGlobalError();
+    try {
+      const saved = await saveDraftNow();
+      if (saved && saved.ok !== true) throw new Error('草稿保存失败，请保留输入后重试。');
+      const response = await api.a9.activateWorkspace(values);
+      if (!response || !response.ok) {
+        if (!response?.cancelled) throw new Error(errorMessage(response, '工作区切换失败。'));
+        return response;
+      }
+      state.localRequest = null; state.conversationSignature = null;
+      state.approvalDecision = null; state.questionReply = null; state.continuingTaskId = null; state.queueBusy = false;
+      stopLiveTracking();
+      state.draftHydratedConversationId = null; state.explorerSessionId = null;
+      state.explorerRequest += 1; state.explorerPath = ''; state.viewer = null;
+      el('code-viewer').replaceChildren();
+      el('viewer-panel').hidden = true;
+      // Modal mode selection belongs to the old view and must not cover B.
+      closeDialog(el('a9-mode-dialog'));
+      const snapshot = await refreshSnapshot();
+      if (snapshot) {
+        await ensureExplorerSession(snapshot.workspaceRoot);
+        if (!state.explorerSessionId) {
+          const session = await api.createSession(snapshot.workspaceRoot, pathName(snapshot.workspaceRoot));
+          state.explorerSessionId = session?.session?.sessionId || null;
+          await refreshWorkspace('');
+        }
+        await loadConversationEvents();
+      }
+      return response;
+    } catch (error) {
+      showGlobalError(errorMessage(error, '工作区切换失败。'), '刷新状态', () => { void refreshSnapshot(); });
+      return { ok: false, error: { message: error.message } };
+    } finally {
+      state.workspaceOperation = false; state.snapshotPollingPauses -= 1;
+      renderWorkspaceDirectory(); syncSnapshotPolling();
+    }
+  }
+
+  async function chooseWorkspaceFromPicker(value) {
+    const dialog = el('conversation-new-dialog');
+    const items = dialog.querySelectorAll('.project-picker-item');
+    if (state.workspaceOperation || Array.from(items).some((item) => item.disabled)) return;
+    items.forEach((item) => { item.disabled = true; });
+    try {
+      const response = await activateWorkspace({ createConversation: true,
+        ...(value === '__choose__' ? { chooseDirectory: true } : { workspaceId: value }) });
+      if (response?.ok) closeDialog(el('conversation-new-dialog'));
+      else if (!response?.cancelled) setFieldError('conversation-new-error', errorMessage(response, '新建对话失败。'));
+    } finally { items.forEach((item) => { item.disabled = false; }); }
+  }
+
+  function openWorkspaceClose(workspace) {
+    if (!workspace) return;
+    el('workspace-close-dialog').dataset.workspaceId = workspace.workspaceId;
+    text('workspace-close-path', workspace.workspaceRoot);
+    openDialog(el('workspace-close-dialog'));
+  }
+
+  async function confirmWorkspaceClose() {
+    const workspaceId = el('workspace-close-dialog').dataset.workspaceId;
+    const scope = state.snapshot && state.snapshot.scope;
+    if (!workspaceId || state.workspaceOperation) return;
+    const isCurrent = Boolean(scope && scope.workspaceId === workspaceId);
+    if (isCurrent) {
+      const saved = await saveDraftNow();
+      if (saved && saved.ok !== true) return;
+    }
+    state.workspaceOperation = true; state.snapshotGeneration += 1;
+    try {
+      const response = await api.a9.closeWorkspace(workspaceId);
+      if (!response?.ok) throw new Error(errorMessage(response, '工作区关闭失败。'));
+      closeDialog(el('workspace-close-dialog'));
+      if (state.inboxFilter === workspaceId) state.inboxFilter = null;
+      if (isCurrent) {
+        state.snapshot = null; state.activeConversationId = null; state.localRequest = null;
+        state.explorerSessionId = null; state.explorerRequest += 1;
+        resetConversationEvents();
+      }
+      await refreshSnapshot();
+    } catch (error) { showGlobalError(errorMessage(error, '工作区关闭失败。')); }
+    finally { state.workspaceOperation = false; renderWorkspaceDirectory(); }
   }
 
   function switchConversation(conversationId) {
@@ -2463,6 +3011,7 @@
   }
 
   async function chooseWorkspace() {
+    if (typeof api.a9.activateWorkspace === 'function') return activateWorkspace({ chooseDirectory: true });
     const selectionGeneration = ++state.workspaceSelectionGeneration;
     state.snapshotGeneration += 1;
     state.snapshotPollingPauses += 1;
@@ -2638,6 +3187,8 @@
     const snapshot = state.snapshot;
     if (state.queueBusy || !snapshot || !snapshot.activeConversationId) return;
     const conversationId = snapshot.activeConversationId;
+    const requestGeneration = state.snapshotGeneration;
+    const isCurrent = () => state.activeConversationId === conversationId && state.snapshotGeneration === requestGeneration;
     const prompt = el('task-prompt');
     const originalText = prompt.value;
     if (operation === 'add') {
@@ -2648,16 +3199,20 @@
     try {
       const response = await a9.updateQueue({ conversationId, operation, ...fields,
         ...(operation === 'add' ? { text: originalText } : {}) });
+      if (!isCurrent()) return;
       if (!response || response.ok !== true) {
         setFieldError('a9-turn-error', errorMessage(response, '队列更新失败，输入仍保留。'));
       } else if (state.activeConversationId === conversationId && operation === 'add' && prompt.value === originalText) {
         prompt.value = ''; resizeComposer(); await saveDraftNow();
       }
-    } catch (error) { setFieldError('a9-turn-error', errorMessage(error, '队列更新结果未知，请刷新核对后再操作。')); }
-    finally { state.queueBusy = false; await refreshSnapshot(); syncComposer(); }
+    } catch (error) { if (isCurrent()) setFieldError('a9-turn-error', errorMessage(error, '队列更新结果未知，请刷新核对后再操作。')); }
+    finally { if (isCurrent()) { state.queueBusy = false; await refreshSnapshot(); syncComposer(); } }
   }
 
   async function submitPrompt() {
+    const requestConversationId = state.activeConversationId;
+    const requestGeneration = state.snapshotGeneration;
+    const isCurrent = () => state.activeConversationId === requestConversationId && state.snapshotGeneration === requestGeneration;
     const prompt = el('task-prompt').value.trim();
     if (!prompt || !canSubmit()) return null;
     clearGlobalError();
@@ -2677,7 +3232,7 @@
     let response;
     try {
       response = await a9.submitTurn(prompt);
-      if (response && response.ok !== true) {
+      if (isCurrent() && response && response.ok !== true) {
         const message = errorMessage(response, '任务执行失败。');
         state.localRequest = null;
         state.conversationSignature = null;
@@ -2685,6 +3240,7 @@
         showGlobalError(message, '打开设置', () => openDrawer('settings-drawer'));
       }
     } catch (error) {
+      if (!isCurrent()) return null;
       const message = errorMessage(error, '任务执行失败。');
       state.localRequest = null;
       state.conversationSignature = null;
@@ -2692,13 +3248,15 @@
       showGlobalError(message, '重试状态读取', () => { void refreshSnapshot(); });
     } finally {
       await finishPolling();
-      state.running = false;
-      state.localRequest = null;
-      stopLiveTracking();
-      await refreshSnapshot();
-      await loadConversationEvents();
-      syncComposer();
-      restoreComposerFocus();
+      if (isCurrent()) {
+        state.running = false;
+        state.localRequest = null;
+        stopLiveTracking();
+        await refreshSnapshot();
+        await loadConversationEvents();
+        syncComposer();
+        restoreComposerFocus();
+      }
     }
     return response;
   }
@@ -2726,6 +3284,8 @@
 
   async function continueInterruptedTask(recovery, block) {
     if (!recovery || !recovery.canContinue || state.running || state.continuingTaskId) return null;
+    const requestGeneration = state.snapshotGeneration;
+    const isCurrent = () => state.activeConversationId === recovery.conversationId && state.snapshotGeneration === requestGeneration;
     state.continuingTaskId = recovery.taskId;
     state.running = true;
     block.continueError = '';
@@ -2738,15 +3298,17 @@
     let response;
     try {
       response = await a9.continueTask(recovery.conversationId, recovery.taskId, recovery.interruptedTurnId, recovery.recoveryRevision);
-      if (!response || response.ok !== true || (response.result && !['completed', 'completed_with_warnings', 'needs_approval'].includes(response.result.outcome))) {
+      if (isCurrent() && (!response || response.ok !== true || (response.result && !['completed', 'completed_with_warnings', 'needs_approval'].includes(response.result.outcome)))) {
         block.continueError = errorMessage(response, response && response.result && response.result.finalMessage || '继续未完成，事实已保留；请刷新后再次主动尝试。');
         setFieldError('a9-turn-error', block.continueError);
       }
     } catch (error) {
+      if (!isCurrent()) return null;
       block.continueError = errorMessage(error, '继续请求失败，事实保留。');
       setFieldError('a9-turn-error', block.continueError);
     } finally {
       await finishPolling();
+      if (isCurrent()) {
       state.running = false;
       state.continuingTaskId = null;
       stopLiveTracking();
@@ -2756,6 +3318,7 @@
       syncComposer();
       if (block.continueEl) block.continueEl.focus({ preventScroll: true });
       else block.root.focus({ preventScroll: true });
+      }
     }
     return response;
   }
@@ -2802,7 +3365,8 @@
       && (snapshot.managedProcesses || []).some((item) =>
         ['running', 'starting'].includes(item.lastProbeStatus) && item.pidReusePossible !== true
         && !['released', 'release_unknown'].includes(item.ownershipState)));
-    const needed = state.snapshotPollingRequests > 0 || hasLiveManaged
+    const needed = (snapshot?.workspaces || []).some(item => item.opened && ['running', 'cancelling', 'needs_approval', 'needs_input'].includes(item.status))
+      || state.snapshotPollingRequests > 0 || hasLiveManaged
       || Boolean(snapshot && ['running', 'cancelling'].includes(snapshot.agentStatus))
       || Boolean(snapshot && snapshot.queue && !snapshot.queue.paused && snapshot.queue.items.length);
     if (state.snapshotPollingClosed || state.snapshotPollingPauses > 0 || !needed) {
@@ -2949,6 +3513,8 @@
     const approvalId = card.dataset.approvalId;
     const bindingDigest = card.dataset.bindingDigest;
     const conversationId = card.dataset.conversationId;
+    const requestGeneration = state.snapshotGeneration;
+    const isCurrent = () => state.activeConversationId === conversationId && state.snapshotGeneration === requestGeneration;
     const taskId = card.dataset.taskId;
     const turnId = card.dataset.turnId;
     setFieldError('a9-approval-error', '');
@@ -2963,6 +3529,7 @@
       let response;
       try {
         response = await a9.resumeApproval(approvalId, decision, bindingDigest, conversationId, taskId, turnId);
+        if (!isCurrent()) return response;
         if (!response || response.ok !== true) {
           setFieldError('a9-approval-error', errorMessage(response, '审批回复失败，请刷新状态后重试。'));
           return response;
@@ -2970,10 +3537,12 @@
         card.hidden = true;
         return response;
       } catch (error) {
+        if (!isCurrent()) return null;
         setFieldError('a9-approval-error', errorMessage(error, '审批回复失败，请重试。'));
         return null;
       } finally {
         await finishPolling();
+        if (isCurrent()) {
         state.running = false;
         stopLiveTracking();
         await refreshSnapshot();
@@ -2981,6 +3550,7 @@
         syncComposer();
         state.approvalDecision = null;
         setApprovalBusy(false);
+        }
       }
     })();
     return state.approvalDecision;
@@ -3012,6 +3582,8 @@
     if (state.questionReply) return state.questionReply;
     const pending = state.snapshot && state.snapshot.pendingQuestion;
     if (!pending) return null;
+    const requestGeneration = state.snapshotGeneration;
+    const isCurrent = () => state.activeConversationId === pending.conversationId && state.snapshotGeneration === requestGeneration;
     setFieldError('a9-turn-error', '');
     state.questionReply = (async () => {
       state.running = true;
@@ -3025,6 +3597,7 @@
         response = await a9.replyQuestion(
           pending.conversationId, pending.questionId, pending.revision, reply.decision, reply.answer,
         );
+        if (!isCurrent()) return response;
         if (!response || response.ok !== true) {
           setFieldError('a9-turn-error', errorMessage(response, '回答提交失败，问题仍保留。'));
           return response;
@@ -3032,10 +3605,12 @@
         state.snapshot = { ...state.snapshot, pendingQuestion: null };
         return response;
       } catch (error) {
+        if (!isCurrent()) return null;
         setFieldError('a9-turn-error', errorMessage(error, '回答提交失败，问题仍保留。'));
         return null;
       } finally {
         await finishPolling();
+        if (isCurrent()) {
         state.running = false;
         stopLiveTracking();
         await refreshSnapshot();
@@ -3043,6 +3618,7 @@
         syncComposer();
         state.questionReply = null;
         if (state.snapshot) renderQuestion(state.snapshot);
+        }
       }
     })();
     return state.questionReply;
@@ -3615,6 +4191,23 @@
     el('cancel-task').addEventListener('click', () => { void stopTurn(); });
     el('rail-stop').addEventListener('click', () => { void stopTurn(); });
     el('conversation-new').addEventListener('click', () => { void createConversation(); });
+    el('conversation-filter').addEventListener('click', (event) => {
+      event.stopPropagation();
+      setWorkspaceMenu(el('workspace-menu').hidden);
+    });
+    el('workspace-menu').addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') { setWorkspaceMenu(false); el('conversation-filter').focus(); }
+    });
+    document.addEventListener('click', (event) => {
+      const menu = el('workspace-menu');
+      if (!menu.hidden && !menu.contains(event.target) && !el('conversation-filter').contains(event.target)) setWorkspaceMenu(false);
+    });
+    el('conversation-workspace-search').addEventListener('keydown', handlePickerKey);
+    el('conversation-pin').addEventListener('click', () => { setConversationMenu(false); togglePinnedConversation(state.activeConversationId); });
+    el('workspace-close-cancel').addEventListener('click', () => closeDialog(el('workspace-close-dialog')));
+    el('workspace-close-confirm').addEventListener('click', () => { void confirmWorkspaceClose(); });
+    el('conversation-new-cancel').addEventListener('click', () => closeDialog(el('conversation-new-dialog')));
+    el('conversation-workspace-search').addEventListener('input', () => { state.pickerIndex = 0; renderProjectPicker(); });
     el('conversation-rename').addEventListener('click', () => { setConversationMenu(false); openRenameConversation(); });
     el('conversation-archive').addEventListener('click', () => { setConversationMenu(false); void archiveCurrentConversation(); });
     el('conversation-more').addEventListener('click', () => {
@@ -3763,6 +4356,13 @@
         const search = el('conversation-search');
         search.focus();
         if (typeof search.select === 'function') search.select();
+        return;
+      }
+      if (event.ctrlKey && !event.altKey && !event.shiftKey && key === 'n'
+        && !document.querySelector('.drawer:not([hidden]), dialog[open]') && !el('conversation-new').disabled) {
+        event.preventDefault();
+        openNavigation();
+        void createConversation();
         return;
       }
       if (event.ctrlKey && !event.altKey && !event.shiftKey && key === 'i') {

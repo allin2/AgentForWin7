@@ -27,7 +27,7 @@ describe('A8-04 Terminal/Browser, Runner and Settings/Diagnostics boundary contr
     expect(preload).toContain('setSettings');
     // ADR-0101 adds only a versioned user-settings action for Shell identity;
     // Renderer still receives no process/terminal primitive.
-    expect(preload).toContain("configureShell: (values) => a9Request('a9.shell.configure', values)");
+    expect(preload).toContain("configureShell: (values) => boundRequest('a9.shell.configure', values)");
     expect(preload).not.toMatch(/\b(exec|spawn|terminal|browser|navigate)\b/i);
     expect(preload).not.toMatch(/child_process|execFile|spawnSync/i);
     expect(main).toContain('a8BoundarySmokeReportPath');

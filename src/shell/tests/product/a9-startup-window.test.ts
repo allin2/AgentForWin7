@@ -31,6 +31,7 @@ function loadMainHarness(options: { failHost?: boolean; deferPaint?: boolean; re
     if (request.endsWith('/desktop-ipc')) return { createDesktopRequestHandler: () => async (event: any) => { if (event.sender !== window.webContents) throw new Error('RENDERER_CAPABILITY_DENIED'); calls.push('desktop.handler'); return { ok: true }; } };
     if (request.endsWith('/a8-product-ipc')) return { createA8ProductRequestHandler: () => async () => ({ ok: true }) };
     if (request.endsWith('/a9-product-ipc')) return { createA9ProductRequestHandler: () => async () => ({ ok: true }) };
+    if (request.endsWith('/a9-workspace-registry')) return require('../../product/a9-workspace-registry');
     if (request.endsWith('/a9-agent-runtime')) return { createA9AgentRuntime: () => ({}) };
     if (request.endsWith('/a9-package-runtime')) return { loadA9PackageRuntime: () => null };
     if (request.endsWith('/active-workspace-store')) return { createActiveWorkspaceStore: () => ({ load: () => options.restore ? { workspacePath: '/workspace' } : null, save() {} }) };

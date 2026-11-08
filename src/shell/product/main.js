@@ -34,6 +34,7 @@ const { createDesktopRequestHandler } = require('./desktop-ipc');
 const { createA8ProductRequestHandler } = require('./a8-product-ipc');
 const { createA9ProductRequestHandler } = require('./a9-product-ipc');
 const { createA9AgentRuntime } = require('./a9-agent-runtime');
+const { createA9WorkspaceRegistry } = require('./a9-workspace-registry');
 const { loadA9PackageRuntime } = require('./a9-package-runtime');
 const { createActiveWorkspaceStore } = require('./active-workspace-store');
 const { installSessionPolicy, installWindowPolicy } = require('./security-policy');
@@ -865,7 +866,7 @@ function createMainWindow() {
       window.destroy();
       return;
     }
-    if (a9ShutdownComplete || !a9RuntimeInstance || typeof a9RuntimeInstance.shutdown !== 'function') return;
+    if (a9ShutdownComplete || a9Workspaces.size === 0) return;
     event.preventDefault();
     if (a9WindowCloseInFlight) return;
     a9WindowCloseInFlight = (async () => {
@@ -931,7 +932,7 @@ const handleDesktopRequest = createDesktopRequestHandler({
   sendProductEvent,
   chooseWorkspace: async () => {
     const result = await dialog.showOpenDialog(mainWindow, {
-      title: '选择只读代码工作区',
+      title: '选择代码工作区',
       properties: ['openDirectory'],
     });
     if (result.canceled || result.filePaths.length === 0) return null;
@@ -949,14 +950,13 @@ ipcMain.handle('product:a8-request', withStartupBarrier(createA8ProductRequestHa
 })));
 
 // A9 Trusted Agent Runtime（A9-06）：Renderer 只经此窄 IPC 访问。
-let a9RuntimeInstance = null;
+const a9Workspaces = createA9WorkspaceRegistry({ createRuntime: createWorkspaceRuntime });
 // F1：未选择工作区时的结构化哨兵（不创建 runtime，不落 userData）。
 const A9_WORKSPACE_REQUIRED_SENTINEL = Object.freeze({
   __a9WorkspaceRequired: true,
   status: 'workspace_required',
 });
 
-let a9RuntimeWorkspace = null;
 
 function getA9DataRoot() {
   return process.env.WIN7AGENT_A9_DATAROOT || path.join(app.getPath('userData'), 'a9');
@@ -965,34 +965,22 @@ function getA9DataRoot() {
 async function getOrCreateA9Runtime() {
   // WIN7AGENT_A9_DATAROOT / WIN7AGENT_A9_ELECTRON_SQLITE 仅供开发机 smoke 显式覆盖；
   // WIN7AGENT_A9_WORKSPACE 仅作显式测试覆盖保留，正式链路以主进程确认的活动工作区为准。
-  const a9DataRoot = getA9DataRoot();
+  if (a9Workspaces.getActive()) return a9Workspaces.getActive().runtime;
+  if (a9Workspaces.selectionClosed) return A9_WORKSPACE_REQUIRED_SENTINEL;
   const activeWorkspace = desktopHost && typeof desktopHost.getActiveWorkspacePath === 'function'
     ? desktopHost.getActiveWorkspacePath()
     : null;
   const desiredWorkspace = process.env.WIN7AGENT_A9_WORKSPACE || activeWorkspace;
   if (!desiredWorkspace) return A9_WORKSPACE_REQUIRED_SENTINEL;
 
-  if (a9RuntimeInstance && a9RuntimeInstance.status === 'ready' && a9RuntimeWorkspace === desiredWorkspace) {
-    return a9RuntimeInstance;
-  }
-  // 切换工作区：安全关闭旧 runtime（释放锁/后台进程）；模式、锁与 checkpoint 按工作区隔离。
-  if (a9RuntimeInstance && typeof a9RuntimeInstance.shutdown === 'function') {
-    const leave = typeof a9RuntimeInstance.canLeaveWorkspace === 'function'
-      ? a9RuntimeInstance.canLeaveWorkspace()
-      : { allowed: true };
-    if (!leave.allowed) {
-      throw Object.assign(new Error(`A9_WORKSPACE_BUSY: ${leave.reason}`), { code: 'A9_WORKSPACE_BUSY' });
-    }
-    const cleanup = await a9RuntimeInstance.shutdown();
-    if (cleanup && Array.isArray(cleanup.leftToSystem) && cleanup.leftToSystem.length > 0) {
-      throw Object.assign(new Error(`A9_WORKSPACE_CLEANUP_UNCONFIRMED: ${cleanup.leftToSystem.join(';')}`), {
-        code: 'A9_WORKSPACE_CLEANUP_UNCONFIRMED',
-      });
-    }
-  }
-  a9RuntimeInstance = createA9AgentRuntime({
+  return a9Workspaces.activate(desiredWorkspace).runtime;
+}
+
+function createWorkspaceRuntime(desiredWorkspace, hostOptions) {
+  return createA9AgentRuntime({
+    ...hostOptions,
     workspaceRoot: desiredWorkspace,
-    dataRoot: a9DataRoot,
+    dataRoot: getA9DataRoot(),
     ...(fs.existsSync(path.join(app.getPath('userData'), 'state', 'agent-events-v2.db'))
       ? { a8DatabasePath: path.join(app.getPath('userData'), 'state', 'agent-events-v2.db') }
       : {}),
@@ -1017,24 +1005,30 @@ async function getOrCreateA9Runtime() {
       ? { electronSqliteRoot: process.env.WIN7AGENT_A9_ELECTRON_SQLITE }
       : a9PackageRuntime ? { electronSqliteRoot: a9PackageRuntime.storageRoot } : {}),
   });
-  a9RuntimeWorkspace = desiredWorkspace;
-  return a9RuntimeInstance;
 }
 ipcMain.handle('product:a9-request', withStartupBarrier(createA9ProductRequestHandler({
   getA9Runtime: getOrCreateA9Runtime,
   isValidRendererSender: validRendererSender,
+  workspaceRegistry: a9Workspaces,
+  selectWorkspace: async (workspacePath) => desktopHost.selectWorkspace(workspacePath),
+  chooseWorkspace: async () => {
+    const choice = await dialog.showOpenDialog(mainWindow, { title: '选择代码工作区', properties: ['openDirectory'] });
+    return choice.canceled || !choice.filePaths.length ? null : choice.filePaths[0];
+  },
 })));
 let a9ShutdownComplete = false;
 let a9ShutdownInFlight = null;
 let a9WindowCloseInFlight = null;
 async function selectA9ShutdownPolicy() {
-  const snapshot = a9RuntimeInstance && typeof a9RuntimeInstance.getSnapshot === 'function' ? a9RuntimeInstance.getSnapshot() : null;
-  const handles = snapshot && Array.isArray(snapshot.managedProcesses) ? snapshot.managedProcesses : [];
+  const handles = a9Workspaces.directory().filter(item => item.opened).flatMap(item => {
+    const snapshot = a9Workspaces.getById(item.workspaceId).runtime.getSnapshot({ conversationPage: true });
+    return (snapshot.managedProcesses || []).map(handle => ({ ...handle, workspaceRoot: item.workspaceRoot }));
+  });
   const active = handles.filter((h) => ['running', 'starting', 'running_unknown', 'identity_mismatch'].includes(h.lastProbeStatus) || h.cleanupRequired === true);
   if (!active.length) return true;
   const choice = await dialog.showMessageBox({ type: 'question', title: '退出时处理后台进程',
     message: '选择停止后台进程后退出，或将已确认移交的进程留给系统后退出。',
-    detail: active.slice(0, 20).map((h) => String(h.handleId).slice(0, 160)).join('\n'),
+    detail: active.slice(0, 20).map((h) => `${h.workspaceRoot}: ${h.handleId}`.slice(0, 320)).join('\n'),
     buttons: ['停止后退出', '留给系统后退出', '取消'], defaultId: 0, cancelId: 2, noLink: true });
   if (choice.response === 2) return null;
   return choice.response === 0;
@@ -1042,7 +1036,7 @@ async function selectA9ShutdownPolicy() {
 async function executeA9ShutdownChoice() {
   const stopManaged = await selectA9ShutdownPolicy();
   if (stopManaged === null) return false;
-  const result = stopManaged ? await a9RuntimeInstance.shutdown() : await a9RuntimeInstance.shutdown({ stopManaged: false });
+  const result = stopManaged ? await a9Workspaces.shutdown() : await a9Workspaces.shutdown({ stopManaged: false });
   const unresolved = result && Array.isArray(result.unresolved) ? result.unresolved : [];
   const leftToSystem = result && result.leftToSystem;
   const residueLines = [...unresolved, ...(Array.isArray(leftToSystem) && stopManaged ? leftToSystem : [])].slice(0, 20).map((item) => String(item).slice(0, 500));
@@ -1050,7 +1044,7 @@ async function executeA9ShutdownChoice() {
   return true;
 }
 function beginA9ShutdownBeforeQuit(event) {
-  if (a9ShutdownComplete || !a9RuntimeInstance || typeof a9RuntimeInstance.shutdown !== 'function') return;
+  if (a9ShutdownComplete || a9Workspaces.size === 0) return;
   event.preventDefault();
   if (a9ShutdownInFlight) return;
   a9ShutdownInFlight = (async () => {
@@ -1238,25 +1232,12 @@ if (!hasSingleInstanceLock) {
       }),
       ...(activeWorkspaceStore ? {
         onWorkspaceChanging: async (workspacePath) => {
-          if (a9RuntimeInstance && a9RuntimeWorkspace && workspacePath !== a9RuntimeWorkspace) {
-            const leave = typeof a9RuntimeInstance.canLeaveWorkspace === 'function'
-              ? a9RuntimeInstance.canLeaveWorkspace()
-              : { allowed: true };
-            if (!leave.allowed) {
-              throw Object.assign(new Error(`A9_WORKSPACE_BUSY: ${leave.reason}`), { code: 'A9_WORKSPACE_BUSY' });
-            }
-            const cleanup = await a9RuntimeInstance.shutdown();
-            if (cleanup && Array.isArray(cleanup.leftToSystem) && cleanup.leftToSystem.length > 0) {
-              throw Object.assign(new Error(`A9_WORKSPACE_CLEANUP_UNCONFIRMED: ${cleanup.leftToSystem.join(';')}`), {
-                code: 'A9_WORKSPACE_CLEANUP_UNCONFIRMED',
-              });
-            }
-            a9RuntimeInstance = null;
-            a9RuntimeWorkspace = null;
-          }
+          a9Workspaces.admit(workspacePath);
         },
         onWorkspaceSelected: async (workspacePath) => {
+          a9Workspaces.admit(workspacePath);
           activeWorkspaceStore.save(workspacePath);
+          a9Workspaces.activate(workspacePath);
         },
       } : {}),
       ...(productRunner ? { runner: productRunner.runner, runnerAcceptanceAction: productRunner.acceptanceAction } : {}),

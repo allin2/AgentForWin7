@@ -3010,10 +3010,13 @@ describe('A9-33 batch-2 smoke pieces', () => {
       let loaded: (() => void) | null = null;
       const submitted: string[] = [];
       const nodes: Record<string, any> = {};
-      const node = (id: string) => (nodes[id] ||= { textContent: '', disabled: false, hidden: false,
+      const node = (id: string) => (nodes[id] ||= { textContent: '', disabled: false, hidden: false, classList: { toggle: () => undefined },
         click() { if (this.disabled) throw new Error('A disabled control was clicked'); clicks += 1; clickedAt = now; } });
       const box: any = { state: { searchQuery: '' }, el: node, text: (id: string, value: any) => { node(id).textContent = String(value); },
-        appendConversationGroup: () => undefined, appendConversationRow: () => undefined };
+        appendConversationGroup: () => undefined, appendConversationRow: () => undefined,
+        // A9-52 inbox helpers are outside this slice; this test only exercises the new-conversation control.
+        inboxConversations: () => [], classifyInbox: (items: any[]) => items, inboxRank: () => 0,
+        pathName: String, readPinnedConversations: () => new Set() };
       vm.runInNewContext(`${slice(rendererSource, 'function renderConversationDirectory(snapshot)', '  function hydrateDraft(snapshot)')}\nthis.render = renderConversationDirectory;`, box);
       const render = (stale = false) => box.render({ conversations: [{ sessionId: activeId, state: 'active' }], activeConversationId: activeId,
         conversationControls: { canSwitch: !stale && !options.permanentlyBlocked && now >= (options.enableAt ?? 0), maxActive: options.atLimit ? 1 : 16 } });

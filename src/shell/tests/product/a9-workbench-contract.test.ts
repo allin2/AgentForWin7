@@ -142,7 +142,7 @@ describe('A9 unified desktop workbench contract', () => {
 
   it('waits for A9 managed-process cleanup before Electron quits', () => {
     expect(main).toContain("app.on('before-quit', beginA9ShutdownBeforeQuit)");
-    expect(main).toContain('await a9RuntimeInstance.shutdown()');
+    expect(main).toContain('await a9Workspaces.shutdown()');
     expect(main).toContain('A9_SHUTDOWN_RESIDUE');
     expect(main).toContain("dialog.showErrorBox('无法确认安全退出'");
     expect(main).toContain("window.on('close', (event) => {");
@@ -917,8 +917,7 @@ describe('A9 unified desktop workbench contract', () => {
 
     const chrome = 2 * box('.rail-inner', 'padding')[0]
       + Math.max(px('.brand-mark', 'height'), LINE(14, 1.55) + LINE(11, 1.4)) + box('.brand', 'padding')[2]
-      + (LINE(11, 1.55) + px('.workspace-card > span:first-child', 'margin-bottom')) + LINE(14, 1.55)
-      + (4 + LINE(12, 1.55)) + 2 * box('.workspace-card', 'padding')[0]
+      // A9-52：有工作区（即有对话可列）时左上角选择卡片隐藏，不计入列表预算。
       + 2 * 44 + 4 + 2 * box('.product-nav', 'margin')[0]
       + 2 * box('.rail-task', 'padding')[0] + 2 + LINE(11, 1.4)
       + (px('.rail-task-state', 'margin-top') + LINE(13, 1.55)) + (box('.rail-task p', 'margin')[0] + LINE(11, 1.45))
@@ -961,7 +960,7 @@ describe('A9 unified desktop workbench contract', () => {
     expect(css).toMatch(/\.conversation-list\s*\{[^}]*overflow-x:\s*hidden/);
   });
 
-  it('keeps four 36px rows visible in the real 125% DPI worst-form height budget (U02/U07)', () => {
+  it('keeps four conversation rows visible in the real 125% DPI worst-form height budget (U02/U07)', () => {
     // WIN7-35 实机：1366x768、120 DPI、可用内容视口 1079x540 CSS px（不是被最小窗口
     // 钳大的 1080x584）。最坏形态同时出现 Stop、两个组头、归档摘要与目录状态。
     // 本模型必须按「已绑定到真实节点」的声明值计高；未绑定选择器不得再假装生效。
@@ -1053,7 +1052,7 @@ describe('A9 unified desktop workbench contract', () => {
 
     const chrome = 2 * box('.rail-inner', 'padding')[0]
       + Math.max(px('.brand-mark', 'height'), px('.navigation-close', 'height'), px('.brand', 'min-height'))
-      + px('.workspace-card', 'min-height')
+      // A9-52：有对话时工作区选择卡片隐藏，不占列表高度。
       // 两个产品入口在紧凑高度下横排，因此只占一行。
       + px('.nav-item', 'min-height')
       // 运行中状态与 Stop 横排；边框在 border-box 高度外只计 rail-task 自身的上下边框。
@@ -1081,9 +1080,11 @@ describe('A9 unified desktop workbench contract', () => {
     const listClientHeight = directory - (overhead - 2 * baseBox('.conversation-list', 'padding')[0]);
     const listContent = directory - overhead;
     // 与 measure3 探针同口径：按钮边框盒必须完整落在 list 的 border-box 内。
-    // 相邻 li 外边距折叠为 1px，组头 20px、行 36px；最坏序列是 H1 R1 H2 R2 R3 R4。
+    // 相邻 li 外边距折叠为 1px，组头 20px；行高取基础样式声明（A9-52 两行式为 44px）。最坏序列是 H1 R1 H2 R2 R3 R4。
     const listPad = baseBox('.conversation-list', 'padding')[0];
-    const rowStep = 36 + 1;
+    const baseRow = css.slice(0, compactStart).match(/\.conversation-list button\s*\{[^}]*min-height:\s*([\d.]+)px/);
+    expect(baseRow).not.toBeNull();
+    const rowStep = Number(baseRow![1]) + 1;
     const headStep = 20 + 1;
     const fourthButtonBottom = listPad + 2 * headStep + 4 * rowStep;
     expect(listContent).toBeGreaterThan(0);
@@ -1254,37 +1255,99 @@ describe('A9 unified desktop workbench contract', () => {
     expect(inspectorBtn.getAttribute('aria-expanded')).toBe('true');
   });
 
-  it('renders the A9-16 conversation directory with live/older group heads and single-line rows (U01/A-3)', () => {
+  it('renders the A9-52 inbox: live rows first, settled rows collapsed, rows from every resident workspace (U01/A-3)', () => {
     const h = createPaneHarness();
     const source = script.slice(script.indexOf('  function conversationStatusLabel('), script.indexOf('  function hydrateDraft('));
     const el = (id: string) => h.document.getElementById(id) as any;
+    const switchConversation = jest.fn();
+    const activateWorkspace = jest.fn();
     const context: any = {
       Date, document: h.document,
       state: { searchQuery: '' },
       el,
-      text: (id: string, value: unknown) => { el(id).textContent = String(value); },
-      switchConversation: () => {},
+      text: (id: string, value: unknown) => { const node = el(id); if (node) node.textContent = String(value); },
+      pathName: (value: string) => String(value || '').split(/[\\/]+/).filter(Boolean).pop() || '',
+      switchConversation, activateWorkspace,
     };
     vm.runInNewContext(source + ';this.renderDirectory = renderConversationDirectory;', context);
-    const snapshot = {
+    const a = 'a'.repeat(64);
+    const b = 'b'.repeat(64);
+    const snapshot: any = {
+      workspaceRoot: 'C:\\work\\alpha',
+      scope: { workspaceId: a, conversationId: 's1' },
       activeConversationId: 's1',
+      agentStatus: 'running',
       conversationControls: { canSwitch: true, maxActive: 16 },
       conversations: [
-        { sessionId: 's1', title: '运行中对话', state: 'active', activity: 'running' },
-        { sessionId: 's2', title: '空闲对话', state: 'active', activity: 'idle' },
+        // 数据库仍记为 idle；当前对话以运行时实时状态为准（缺陷 2）。
+        { sessionId: 's1', title: '运行中对话', state: 'active', activity: 'idle', updatedAt: '2026-11-07T10:00:00.000Z' },
+        { sessionId: 's2', title: '空闲对话', state: 'active', activity: 'idle', updatedAt: '2026-11-07T09:00:00.000Z' },
         { sessionId: 's3', title: '已归档对话', state: 'archived', activity: 'idle' },
+      ],
+      workspaces: [
+        { workspaceId: a, workspaceRoot: 'C:\\work\\alpha', displayName: 'alpha', opened: true, active: true, status: 'running', activeConversationId: 's1', canSwitch: true, conversations: [] },
+        { workspaceId: b, workspaceRoot: 'C:\\work\\beta', displayName: 'beta', opened: true, active: false, status: 'needs_approval', activeConversationId: 'b1', canSwitch: false,
+          conversations: [{ sessionId: 'b1', title: '待审批对话', activity: 'idle', updatedAt: '2026-11-07T08:00:00.000Z', hasDraft: false },
+            { sessionId: 'b2', title: '另一对话', activity: 'idle', updatedAt: '2026-11-07T07:00:00.000Z', hasDraft: true }] },
       ],
     };
     context.renderDirectory(snapshot);
     const list = h.nodes.get('conversation-list')!;
     const heads = list.children.filter((c) => c.classList.contains('conversation-group-head'));
-    expect(heads).toHaveLength(2);
-    expect(heads[0].textContent).toBe('进行中1');
-    expect(heads[1].textContent).toBe('更早1');
-    const runningRow = list.children[1].children[0];
-    expect(runningRow.getAttribute('aria-current')).toBe('true');
-    const archiveCount = h.nodes.get('conversation-archive-count')!;
-    expect(archiveCount.textContent).toBe('1');
+    expect(heads.map((head) => head.textContent)).toEqual(['活跃3', '已结束1']);
+    const rows = list.children.filter((c) => !c.classList.contains('conversation-group-head')).map((li) => li.children[0]);
+    // 需要处理的排在运行中前面；有草稿的对话保持在活跃组；已结束组默认折叠。
+    expect(rows.map((row: any) => String(row.getAttribute('aria-label')).split('，').slice(0, 3).join('，'))).toEqual([
+      '待审批对话，beta，待审批', '运行中对话，alpha，运行中', '另一对话，beta，空闲']);
+    expect(rows[1].getAttribute('aria-current')).toBe('true');
+    // beta 有任务未结束：可回到它绑定的对话，不能切到同工作区的其他对话。
+    expect(rows[0].disabled).toBe(false);
+    expect(rows[2].disabled).toBe(true);
+    rows[0].fire('click');
+    expect(activateWorkspace).toHaveBeenCalledWith({ workspaceId: b, conversationId: 'b1' });
+    expect(h.nodes.get('conversation-archive-count')!.textContent).toBe('1');
+  });
+
+  it('marks a background completion as unread until it is opened, then settles it after leaving', () => {
+    const h = createPaneHarness();
+    const source = script.slice(script.indexOf('  function conversationStatusLabel('), script.indexOf('  function hydrateDraft('));
+    const el = (id: string) => h.document.getElementById(id) as any;
+    const context: any = { Date, document: h.document, state: { searchQuery: '' }, el,
+      text: (id: string, value: unknown) => { const node = el(id); if (node) node.textContent = String(value); },
+      pathName: (value: string) => String(value || '').split(/[\\/]+/).filter(Boolean).pop() || '',
+      switchConversation: () => {}, activateWorkspace: () => {} };
+    vm.runInNewContext(source + ';this.renderDirectory = renderConversationDirectory;', context);
+    const a = 'a'.repeat(64);
+    const b = 'b'.repeat(64);
+    const view = (status: string, viewing: 'a' | 'b') => ({
+      workspaceRoot: viewing === 'a' ? 'C:\\a' : 'C:\\b',
+      scope: { workspaceId: viewing === 'a' ? a : b, conversationId: viewing === 'a' ? 'a1' : 'b1' },
+      activeConversationId: viewing === 'a' ? 'a1' : 'b1', agentStatus: viewing === 'a' ? 'idle' : status,
+      conversationControls: { canSwitch: true, maxActive: 16 },
+      conversations: [viewing === 'a'
+        ? { sessionId: 'a1', title: 'A 对话', state: 'active', activity: 'idle', updatedAt: '2026-11-07T10:00:00.000Z' }
+        : { sessionId: 'b1', title: 'B 对话', state: 'active', activity: 'idle', updatedAt: '2026-11-07T10:00:00.000Z' }],
+      workspaces: [
+        { workspaceId: a, workspaceRoot: 'C:\\a', displayName: 'a', opened: true, status: 'idle', activeConversationId: 'a1', canSwitch: true,
+          conversations: [{ sessionId: 'a1', title: 'A 对话', activity: 'idle', updatedAt: '2026-11-07T10:00:00.000Z' }] },
+        { workspaceId: b, workspaceRoot: 'C:\\b', displayName: 'b', opened: true, status, activeConversationId: 'b1', canSwitch: true,
+          conversations: [{ sessionId: 'b1', title: 'B 对话', activity: 'idle', updatedAt: '2026-11-07T10:00:00.000Z' }] },
+      ],
+    });
+    const labels = () => h.nodes.get('conversation-list')!.children
+      .filter((c) => !c.classList.contains('conversation-group-head')).map((li) => String(li.children[0].getAttribute('aria-label')).split('，').slice(0, 3).join('，'));
+    const heads = () => h.nodes.get('conversation-list')!.children
+      .filter((c) => c.classList.contains('conversation-group-head')).map((head) => head.textContent);
+    context.renderDirectory(view('running', 'a'));
+    expect(labels()).toEqual(['B 对话，b，运行中']);
+    context.renderDirectory(view('completed', 'a'));
+    expect(labels()).toEqual(['B 对话，b，已完成']);
+    // 打开后仍留在活跃组，避免点开即跳走。
+    context.renderDirectory(view('completed', 'b'));
+    expect(heads()).toEqual(['活跃1', '已结束1']);
+    expect(labels()).toEqual(['B 对话，b，空闲']);
+    context.renderDirectory(view('completed', 'a'));
+    expect(heads()).toEqual(['活跃0', '已结束2']);
   });
 });
 

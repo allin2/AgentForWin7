@@ -111,6 +111,8 @@ export interface TruncationInfo {
 }
 
 export interface ModelResponse {
+  /** Whether token usage was supplied by the upstream, rather than defaulted. */
+  usageReported?: boolean;
   id: string;
   requestId: string;
   content: string;

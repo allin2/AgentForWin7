@@ -150,12 +150,17 @@ function createA9AgentRuntime(options) {
   // 得不到 needs_selection。数据根属于产品声明的 userData 边界，可安全按需创建。
   fs.mkdirSync(dataRoot, { recursive: true });
 
-  const persistenceOutcome = modules.state.A9PersistenceManager.open({
+  const persistenceOptions = {
     databasePath: path.join(dataRoot, 'a9-state.db'),
     ...(config.a8DatabasePath ? { a8DatabasePath: config.a8DatabasePath } : {}),
     openDatabase: resolvedOpenDatabase,
     dataRoot,
-  });
+  };
+  // A9-52: one host opens/recoveries the database once. Creating another
+  // workspace must never run restart recovery over a live sibling task.
+  const persistenceOutcome = config.openPersistence
+    ? config.openPersistence(persistenceOptions, values => modules.state.A9PersistenceManager.open(values))
+    : modules.state.A9PersistenceManager.open(persistenceOptions);
   if (persistenceOutcome.status !== 'ready') {
     return createDiagnosticsRuntime(persistenceOutcome);
   }
@@ -341,7 +346,8 @@ function createA9AgentRuntime(options) {
     composer.pause(a9SessionId, error);
   }
   function queueReady() {
-    return !queueClosed && !workspaceLockReleased && lockHeld && !activeController
+    return !(config.isProviderConfiguring && config.isProviderConfiguring())
+      && !queueClosed && !workspaceLockReleased && lockHeld && !activeController
       && !currentPendingApproval && !currentPendingQuestion && !managedAuditFailure && !auditFailureBlock
       && !shellConfigurationInFlight
       && ['full_access', 'read_only'].includes(permissionMode)
@@ -689,7 +695,7 @@ function createA9AgentRuntime(options) {
         ...(providerConfig.proxy.username ? { auth: { username: providerConfig.proxy.username, password: (memorySecrets && memorySecrets.proxyPassword) || '' } } : {}),
       }
       : undefined;
-    return new modules.gateway.OpenAICompatibleProvider({
+    const instance = new modules.gateway.OpenAICompatibleProvider({
       baseUrl: providerConfig.baseUrl,
       model: providerConfig.model,
       ...(memoryApiKey ? { apiKey: memoryApiKey } : {}),
@@ -704,6 +710,7 @@ function createA9AgentRuntime(options) {
         retryConfig: { maxRetries: 1, initialDelayMs: 200, maxDelayMs: 500, backoffMultiplier: 2 },
       } : {}),
     });
+    return config.wrapProvider ? config.wrapProvider(instance) : instance;
   }
 
   function rebuildProvider() {
@@ -1318,6 +1325,7 @@ function createA9AgentRuntime(options) {
   }
 
   function ensureRuntime() {
+    if (config.assertExecutionAllowed) config.assertExecutionAllowed();
     if (!retryWorkspaceLock()) {
       const err = new Error(`A9_WORKSPACE_LOCKED: 工作区写锁由 ${lock.holder} 持有`);
       err.code = 'A9_WORKSPACE_LOCKED';
@@ -2723,7 +2731,8 @@ function createA9AgentRuntime(options) {
       agentStatus,
       ...(agentStatus === 'needs_input' ? { questionState: { awaitingReply: true } } : {}),
       activeConversationId: a9SessionId,
-      conversations: persistence.listConversations(canonicalWorkspace),
+      conversations: persistence.listConversations(canonicalWorkspace)
+        .map(item => ({ ...item, hasDraft: composer.hasContent(item.sessionId) })),
       conversationControls: {
         canSwitch: !blockReason,
         reason: blockReason,
@@ -2969,7 +2978,7 @@ function createA9AgentRuntime(options) {
         workspaceLockReleased = true;
       }
     };
-    if (!activeController && manager.getActiveCount() === 0) {
+    if (!activeController && !(options.cancelPending && (currentPendingApproval || currentPendingQuestion)) && manager.getActiveCount() === 0) {
       // 保留既有无负载关闭语义：无需等待时同步释放锁，紧接着切换/重开
       // 同一工作区不会短暂误报 A9_WORKSPACE_LOCKED。
       releaseWorkspaceLock();
@@ -2984,6 +2993,25 @@ function createA9AgentRuntime(options) {
         while (activeController && Date.now() < deadline) {
           await new Promise((resolve) => setTimeout(resolve, 25));
         }
+      }
+      // A9-52: explicitly closing a workspace revokes suspended work too.
+      // Do not leave active SQLite rows behind for a later Runtime to inherit.
+      if (options.cancelPending && !activeController && (currentPendingApproval || currentPendingQuestion)) {
+        const question = currentPendingQuestion;
+        const lifecycle = activeLifecycle || (question && { taskId: question.taskId, turnId: question.turnId, runId: `run-${question.turnId}` });
+        if (!lifecycle || !lifecycle.turnId) throw new Error('A9_SHUTDOWN_LIFECYCLE_MISSING');
+        if (currentPendingApproval) {
+          const approval = approvalIdentity(currentPendingApproval);
+          persistence.recordApproval({ approvalId: approval.approvalId, sessionId: a9SessionId,
+            turnId: approval.turnId, toolName: approval.toolName, binding: approval, decision: 'denied' });
+          emitApprovalResolved(currentPendingApproval, 'denied');
+        }
+        if (question) persistence.resolveQuestion(canonicalWorkspace, {
+          conversationId: a9SessionId, questionId: question.questionId, revision: question.revision, decision: 'cancelled',
+        });
+        persistTurnResult(lifecycle, { turnId: lifecycle.turnId, outcome: 'cancelled', verification: 'not_applicable',
+          finalMessage: 'Workspace closed by user; pending operations were cancelled without execution.', totalSteps: 0,
+          toolCallsExecuted: 0, externalChanges: [] });
       }
       await officeClose;
       if (managedStopPromise) await managedStopPromise;
@@ -3016,6 +3044,23 @@ function createA9AgentRuntime(options) {
   return {
     protocolVersion: A9_PROTOCOL_VERSION,
     status: 'ready',
+    // Main-only state transfer; these methods are never actions in product IPC.
+    shareProviderState: accept => accept({ providerConfig, memoryApiKey, memorySecrets, providerProbe, providerDiagnostics, apiKeySource,
+      knownSecrets: Array.from(knownSecrets), knownBasicCredentials: Array.from(knownBasicCredentials) }),
+    acceptProviderState: value => {
+      pauseQueue();
+      providerConfig = value.providerConfig ? JSON.parse(JSON.stringify(value.providerConfig)) : null;
+      memoryApiKey = value.memoryApiKey;
+      memorySecrets = value.memorySecrets ? JSON.parse(JSON.stringify(value.memorySecrets)) : null;
+      providerProbe = value.providerProbe ? { ...value.providerProbe } : null;
+      providerDiagnostics = value.providerDiagnostics ? { ...value.providerDiagnostics } : null;
+      apiKeySource = value.apiKeySource;
+      value.knownSecrets.forEach(secret => knownSecrets.add(secret));
+      value.knownBasicCredentials.forEach(secret => knownBasicCredentials.add(secret));
+      rebuildProvider();
+      if (providerConfig) alignConversationProviderBoundary(a9SessionId);
+      providerContextRestorePending = true;
+    },
     configureProvider,
     probeProvider,
     configureShell,
@@ -3147,6 +3192,8 @@ function createSqliteUnavailableRuntime(reason) {
   return {
     protocolVersion: 1,
     status: 'electron_sqlite_unavailable',
+    shareProviderState() { throw Object.assign(new Error('ELECTRON_SQLITE_UNAVAILABLE'), { code: 'ELECTRON_SQLITE_UNAVAILABLE' }); },
+    acceptProviderState() { throw Object.assign(new Error('ELECTRON_SQLITE_UNAVAILABLE'), { code: 'ELECTRON_SQLITE_UNAVAILABLE' }); },
     diagnostics: { code: 'ELECTRON_SQLITE_UNAVAILABLE', detail: safeReason },
     configureProvider() { throw new Error('ELECTRON_SQLITE_UNAVAILABLE'); },
     probeProvider() { throw new Error('ELECTRON_SQLITE_UNAVAILABLE'); },
@@ -3191,6 +3238,8 @@ function createDiagnosticsRuntime(outcome) {
   return {
     protocolVersion: A9_PROTOCOL_VERSION,
     status: diagnosticStatus,
+    shareProviderState() { throw Object.assign(new Error('A9_DIAGNOSTICS_MODE'), { code: 'A9_DIAGNOSTICS_MODE' }); },
+    acceptProviderState() { throw Object.assign(new Error('A9_DIAGNOSTICS_MODE'), { code: 'A9_DIAGNOSTICS_MODE' }); },
     diagnostics: safeDiagnostics,
     configureProvider() { throw new Error('A9_DIAGNOSTICS_MODE'); },
     probeProvider() { throw new Error('A9_DIAGNOSTICS_MODE'); },

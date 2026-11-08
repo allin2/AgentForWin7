@@ -821,6 +821,12 @@ export class A9PersistenceManager {
     return this.requireConversation(sessionId);
   }
 
+  /** Bounded directory; does not open runtimes or restore execution. */
+  listWorkspacePaths(): string[] {
+    return (this.db.prepare('SELECT workspace_path, MAX(updated_at) AS recent FROM a9_sessions GROUP BY workspace_path ORDER BY recent DESC LIMIT 64').all() as any[])
+      .map(row => row.workspace_path);
+  }
+
   listConversations(workspacePath: string): A9ConversationRecord[] {
     return (this.db.prepare(`
       SELECT s.*,

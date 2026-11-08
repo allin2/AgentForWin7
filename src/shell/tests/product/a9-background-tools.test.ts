@@ -213,7 +213,7 @@ it('main offers stop/release/cancel before shutdown and blocks unknown release',
   const start = main.indexOf('async function selectA9ShutdownPolicy()'), end = main.indexOf('function beginA9ShutdownBeforeQuit(', start);
   let response = 1; const runtime = { getSnapshot: () => ({ managedProcesses: [{ handleId: 'h', lastProbeStatus: 'running' }] }), shutdown: jest.fn(async () => ({ unresolved: [] as string[], leftToSystem: ['h'] })) };
   const dialog = { showMessageBox: jest.fn(async () => { expect(runtime.shutdown).not.toHaveBeenCalled(); return { response }; }) };
-  const choose = vm.runInNewContext(main.slice(start, end) + '; executeA9ShutdownChoice', { a9RuntimeInstance: runtime, dialog });
+  const choose = vm.runInNewContext(main.slice(start, end) + '; executeA9ShutdownChoice', { a9Workspaces: { directory: () => [{ opened: true, workspaceId: 'A', workspaceRoot: '/A' }], getById: () => ({ runtime }), shutdown: runtime.shutdown }, dialog });
   expect(await choose()).toBe(true); expect(runtime.shutdown).toHaveBeenCalledWith({ stopManaged: false });
   runtime.shutdown.mockClear(); response = 2; expect(await choose()).toBe(false); expect(runtime.shutdown).not.toHaveBeenCalled();
   runtime.shutdown.mockClear(); response = 0; runtime.shutdown.mockResolvedValueOnce({ unresolved: [] as string[], leftToSystem: [] }); expect(await choose()).toBe(true); expect(runtime.shutdown).toHaveBeenCalledWith();

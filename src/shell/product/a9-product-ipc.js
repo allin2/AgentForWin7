@@ -10,6 +10,9 @@ const { serializeError } = require('./desktop-host');
 
 const A9_ACTIONS = Object.freeze({
   SNAPSHOT_GET: 'a9.snapshot.get',
+  WORKSPACE_LIST: 'a9.workspace.list',
+  WORKSPACE_ACTIVATE: 'a9.workspace.activate',
+  WORKSPACE_CLOSE: 'a9.workspace.close',
   MODE_SET: 'a9.mode.set',
   PROVIDER_CONFIGURE: 'a9.provider.configure',
   PROVIDER_PROBE: 'a9.provider.probe',
@@ -43,7 +46,7 @@ const A9_ACTIONS = Object.freeze({
  * v6（ADR-0114）：在 v5 有界文件读取基础上增加按会话有界查询持久化事件
  * （a9.events.query，UI 过程回看；跨会话请求由 runtime 拒绝）。
  */
-const A9_IPC_SCHEMA_VERSION = 8; // ADR-0316: conversation-bound explicit queue
+const A9_IPC_SCHEMA_VERSION = 9; // ADR-0319: workspace/conversation-bound requests
 
 function exactObject(value, keys, code, optionalKeys = []) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
@@ -60,19 +63,87 @@ function exactObject(value, keys, code, optionalKeys = []) {
 
 function createA9ProductRequestHandler(options) {
   const config = options || {};
+  let selectionInFlight = false;
   return async function handleA9ProductRequest(event, request) {
     if (!config.isValidRendererSender || !config.isValidRendererSender(event)) {
       return { ok: false, error: { code: 'RENDERER_CAPABILITY_DENIED' } };
     }
     try {
-      exactObject(request, ['schemaVersion', 'action', 'payload'], 'A9_REQUEST_SCHEMA_INVALID');
-      if (![6, 7, A9_IPC_SCHEMA_VERSION].includes(request.schemaVersion)) {
+      exactObject(request, ['schemaVersion', 'action', 'payload'], 'A9_REQUEST_SCHEMA_INVALID', ['scope']);
+      if (![6, 7, 8, A9_IPC_SCHEMA_VERSION].includes(request.schemaVersion)) {
         throw Object.assign(new Error(`A9_SCHEMA_VERSION_UNSUPPORTED:${request.schemaVersion}`), { code: 'A9_SCHEMA_VERSION_UNSUPPORTED' });
       }
       if (!Object.values(A9_ACTIONS).includes(request.action)) {
         throw Object.assign(new Error(`A9_ACTION_UNAVAILABLE:${request.action}`), { code: 'A9_ACTION_UNAVAILABLE' });
       }
-      const runtime = config.getA9Runtime ? await config.getA9Runtime() : null;
+      const registry = config.workspaceRegistry;
+      const workspaceActions = [A9_ACTIONS.WORKSPACE_LIST, A9_ACTIONS.WORKSPACE_ACTIVATE, A9_ACTIONS.WORKSPACE_CLOSE];
+      if (request.scope !== undefined) {
+        exactObject(request.scope, ['workspaceId', 'conversationId'], 'A9_SCOPE_INVALID');
+        if (request.schemaVersion !== 9 || !/^[a-f0-9]{64}$/.test(request.scope.workspaceId)
+          || typeof request.scope.conversationId !== 'string' || !request.scope.conversationId || request.scope.conversationId.length > 256) {
+          throw Object.assign(new Error('A9_SCOPE_INVALID'), { code: 'A9_SCOPE_INVALID' });
+        }
+      }
+      if (workspaceActions.includes(request.action)) {
+        if (!registry || request.schemaVersion !== 9) throw Object.assign(new Error('A9_ACTION_UNAVAILABLE'), { code: 'A9_ACTION_UNAVAILABLE' });
+        const values = request.payload;
+        if (request.action === A9_ACTIONS.WORKSPACE_LIST) {
+          exactObject(values, [], 'A9_PAYLOAD_INVALID');
+          return { ok: true, workspaces: registry.directory(), accounting: registry.accounting() };
+        }
+        if (selectionInFlight) throw Object.assign(new Error('A9_WORKSPACE_SELECTION_BUSY'), { code: 'A9_WORKSPACE_SELECTION_BUSY' });
+        selectionInFlight = true;
+        try {
+          if (request.action === A9_ACTIONS.WORKSPACE_CLOSE) {
+            exactObject(values, ['workspaceId', 'confirmed'], 'A9_PAYLOAD_INVALID');
+            if (values.confirmed !== true || typeof values.workspaceId !== 'string') throw Object.assign(new Error('A9_PAYLOAD_INVALID'), { code: 'A9_PAYLOAD_INVALID' });
+            const result = await registry.close(values.workspaceId);
+            const next = registry.getActive();
+            if (next && config.selectWorkspace) await config.selectWorkspace(next.workspaceRoot);
+            return result;
+          }
+          exactObject(values, [], 'A9_PAYLOAD_INVALID', ['workspaceId', 'conversationId', 'createConversation', 'chooseDirectory']);
+          for (const key of ['createConversation', 'chooseDirectory']) if (values[key] !== undefined && typeof values[key] !== 'boolean') throw Object.assign(new Error('A9_PAYLOAD_INVALID'), { code: 'A9_PAYLOAD_INVALID' });
+          if ((values.workspaceId !== undefined && (typeof values.workspaceId !== 'string' || !/^[a-f0-9]{64}$/.test(values.workspaceId)))
+            || (values.conversationId !== undefined && (typeof values.conversationId !== 'string' || !values.conversationId || values.conversationId.length > 256))
+            || (values.chooseDirectory && values.workspaceId) || (values.createConversation && values.conversationId)) throw Object.assign(new Error('A9_PAYLOAD_INVALID'), { code: 'A9_PAYLOAD_INVALID' });
+          let workspace;
+          if (values.chooseDirectory) {
+            workspace = config.chooseWorkspace && await config.chooseWorkspace();
+            if (!workspace) return { ok: false, cancelled: true };
+          } else {
+            const known = registry.directory().find(item => item.workspaceId === values.workspaceId);
+            if (!known) throw Object.assign(new Error('A9_WORKSPACE_UNKNOWN'), { code: 'A9_WORKSPACE_UNKNOWN' });
+            workspace = known.workspaceRoot;
+          }
+          const knownBefore = new Set(registry.directory().map(item => item.workspaceId));
+          const entry = registry.open(workspace);
+          const snapshot = entry.runtime.getSnapshot({ conversationPage: true });
+          if (values.conversationId && values.conversationId !== snapshot.activeConversationId) {
+            const response = await entry.runtime.activateConversation(values.conversationId);
+            if (!response || !response.ok) return response;
+          } else if (values.createConversation) {
+            // A newly opened, empty workspace already has its initial conversation.
+            if (knownBefore.has(entry.workspaceId)) {
+              const response = await entry.runtime.createConversation();
+              if (!response || !response.ok) return response;
+            }
+          }
+          if (config.selectWorkspace) await config.selectWorkspace(entry.workspaceRoot);
+          registry.activate(entry.workspaceRoot);
+          const current = entry.runtime.getSnapshot({ conversationPage: true });
+          return { ok: true, scope: { workspaceId: entry.workspaceId, conversationId: current.activeConversationId } };
+        } finally { selectionInFlight = false; }
+      }
+      if (registry && request.schemaVersion < 9 && request.action !== A9_ACTIONS.SNAPSHOT_GET) {
+        throw Object.assign(new Error('A9_SCOPE_REQUIRED'), { code: 'A9_SCOPE_REQUIRED' });
+      }
+      if (registry && request.schemaVersion === 9 && request.action !== A9_ACTIONS.SNAPSHOT_GET && !request.scope) {
+        throw Object.assign(new Error('A9_SCOPE_REQUIRED'), { code: 'A9_SCOPE_REQUIRED' });
+      }
+      const runtime = registry && request.scope ? registry.resolve(request.scope)
+        : config.getA9Runtime ? await config.getA9Runtime() : null;
       if (runtime && runtime.__a9WorkspaceRequired === true) {
         return {
           ok: false,
@@ -92,7 +163,14 @@ function createA9ProductRequestHandler(options) {
           if (payload.conversationPage !== undefined && (request.schemaVersion < 7 || typeof payload.conversationPage !== 'boolean')) {
             throw Object.assign(new Error('A9_PAYLOAD_INVALID: conversationPage requires v7 boolean'), { code: 'A9_PAYLOAD_INVALID' });
           }
-          return { ok: true, snapshot: runtime.getSnapshot(payload) };
+          {
+            const snapshot = runtime.getSnapshot(payload);
+            const active = registry && registry.getActive();
+            return { ok: true, snapshot: { ...snapshot, ...(active ? {
+              scope: { workspaceId: active.workspaceId, conversationId: snapshot.activeConversationId },
+              workspaces: registry.directory(), accounting: registry.accounting(),
+            } : {}) } };
+          }
         case A9_ACTIONS.CONVERSATION_QUERY:
           exactObject(payload, ['conversationId'], 'A9_PAYLOAD_INVALID', ['before', 'limit']);
           if (request.schemaVersion < 7 || typeof payload.conversationId !== 'string' || !payload.conversationId ||
@@ -116,7 +194,7 @@ function createA9ProductRequestHandler(options) {
           for (const key of Object.keys(payload)) {
             if (!allowed.includes(key)) throw Object.assign(new Error(`A9_PAYLOAD_INVALID: unknown '${key}'`), { code: 'A9_PAYLOAD_INVALID' });
           }
-          return await runtime.configureProvider(payload);
+          return registry ? await registry.configureProvider(runtime, payload) : await runtime.configureProvider(payload);
         }
         case A9_ACTIONS.PROVIDER_PROBE:
           return { ok: true, probe: await runtime.probeProvider() };

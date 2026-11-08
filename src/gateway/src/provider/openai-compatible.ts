@@ -440,6 +440,7 @@ export class OpenAICompatibleProvider {
       let promptTokens = 0;
       let completionTokens = 0;
       let totalTokens = 0;
+      let usageReported = false;
       let chunkIndex = 0;
       let settled = false;
       /** G-2/G-3：截断粘性；一旦截断不再接收内容，finishReason 固定 LENGTH。 */
@@ -487,6 +488,7 @@ export class OpenAICompatibleProvider {
           finishReason: FinishReason.LENGTH,
           truncated: true,
           truncation,
+          usageReported,
           usage: { promptTokens, completionTokens, totalTokens: totalTokens || (promptTokens + completionTokens) },
         });
       };
@@ -600,6 +602,7 @@ export class OpenAICompatibleProvider {
           }
         }
         if (event.usage) {
+          usageReported = true;
           promptTokens = event.usage.promptTokens ?? promptTokens;
           completionTokens = event.usage.completionTokens ?? completionTokens;
           totalTokens = event.usage.totalTokens ?? totalTokens;
@@ -742,6 +745,7 @@ export class OpenAICompatibleProvider {
               requestId: request.id,
               content: accumulatedContent || '',
               finishReason,
+              usageReported,
               usage: {
                 promptTokens,
                 completionTokens,
@@ -762,6 +766,7 @@ export class OpenAICompatibleProvider {
             content: accumulatedContent,
             finishReason,
             toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
+            usageReported,
             usage: {
               promptTokens,
               completionTokens,

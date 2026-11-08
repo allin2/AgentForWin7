@@ -28,11 +28,12 @@ function a8Request(action, sessionId, payload) {
   });
 }
 
-function a9Request(action, payload) {
+function a9Request(action, payload, scope) {
   return ipcRenderer.invoke('product:a9-request', {
-    schemaVersion: action === 'a9.queue.update' ? 8 : 7, // ADR-0316；旧动作保持 v7
+    schemaVersion: scope || ['a9.workspace.list', 'a9.workspace.activate', 'a9.workspace.close'].includes(action) || action === 'a9.snapshot.get' ? 9 : action === 'a9.queue.update' ? 8 : 7,
     action,
     payload: payload || {},
+    ...(scope ? { scope } : {}),
   });
 }
 
@@ -47,51 +48,60 @@ const legacyA8ReviewApi = legacyA8ReviewEnabled ? Object.freeze({
   submitReviewTask: (sessionId, prompt) => a8Request('review.task.submit', sessionId, { prompt }),
 }) : Object.freeze({});
 
-const productApi = Object.freeze({
-  getDiagnostics: () => ipcRenderer.invoke('product:get-diagnostics'),
-  a9: Object.freeze({
+function createA9Api(scope) {
+  const boundRequest = (action, payload) => a9Request(action, payload, scope);
+  return Object.freeze({
     snapshot: () => a9Request('a9.snapshot.get', { conversationPage: true }),
-    queryConversation: (values) => a9Request('a9.conversation.query', values || {}),
-    setMode: (mode) => a9Request('a9.mode.set', { mode }),
-    configureProvider: (values) => a9Request('a9.provider.configure', values),
-    probeProvider: () => a9Request('a9.provider.probe', {}),
-    previewImage: (conversationId, reference) => a9Request('a9.image.preview', { conversationId, reference }),
-    configureShell: (values) => a9Request('a9.shell.configure', values),
-    submitTurn: (prompt) => a9Request('a9.turn.submit', { prompt }),
-    continueTask: (conversationId, taskId, interruptedTurnId, recoveryRevision) => a9Request('a9.task.continue', {
+    listWorkspaces: () => a9Request('a9.workspace.list', {}),
+    activateWorkspace: values => a9Request('a9.workspace.activate', values),
+    closeWorkspace: workspaceId => a9Request('a9.workspace.close', { workspaceId, confirmed: true }),
+    forScope: scope => createA9Api(scope),
+    queryConversation: (values) => boundRequest('a9.conversation.query', values || {}),
+    setMode: (mode) => boundRequest('a9.mode.set', { mode }),
+    configureProvider: (values) => boundRequest('a9.provider.configure', values),
+    probeProvider: () => boundRequest('a9.provider.probe', {}),
+    previewImage: (conversationId, reference) => boundRequest('a9.image.preview', { conversationId, reference }),
+    configureShell: (values) => boundRequest('a9.shell.configure', values),
+    submitTurn: (prompt) => boundRequest('a9.turn.submit', { prompt }),
+    continueTask: (conversationId, taskId, interruptedTurnId, recoveryRevision) => boundRequest('a9.task.continue', {
       conversationId, taskId, interruptedTurnId, recoveryRevision,
     }),
-    resumeApproval: (approvalId, decision, bindingDigest, conversationId, taskId, turnId) => a9Request('a9.turn.resumeApproval', {
+    resumeApproval: (approvalId, decision, bindingDigest, conversationId, taskId, turnId) => boundRequest('a9.turn.resumeApproval', {
       approvalId, decision, bindingDigest, conversationId, taskId, turnId,
     }),
-    replyQuestion: (conversationId, questionId, revision, decision, answer) => a9Request('a9.question.reply', {
+    replyQuestion: (conversationId, questionId, revision, decision, answer) => boundRequest('a9.question.reply', {
       conversationId, questionId, revision, decision,
       ...(decision === 'answered' ? { answer } : {}),
     }),
-    stop: () => a9Request('a9.turn.stop', {}),
-    dismissRecovered: (conversationId, handleId, recoveryRevision) => a9Request('a9.managed.dismissRecovered', {
+    stop: () => boundRequest('a9.turn.stop', {}),
+    dismissRecovered: (conversationId, handleId, recoveryRevision) => boundRequest('a9.managed.dismissRecovered', {
       conversationId, handleId, recoveryRevision,
     }),
-    createConversation: () => a9Request('a9.conversation.create', {}),
-    activateConversation: (conversationId) => a9Request('a9.conversation.activate', { conversationId }),
-    renameConversation: (conversationId, title) => a9Request('a9.conversation.rename', { conversationId, title }),
-    archiveConversation: (conversationId) => a9Request('a9.conversation.archive', { conversationId }),
-    restoreConversation: (conversationId) => a9Request('a9.conversation.restore', { conversationId }),
-    saveDraft: (text) => a9Request('a9.draft.save', { text }),
-    updateQueue: (values) => a9Request('a9.queue.update', values),
-    listCheckpoints: (options) => a9Request('a9.checkpoint.list', options || {}),
-    undoTurn: (turnId, confirmationId) => a9Request('a9.checkpoint.undoTurn', { turnId, ...(confirmationId ? { confirmationId } : {}) }),
-    undoFile: (turnId, path, confirmationId) => a9Request('a9.checkpoint.undoFile', { turnId, path, ...(confirmationId ? { confirmationId } : {}) }),
-    getDiff: (turnId) => a9Request('a9.diff.get', { turnId }),
-    gitStatus: () => a9Request('a9.git.status', {}),
-    readWorkspaceFile: (path, startLine, maxLines, encoding) => a9Request('a9.workspace.read', {
+    createConversation: () => boundRequest('a9.conversation.create', {}),
+    activateConversation: (conversationId) => boundRequest('a9.conversation.activate', { conversationId }),
+    renameConversation: (conversationId, title) => boundRequest('a9.conversation.rename', { conversationId, title }),
+    archiveConversation: (conversationId) => boundRequest('a9.conversation.archive', { conversationId }),
+    restoreConversation: (conversationId) => boundRequest('a9.conversation.restore', { conversationId }),
+    saveDraft: (text) => boundRequest('a9.draft.save', { text }),
+    updateQueue: (values) => boundRequest('a9.queue.update', values),
+    listCheckpoints: (options) => boundRequest('a9.checkpoint.list', options || {}),
+    undoTurn: (turnId, confirmationId) => boundRequest('a9.checkpoint.undoTurn', { turnId, ...(confirmationId ? { confirmationId } : {}) }),
+    undoFile: (turnId, path, confirmationId) => boundRequest('a9.checkpoint.undoFile', { turnId, path, ...(confirmationId ? { confirmationId } : {}) }),
+    getDiff: (turnId) => boundRequest('a9.diff.get', { turnId }),
+    gitStatus: () => boundRequest('a9.git.status', {}),
+    readWorkspaceFile: (path, startLine, maxLines, encoding) => boundRequest('a9.workspace.read', {
       path,
       startLine,
       maxLines,
       ...(encoding ? { encoding } : {}),
     }),
-    queryEvents: (values) => a9Request('a9.events.query', values || {}),
-  }),
+    queryEvents: (values) => boundRequest('a9.events.query', values || {}),
+  });
+}
+
+const productApi = Object.freeze({
+  getDiagnostics: () => ipcRenderer.invoke('product:get-diagnostics'),
+  a9: createA9Api(),
   getSettings: () => request('settings.get', 'desktop', {}),
   setSettings: (values) => request('settings.set', 'desktop', { values }),
   clearSavedApiKey: () => request('settings.credential_clear', 'desktop', { credential: 'api-key' }),
