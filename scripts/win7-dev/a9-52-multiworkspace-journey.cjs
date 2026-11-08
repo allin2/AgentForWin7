@@ -47,7 +47,7 @@ async function parent() {
   const release = prompt => {
     const res = held.get(prompt); if (!res || res.destroyed) throw new Error('NO_HELD_REQUEST ' + prompt); held.delete(prompt);
     const tool = prompt.endsWith('-BG') ? { name: 'start_process', arguments: JSON.stringify({ command: 'ping.exe -n 90 127.0.0.1' }) }
-      : prompt.endsWith('-SHELL') ? { name: 'shell', arguments: JSON.stringify({ command: windows ? `cd & echo ${prompt}>shell-result.txt` : `printf '%s' '${prompt}' > shell-result.txt; pwd` }) }
+      : prompt.endsWith('-SHELL') ? { name: 'shell', arguments: JSON.stringify({ command: windows ? `Set-Content -Path shell-result.txt -Value '${prompt}'; (Get-Location).Path` : `printf '%s' '${prompt}' > shell-result.txt; pwd` }) }
       : { name: 'write', arguments: JSON.stringify({ path: 'result.txt', content: prompt }) };
     send(res, { tool_calls: [{ index: 0, id: 'call-' + prompt, function: tool }] }, 'tool_calls');
   };
