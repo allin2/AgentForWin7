@@ -15,6 +15,10 @@
 
 ## 当前交付、进行中的工作与授权
 
+- [A9-53](tasks/A9_53_ALPHA7_MULTIWORKSPACE_RELEASE.md)：`A9_53_PREPARATION`。负责人要求推进 Win7 验收与发版，并按 ADR-0320 选择甲：同包 Win7 DEV_CHANNEL 加负责人限定接受，不做门 A/B。alpha.7 / WIN7-60 身份与 Win7 多工作区驱动在准备中；Win7 目标窗口、接受、推送与发布均未批准，NOT_PERFORMED。
+
+- [A9-52](tasks/A9_52_MULTIWORKSPACE_CONVERSATIONS.md#5-收件箱式导航修订2026-11-08-utc开发机)：`A9_52_DEVELOPER_VERIFIED`。多工作区并行、目标绑定 IPC 与收件箱式导航已本地提交为 `7db11cd…`（代码与测试 20 个文件）。Mac 开发机 Shell 67/67 套件、1479 PASS / 12 跳过；真实 Electron 22 产品首轮 9 组、重启 1 组通过，覆盖收件箱切换、筛选菜单关闭后台工作区和命令面板重开。结果在 `outputs/a9-52-multiworkspace/INBOX_RESULT.json`。Win7/Win10、打包运行、Windows DPAPI 与 D-013 并发均 NOT_PERFORMED；未推送。
+
 - [A9-51](tasks/A9_51_ALPHA6_QUEUE_RELEASE.md)：COMPLETE，`A9_51_WIN7_59_PASS_WITH_KNOWN_LIMITS`。负责人按 ADR-0318 限定接受 alpha.6 / WIN7-59。源码 `484baff4…` / ZIP `241af4ca…` / manifest `6abb2618…`，原证据为 Win7 DEV_CHANNEL run `94df7e6d…`。旧基线加全部后继差异独审 P0/P1 为 0，旧两项 P2 已关闭。UTC `2026-11-08T01:44:23Z` 公开内部试用预发布，[下载与说明](https://github.com/allin2/AgentForWin7/releases/tag/v0.3.0-alpha.6-win7-59)。4 个附件公开后全部回下载，大小/SHA 与本地原件及 GitHub digest 一致；冻结 14 文件保持不变。正式 Gate A/B 未补签；未知恢复 PID 负向用例与最终包 Windows 可靠性组的覆盖限制见任务书 §10。完整接受与发布证据在 `outputs/alpha6-r1/publish/`。
 
 - [A9-50](tasks/A9_50_QUEUED_INPUT.md#4-开发交付结果2026-11-07-utc)：`A9_50_DEVELOPER_VERIFIED`。Mac / Linux 开发机绑定 main `ef6a6922…` 加本轮未提交补丁。Composer 状态与显式 FIFO 队列完成，停止、失败和恢复后暂停；草稿不自动消费。cw Shell 集合 1465 PASS / 12 NOT_PERFORMED，最后 Stop/存储修正由 Mac 与 cw 各 142 项直接复验，其余未变组记 INHERITED_EVIDENCE。真实 Electron 22 main/preload/IPC/runtime/SQLite 两进程 6 组 PASS；三视口、草稿隔离、停止和重启不重放通过。cw 源码哈希与回收日志核验，任务进程与临时目录无残留，租约释放；原实例与登录保留，ci/monster 未操作。原 dirty 和 HEAD 保留。真实 Win7 DPAPI、Windows、正式门 A/B、提交、推送和发布均 NOT_PERFORMED。准确回执见本机 `outputs/a9-50-queue-r1/RESULT.json`。

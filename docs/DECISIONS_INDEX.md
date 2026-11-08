@@ -320,3 +320,5 @@
 | ADR-0316 | A9-50 显式排队与 Composer 状态 | Accepted |
 | ADR-0317 | A9-51 alpha.6 发布身份与标准 Gate | Accepted |
 | ADR-0318 | A9-51 alpha.6 准确候选限定接受与同字节发布 | Accepted |
+| ADR-0319 | A9-52 多工作区 Runtime 与目标绑定对话入口 | Accepted |
+| ADR-0320 | A9-53 alpha.7 发布身份与限定接受路径 | Accepted |
