@@ -1,7 +1,7 @@
 # A9-51 — alpha.6 排队输入与可靠性发布准备
 
 ```text
-Status: APPROVED_FOR_IMPLEMENTATION
+Status: COMPLETE
 Task Type: PRODUCT_RELEASE
 Target Branch: main
 Source Baseline: ef6a692294fa4e0403b2d1e00ea188b2e79749f8
@@ -112,3 +112,11 @@ Win10 同包、原生 125% DPI、外部模型、完整 Review/batch2 和跨机�
 结论为 `A9_51_WIN7_59_PASS_WITH_KNOWN_LIMITS`。接受记录在 `outputs/alpha6-r1/publish/OWNER_ACCEPTANCE.json`，绑定源码、ZIP/manifest、冻结身份与 run。原实机报告保持 DEV_CHANNEL，正式门 A/B 未执行。未知恢复 PID 负向用例只有开发机直接证据，最终包 Windows 可靠性组未重跑；旧 `0aded040…` 报告不改绑。§4 其他已知限制和数据回退要求保持。
 
 负责人授权推送源码、准确标签与同一冻结产物的内部试用预发布。公开与回下载核验结果完成后补录，不预签未来操作。
+
+## 11. 同字节公开与回下载核验（2026-11-08 UTC）
+
+标签 `v0.3.0-alpha.6-win7-59` 准确指向产品源码 `484baff4…`。接受与发布文档提交为 `83556b96…`；后继只补本节和下载指引，不重建产品。预发布于 UTC `2026-11-08T01:44:23Z` 公开，release ID `437966857`，[下载与说明](https://github.com/allin2/AgentForWin7/releases/tag/v0.3.0-alpha.6-win7-59)。
+
+ZIP、`WIN7-59-RELEASE-EVIDENCE.json`、`ACCEPTANCE.md` 与 `SHA256SUMS` 共 4 个附件在草稿和公开后各回下载一次。大小、SHA-256 与 GitHub asset digest 三方一致，公开前后 asset ID 不变；核验见 `outputs/alpha6-r1/publish/PUBLICATION_VERIFICATION.json`。冻结 14 文件原字节保持。负责人接受在候选外，不覆盖原冻结待验收快照。
+
+本轮只提交本版准确文档段落并推送 main 与标签。其他会话修改保留。没有新建 Win7 运行、重建包、模型请求或删除。原证据等级和 §10 的已知限制保持；GitHub CI 在发布时尚未完成，不能记为 PASS。

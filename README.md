@@ -3,13 +3,13 @@
 [![CI](https://github.com/allin2/AgentForWin7/actions/workflows/ci.yml/badge.svg)](https://github.com/allin2/AgentForWin7/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Windows%207%20SP1%20x64-brightgreen.svg)](docs/WIN7_CONSTRAINTS.md)
-[![Release](https://img.shields.io/badge/Release-v0.3.0--alpha.5-orange.svg)](https://github.com/allin2/AgentForWin7/releases/tag/v0.3.0-alpha.5-win7-58)
+[![Release](https://img.shields.io/badge/Release-v0.3.0--alpha.6-orange.svg)](https://github.com/allin2/AgentForWin7/releases/tag/v0.3.0-alpha.6-win7-59)
 
 面向 **Windows 7 SP1 x64** 的桌面编码助手，产品名 Win7 Coding Agent。
 
 模型推理在远程或企业内网的 OpenAI 兼容服务上完成，例如 DeepSeek。Win7 端负责对话界面、工作区读写、命令执行、检查点回滚和本地审计。
 
-> 当前为内部预览版。完整 Alpha、RC 与稳定版验收尚未签发，已知限制见 [Release 说明](https://github.com/allin2/AgentForWin7/releases/tag/v0.3.0-alpha.5-win7-58)。
+> 当前为内部预览版。完整 Alpha、RC 与稳定版验收尚未签发，已知限制见 [Release 说明](https://github.com/allin2/AgentForWin7/releases/tag/v0.3.0-alpha.6-win7-59)。
 
 ## 界面
 
@@ -26,6 +26,8 @@
 - **命令与 Git**：Agent 可执行 Shell 命令和 Git 操作。D-013 helper 用 Win32 Job Object 管理进程树，防止残留进程。Git 使用用户环境中已安装的 Git。
 - **审批与审计**：外部写入和高影响操作需要目标绑定确认。会话、计划与操作记录写入本地 SQLite WAL 账本。
 - **轻量工具**：编辑反馈、环境信息、Skills、向用户提问、图片读取，以及 Office Lite：有界读取 DOCX/XLSX、生成新稿和内容级修改副本，不承诺版式保真、宏或公式重算。
+
+- **消息队列**：运行中显式加入 FIFO 队列；停止、失败或重启后暂停，继续需手动确认，未入队草稿保持独立。
 
 ## 权限与安全
 
@@ -51,11 +53,13 @@
 
 ### 启动
 
-1. 从 [最新预发布版](https://github.com/allin2/AgentForWin7/releases/tag/v0.3.0-alpha.5-win7-58) 下载 `Win7CodingAgent-0.3.0-alpha.5-win7-x64.zip`。
-2. 核对 SHA-256：`d1ba4d37d003d91449eb55b2121ca5cce9d6cb84528f221ffbf501ba4f86e391`。
+1. 从 [最新预发布版](https://github.com/allin2/AgentForWin7/releases/tag/v0.3.0-alpha.6-win7-59) 下载 `Win7CodingAgent-0.3.0-alpha.6-win7-x64.zip`。
+2. 核对 SHA-256：`241af4ca9e251362062d95957e0cf67011476be4adb1909fc097862c76370a36`。
 3. 解压到本地路径，例如 `D:\Tools\Win7CodingAgent`。
 4. 运行解压目录中的 `electron.exe`。
 5. 首次启动时，在设置中填写模型端点。
+
+升级前请备份完整用户数据。回退到 alpha.5 时恢复升级前备份，或使用独立新数据根；不要只换旧 EXE 后打开已升级的数据库。
 
 ## 架构
 

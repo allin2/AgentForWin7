@@ -4,10 +4,10 @@
 
 ## 产品与可试用结果
 
-- 最新已发布试用版：`v0.3.0-alpha.5-win7-58`，内部预览版；[下载与说明](https://github.com/allin2/AgentForWin7/releases/tag/v0.3.0-alpha.5-win7-58)。UTC `2026-11-06T09:48:19Z` 公开，4 个附件回下载与验收原件 SHA 一致。包含 A9-46 工作台改进和 A9-47 运行中草稿，负责人明确“验证通过，可以发版”；Win7 原证据仍为 DEV_CHANNEL，见 [A9-48 §8](tasks/A9_48_ALPHA5_WORKBENCH_RELEASE.md#8-负责人验收通过与公开发布)。
-- 上一试用版：`v0.3.0-alpha.4-win7-57`，UTC `2026-11-04T05:10:13Z` 公开。
-- 当前已签发并发布候选：`v0.3.0-alpha.5` / WIN7-58，源 `498a8f5d…`，ZIP `d1ba4d37…`，结论 `A9_48_WIN7_58_PASS_WITH_KNOWN_LIMITS`。负责人合并验收已接受，未补签门 A/B，详见 [A9-48 §8](tasks/A9_48_ALPHA5_WORKBENCH_RELEASE.md#8-负责人验收通过与公开发布)。
-- 上一签发候选：`v0.3.0-alpha.4` / WIN7-57，源 `a2b4aa8…`，ZIP `46a6f792…`，结论 `A9_44_WIN7_57_PASS_WITH_KNOWN_LIMITS`；原冻结包、DEV_CHANNEL 和已知限制保留。
+- 最新已发布试用版：`v0.3.0-alpha.6-win7-59`，内部预览版；[下载与说明](https://github.com/allin2/AgentForWin7/releases/tag/v0.3.0-alpha.6-win7-59)。UTC `2026-11-08T01:44:23Z` 公开，4 个附件回下载与验收原件大小/SHA 一致。包含显式 FIFO 队列、DPAPI 恢复防护和可靠性修复。负责人按 ADR-0318 限定接受，原证据仍为 DEV_CHANNEL，见 [A9-51 §10](tasks/A9_51_ALPHA6_QUEUE_RELEASE.md#10-负责人限定接受2026-11-08-utc)。
+- 上一试用版：`v0.3.0-alpha.5-win7-58`，UTC `2026-11-06T09:48:19Z` 公开。
+- 当前已签发并发布候选：`v0.3.0-alpha.6` / WIN7-59，源 `484baff4…`，ZIP `241af4ca…`，结论 `A9_51_WIN7_59_PASS_WITH_KNOWN_LIMITS`。负责人限定接受已完成，未补签门 A/B，详见 [A9-51 §10](tasks/A9_51_ALPHA6_QUEUE_RELEASE.md#10-负责人限定接受2026-11-08-utc)。
+- 上一签发候选：`v0.3.0-alpha.5` / WIN7-58，源 `498a8f5d…`，ZIP `d1ba4d37…`，结论 `A9_48_WIN7_58_PASS_WITH_KNOWN_LIMITS`；原冻结包、DEV_CHANNEL 和已知限制保留。
 - 上一 Win7 实机已签限定范围结论：`A9_39_WIN7_55_BATCH2_PASS_WITH_KNOWN_LIMITS`（ADR-0286）。source `b4ce2be42cc9448142b831612dc7d5bc3a4df3cd`；ZIP SHA-256 `7de63dd8db0fde0f7c76aafa48f44ce6c9841c651c03b93215e175ad3792824a`。
 - 总控 FORMAL `f9ae2982`；补充组 DEV `cdb82d32`；证据等级与签发范围详见 [ADR-0286/0287](DECISIONS.md#adr-0286-win7-55-门-b限定已直接证明范围签发)。本页不将补充组改成 FORMAL。
 - Full Access / Read Only 为当前产品能力；Review 保持 fail-closed。完整 Alpha / RC 未签发；当前已知限制见 [A9-43 §8.35](tasks/A9_43_ALPHA3_WIN7_56_RELEASE.md#835-负责人准确确认与-win7-56-验收签发)。历史限制见 A9-39 与 ADR-0286，不把版本名等同完整验收。
@@ -15,7 +15,7 @@
 
 ## 当前交付、进行中的工作与授权
 
-- [A9-51](tasks/A9_51_ALPHA6_QUEUE_RELEASE.md)：负责人已按 ADR-0318 限定接受 alpha.6 / WIN7-59，结论 `A9_51_WIN7_59_PASS_WITH_KNOWN_LIMITS`。源码 `484baff4…` / ZIP `241af4ca…` / manifest `6abb2618…`，同包三份干净构建一致。Win7 run `94df7e6d…` 队列、DPAPI、恢复无重放及收尾通过；10 份回收文件和 426 个加载模块哈希核验通过。旧基线加全部后继差异独审 P0/P1 为 0，旧两项 P2 关闭。14 文件只读冻结记录 `77397a75…` 保持。原证据为 DEV_CHANNEL，负责人准确接受替代本版门 A/B，正式门未执行。未知恢复 PID 负向用例和最终包 Windows 可靠性组的覆盖限制见任务书 §10。正在公开同一冻结产物；事实与输入在 `outputs/alpha6-r1/`。
+- [A9-51](tasks/A9_51_ALPHA6_QUEUE_RELEASE.md)：COMPLETE，`A9_51_WIN7_59_PASS_WITH_KNOWN_LIMITS`。负责人按 ADR-0318 限定接受 alpha.6 / WIN7-59。源码 `484baff4…` / ZIP `241af4ca…` / manifest `6abb2618…`，原证据为 Win7 DEV_CHANNEL run `94df7e6d…`。旧基线加全部后继差异独审 P0/P1 为 0，旧两项 P2 已关闭。UTC `2026-11-08T01:44:23Z` 公开内部试用预发布，[下载与说明](https://github.com/allin2/AgentForWin7/releases/tag/v0.3.0-alpha.6-win7-59)。4 个附件公开后全部回下载，大小/SHA 与本地原件及 GitHub digest 一致；冻结 14 文件保持不变。正式 Gate A/B 未补签；未知恢复 PID 负向用例与最终包 Windows 可靠性组的覆盖限制见任务书 §10。完整接受与发布证据在 `outputs/alpha6-r1/publish/`。
 
 - [A9-50](tasks/A9_50_QUEUED_INPUT.md#4-开发交付结果2026-11-07-utc)：`A9_50_DEVELOPER_VERIFIED`。Mac / Linux 开发机绑定 main `ef6a6922…` 加本轮未提交补丁。Composer 状态与显式 FIFO 队列完成，停止、失败和恢复后暂停；草稿不自动消费。cw Shell 集合 1465 PASS / 12 NOT_PERFORMED，最后 Stop/存储修正由 Mac 与 cw 各 142 项直接复验，其余未变组记 INHERITED_EVIDENCE。真实 Electron 22 main/preload/IPC/runtime/SQLite 两进程 6 组 PASS；三视口、草稿隔离、停止和重启不重放通过。cw 源码哈希与回收日志核验，任务进程与临时目录无残留，租约释放；原实例与登录保留，ci/monster 未操作。原 dirty 和 HEAD 保留。真实 Win7 DPAPI、Windows、正式门 A/B、提交、推送和发布均 NOT_PERFORMED。准确回执见本机 `outputs/a9-50-queue-r1/RESULT.json`。
 

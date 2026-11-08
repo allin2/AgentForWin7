@@ -7939,3 +7939,9 @@ jest 缓存改用固定目录 `<os.tmpdir()>/win7-agent-jest-cache`，不随夹�
 codex 5 项测试缺口中 3 项已补断言（失败提示路径、单文件运行的缓存参数、非法参数不建目录），2 项按 ADR-0288 不补。
 开发机 macOS、Node 20.17.0：`npm run test:local` 7 模块 PASS，78.99 秒，临时目录顶层条目前后均为 199；
 新增断言经三次错误注入均变红。产品代码未改；Win7 运行 NOT_PERFORMED。
+
+## 2026-11-08 — alpha.6 / WIN7-59 限定接受与公开
+
+负责人按 ADR-0318 接受准确源码 484baff4… / ZIP 241af4ca… 的既有 Win7 DEV_CHANNEL 证据及已知限制，替代本版 Gate A/B。
+旧基线加全部后继差异独审 P0/P1 零项，旧 P2 两项关闭。14 文件只读冻结保持；恢复未知 PID 负向用例及最终包 Windows 可靠性组的覆盖限制保留。
+标签 `v0.3.0-alpha.6-win7-59` 指向准确源码。UTC `2026-11-08T01:44:23Z` 公开 release `437966857`；4 个附件草稿及公开后回下载大小/SHA/GitHub digest 一致。无重建、新目标运行、模型请求或删除。完整证据在 `outputs/alpha6-r1/publish/`。
