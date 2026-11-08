@@ -4,10 +4,10 @@
 
 ## 产品与可试用结果
 
-- 最新已发布试用版：`v0.3.0-alpha.6-win7-59`，内部预览版；[下载与说明](https://github.com/allin2/AgentForWin7/releases/tag/v0.3.0-alpha.6-win7-59)。UTC `2026-11-08T01:44:23Z` 公开，4 个附件回下载与验收原件大小/SHA 一致。包含显式 FIFO 队列、DPAPI 恢复防护和可靠性修复。负责人按 ADR-0318 限定接受，原证据仍为 DEV_CHANNEL，见 [A9-51 §10](tasks/A9_51_ALPHA6_QUEUE_RELEASE.md#10-负责人限定接受2026-11-08-utc)。
-- 上一试用版：`v0.3.0-alpha.5-win7-58`，UTC `2026-11-06T09:48:19Z` 公开。
-- 当前已签发并发布候选：`v0.3.0-alpha.6` / WIN7-59，源 `484baff4…`，ZIP `241af4ca…`，结论 `A9_51_WIN7_59_PASS_WITH_KNOWN_LIMITS`。负责人限定接受已完成，未补签门 A/B，详见 [A9-51 §10](tasks/A9_51_ALPHA6_QUEUE_RELEASE.md#10-负责人限定接受2026-11-08-utc)。
-- 上一签发候选：`v0.3.0-alpha.5` / WIN7-58，源 `498a8f5d…`，ZIP `d1ba4d37…`，结论 `A9_48_WIN7_58_PASS_WITH_KNOWN_LIMITS`；原冻结包、DEV_CHANNEL 和已知限制保留。
+- 最新已发布试用版：`v0.3.0-alpha.7-win7-60`，内部预览版；[下载与说明](https://github.com/allin2/AgentForWin7/releases/tag/v0.3.0-alpha.7-win7-60)。UTC `2026-11-08T11:45:00Z` 公开，4 个附件回下载与验收原件大小/SHA 一致。包含多工作区并行对话与收件箱式导航。负责人按 ADR-0320 限定接受，原证据为 DEV_CHANNEL，见 [A9-53 §6](tasks/A9_53_ALPHA7_MULTIWORKSPACE_RELEASE.md#6-负责人限定接受2026-11-08-utc)。
+- 上一试用版：`v0.3.0-alpha.6-win7-59`，UTC `2026-11-08T01:44:23Z` 公开。
+- 当前已签发并发布候选：`v0.3.0-alpha.7` / WIN7-60，源 `22b575cc…`，ZIP `5b8ae87f…`，结论 `A9_53_WIN7_60_PASS_WITH_KNOWN_LIMITS`。负责人限定接受已完成，未执行门 A/B，详见 [A9-53 §6](tasks/A9_53_ALPHA7_MULTIWORKSPACE_RELEASE.md#6-负责人限定接受2026-11-08-utc)。
+- 上一签发候选：`v0.3.0-alpha.6` / WIN7-59，源 `484baff4…`，ZIP `241af4ca…`，结论 `A9_51_WIN7_59_PASS_WITH_KNOWN_LIMITS`；原 DEV_CHANNEL 和已知限制保留。
 - 上一 Win7 实机已签限定范围结论：`A9_39_WIN7_55_BATCH2_PASS_WITH_KNOWN_LIMITS`（ADR-0286）。source `b4ce2be42cc9448142b831612dc7d5bc3a4df3cd`；ZIP SHA-256 `7de63dd8db0fde0f7c76aafa48f44ce6c9841c651c03b93215e175ad3792824a`。
 - 总控 FORMAL `f9ae2982`；补充组 DEV `cdb82d32`；证据等级与签发范围详见 [ADR-0286/0287](DECISIONS.md#adr-0286-win7-55-门-b限定已直接证明范围签发)。本页不将补充组改成 FORMAL。
 - Full Access / Read Only 为当前产品能力；Review 保持 fail-closed。完整 Alpha / RC 未签发；当前已知限制见 [A9-43 §8.35](tasks/A9_43_ALPHA3_WIN7_56_RELEASE.md#835-负责人准确确认与-win7-56-验收签发)。历史限制见 A9-39 与 ADR-0286，不把版本名等同完整验收。
@@ -15,7 +15,7 @@
 
 ## 当前交付、进行中的工作与授权
 
-- [A9-53](tasks/A9_53_ALPHA7_MULTIWORKSPACE_RELEASE.md#6-负责人限定接受2026-11-08-utc)：`A9_53_WIN7_60_PASS_WITH_KNOWN_LIMITS`。负责人按 ADR-0320 甲限定接受 alpha.7 / WIN7-60：源码 `22b575cc…`、ZIP `5b8ae87f…`、manifest `e39b88f0…`。同 ZIP Win7 DEV_CHANNEL 证据：多工作区 run `7949d383…` PASS（第 4 次，候选外驱动 `0a1f81c4…`），alpha.6 队列与 A9-49 可靠性回归 run `a25a26db…` PASS。前三次失败与根因保留（小写持久化路径已修复产品；Shell 失败为驱动向 PowerShell 发出 cmd 语法）。第 4 次前 Codex 独审三轮，末轮 P0/P1 为 0。Win7 开发根现 21.27 GB，高于默认 20 GB；alpha.6 进程未变，未删除内容，A9-53 容量例外已移除。已知限制 5 项见任务书 §6。门 A/B 未执行；推送、标签与发布 NOT_PERFORMED。
+- [A9-53](tasks/A9_53_ALPHA7_MULTIWORKSPACE_RELEASE.md#7-同字节公开与回下载核验2026-11-08-utc)：COMPLETE，`A9_53_WIN7_60_PASS_WITH_KNOWN_LIMITS`。负责人按 ADR-0320 甲限定接受并授权发布 alpha.7 / WIN7-60：源码 `22b575cc…`、ZIP `5b8ae87f…`、manifest `e39b88f0…`。同 ZIP Win7 DEV_CHANNEL 证据：多工作区 run `7949d383…` PASS（候选外驱动 `0a1f81c4…`），alpha.6 队列与 A9-49 可靠性回归 run `a25a26db…` PASS；前三次失败与根因保留。UTC `2026-11-08T11:45:00Z` 公开内部试用预发布，[下载与说明](https://github.com/allin2/AgentForWin7/releases/tag/v0.3.0-alpha.7-win7-60)；4 个附件草稿与公开后各回下载一次，大小/SHA 与本地原件及 GitHub digest 一致。公开 CI run `42476340351` success。Win7 开发根 21.27 GB，高于默认 20 GB。已知限制 5 项见任务书 §6；门 A/B 未执行。准确接受与发布证据在本机 `outputs/alpha7-r1/publish/`。
 
 - [A9-52](tasks/A9_52_MULTIWORKSPACE_CONVERSATIONS.md#5-收件箱式导航修订2026-11-08-utc开发机)：`A9_52_DEVELOPER_VERIFIED`。多工作区并行、目标绑定 IPC 与收件箱式导航已本地提交为 `7db11cd…`（代码与测试 20 个文件）。Mac 开发机 Shell 67/67 套件、1479 PASS / 12 跳过；真实 Electron 22 产品首轮 9 组、重启 1 组通过，覆盖收件箱切换、筛选菜单关闭后台工作区和命令面板重开。结果在 `outputs/a9-52-multiworkspace/INBOX_RESULT.json`。Win7/Win10、打包运行、Windows DPAPI 与 D-013 并发均 NOT_PERFORMED；未推送。
 

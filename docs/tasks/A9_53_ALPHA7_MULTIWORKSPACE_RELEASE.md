@@ -1,7 +1,7 @@
 # A9-53 — alpha.7 多工作区并行对话发布
 
 ```text
-Status: APPROVED_FOR_IMPLEMENTATION
+Status: COMPLETE
 Task Type: PRODUCT_RELEASE
 Target Branch: main
 Source Baseline: 7db11cd (A9-52 代码与测试本地提交)
@@ -81,4 +81,14 @@ Win10 同包、原生 125% DPI、外部模型、完整 Review/batch2 和跨机�
 4. Win7 开发根 21.27 GB，高于默认 20 GB；后续上传需另行批准清理或扩容。
 5. 通道工具容量检查不能发现 `common.ps1` 其他位置的改动；属工具问题，不属产品。
 
-§4 沿用的未执行边界保持。推送、标签与公开发布未授权，NOT_PERFORMED。
+§4 沿用的未执行边界保持。负责人随后选择 A，授权推送 main、准确标签与同一 ZIP 的内部试用预发布。
+
+## 7. 同字节公开与回下载核验（2026-11-08 UTC）
+
+`origin/main` 快进到接受文档提交 `d548b710…`；公开 CI run `42476340351` success。
+标签 `v0.3.0-alpha.7-win7-60` 准确指向产品源码 `22b575cc…`；未重建产品。
+预发布于 UTC `2026-11-08T11:45:00Z` 公开，release ID `438204463`，[下载与说明](https://github.com/allin2/AgentForWin7/releases/tag/v0.3.0-alpha.7-win7-60)。
+附件 4 个：`Win7CodingAgent-0.3.0-alpha.7-win7-x64.zip` 111,192,055 字节, `WIN7-60-RELEASE-EVIDENCE.json` 2,754 字节, `ACCEPTANCE.md` 911 字节, `SHA256SUMS` 285 字节。
+草稿与公开后各回下载一次；大小、SHA-256 与 GitHub asset digest 三方一致，asset ID 不变。
+草稿首次下载 ZIP 因网络中断不完整，重下后通过；该次未写核验记录。
+核验见本机 `outputs/alpha7-r1/publish/DRAFT_ASSET_VERIFICATION.json` 与 `PUBLICATION_VERIFICATION.json`。
