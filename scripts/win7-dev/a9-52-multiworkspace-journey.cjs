@@ -47,7 +47,7 @@ async function parent() {
   const release = prompt => {
     const res = held.get(prompt); if (!res || res.destroyed) throw new Error('NO_HELD_REQUEST ' + prompt); held.delete(prompt);
     const tool = prompt.endsWith('-BG') ? { name: 'start_process', arguments: JSON.stringify({ command: 'ping.exe -n 90 127.0.0.1' }) }
-      : prompt.endsWith('-SHELL') ? { name: 'shell', arguments: JSON.stringify({ command: windows ? `echo ${prompt}>shell-result.txt` : `printf '%s' '${prompt}' > shell-result.txt; pwd` }) }
+      : prompt.endsWith('-SHELL') ? { name: 'shell', arguments: JSON.stringify({ command: windows ? `cd & echo ${prompt}>shell-result.txt` : `printf '%s' '${prompt}' > shell-result.txt; pwd` }) }
       : { name: 'write', arguments: JSON.stringify({ path: 'result.txt', content: prompt }) };
     send(res, { tool_calls: [{ index: 0, id: 'call-' + prompt, function: tool }] }, 'tool_calls');
   };
@@ -68,7 +68,10 @@ async function parent() {
         const fact = { prompt, startedAt: Date.now(), endedAt: null }; report.requests.push(fact);
         res.once('close', () => { fact.endedAt = Date.now(); if (held.get(prompt) === res) held.delete(prompt); });
         const lastUser = data.messages.map(item => item.role).lastIndexOf('user');
-        if (data.messages.slice(lastUser + 1).some(item => item.role === 'tool')) send(res, { content: prompt + ' completed' });
+        const toolMessages = data.messages.slice(lastUser + 1).filter(item => item.role === 'tool');
+        // What the runner returned to the model: exit code, output and errors for diagnosis.
+        if (toolMessages.length) fact.toolResult = toolMessages.map(item => String(item.content)).join('\n').slice(0, 4000);
+        if (toolMessages.length) send(res, { content: prompt + ' completed' });
         else held.set(prompt, res);
       } catch (error) { report.providerError = error.message; res.writeHead(500); res.end('fixture failed'); }
     });
@@ -95,8 +98,15 @@ async function parent() {
     assert.strictEqual(fs.readFileSync(path.join(b, 'result.txt'), 'utf8'), 'B-WRITE');
     assert.strictEqual(fs.readFileSync(path.join(a, 'result.txt'), 'utf8'), 'A-WRITE');
     if (windows || !packagedProduct(config.productRoot)) {
-    assert.strictEqual(fs.readFileSync(path.join(a, 'shell-result.txt'), 'utf8').trim(), 'A-SHELL');
-    assert.strictEqual(fs.readFileSync(path.join(b, 'shell-result.txt'), 'utf8').trim(), 'B-SHELL');
+    const stray = []; const walk = (dir, depth) => { if (depth > 4) return; for (const item of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, item.name); if (item.isDirectory()) walk(full, depth + 1); else if (item.name === 'shell-result.txt') stray.push(full); } };
+    try { walk(temporary, 0); } catch (error) { stray.push('WALK_FAILED ' + error.message); }
+    report.shellFacts = { stray, workspaces: [['A', a], ['B', b]].map(([key, dir]) => {
+      const file = path.join(dir, 'shell-result.txt'); const exists = fs.existsSync(file);
+      return { workspace: key, exists, content: exists ? fs.readFileSync(file, 'utf8').trim() : null,
+        toolResults: report.requests.filter(item => item.prompt === `${key}-SHELL` && item.toolResult).map(item => item.toolResult) };
+    }) };
+    for (const item of report.shellFacts.workspaces) assert.strictEqual(item.content, `${item.workspace}-SHELL`, JSON.stringify(report.shellFacts));
     } else report.shellFiles = 'NOT_PERFORMED: Mac packaged product has only the Windows runner helper';
     }
     const Database = require(config.hostDatabase);
@@ -311,7 +321,8 @@ async function child() {
         const facts = (await snapshot()).conversation;
         assert(facts.some(fact => fact.requestPrompt === 'A-SHELL' && ['completed', 'completed_with_warnings'].includes(fact.outcome)));
         await selectWorkspace(b.scope.workspaceId);
-        if (windows) return { shell: 'automatic system shell', evidence: 'Win7 D-013 helper' };
+        if (windows) { const s = await snapshot(); return { shell: 'automatic system shell', evidence: 'Win7 D-013 helper', snapshotShell: JSON.stringify(s.shell || null).slice(0, 2000),
+          outcomes: (s.conversation || []).filter(fact => /-SHELL$/.test(fact.requestPrompt || '')).map(fact => [fact.requestPrompt, fact.outcome, String(fact.finalMessage || '').slice(0, 300)]) }; }
         return packagedProduct(config.productRoot)
           ? { shell: 'NOT_PERFORMED', evidence: 'Mac packaged product: Windows runner helper cannot run; dispatch and turn completion only' }
           : { shell: '/bin/bash', evidence: 'Mac development POSIX runner only; Windows helper NOT_PERFORMED' };
