@@ -169,6 +169,8 @@ function createA9WorkspaceRegistry(options) {
         // Bounded summaries for the cross-workspace inbox; full facts stay behind scoped requests.
         conversations: snapshot ? (snapshot.conversations || []).filter(item => item.state === 'active').slice(0, 32)
           .map(item => ({ sessionId: item.sessionId, title: item.title, activity: item.activity, updatedAt: item.updatedAt,
+            settledAt: item.settledAt, lastVisitedAt: item.lastVisitedAt,
+            lastCompletedAt: item.lastCompletedAt, lastActivityAt: item.lastActivityAt,
             hasDraft: item.hasDraft === true })) : [],
       };
     });

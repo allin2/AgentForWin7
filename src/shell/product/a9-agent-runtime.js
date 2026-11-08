@@ -1324,6 +1324,25 @@ function createA9AgentRuntime(options) {
     return loadConversation(persistence.restoreConversation(String(sessionId), canonicalWorkspace));
   }
 
+  function updateConversationInbox(sessionId, action) {
+    const record = persistence.listConversations(canonicalWorkspace).find(item => item.sessionId === sessionId);
+    if (!record) throw Object.assign(new Error('对话不属于当前工作区。'), { code: 'A9_CONVERSATION_WORKSPACE_MISMATCH' });
+    if (record.state === 'archived') throw Object.assign(new Error('已归档对话不能修改收件箱状态。'), { code: 'A9_CONVERSATION_ARCHIVED' });
+    if (action === 'settle' && (['running', 'waiting_approval', 'waiting_input'].includes(record.activity)
+      || (sessionId === a9SessionId && (activeController || currentPendingApproval || currentPendingQuestion)))) {
+      throw Object.assign(new Error('运行中、待审批或待回答的对话不能结束。'), { code: 'A9_CONVERSATION_BUSY' });
+    }
+    const now = new Date().toISOString();
+    const patch = action === 'settle' ? { settledAt: now }
+      : action === 'reopen' ? { settledAt: null, activeSince: now } : { lastVisitedAt: now };
+    persistence.mergeConversationInbox(sessionId, canonicalWorkspace, patch);
+    return { ok: true, conversationId: sessionId };
+  }
+
+  function markInboxActive() {
+    persistence.mergeConversationInbox(a9SessionId, canonicalWorkspace, { settledAt: null, activeSince: new Date().toISOString() });
+  }
+
   function ensureRuntime() {
     if (config.assertExecutionAllowed) config.assertExecutionAllowed();
     if (!retryWorkspaceLock()) {
@@ -1503,6 +1522,7 @@ function createA9AgentRuntime(options) {
           auditedEvents.delete(event);
         },
         onApprovalPending: (approval) => {
+          markInboxActive();
           // 等待用户前持久化 pending 审批（含真实工具与目标绑定）。
           currentPendingApproval = approval;
           const safeApproval = redactApproval(approval);
@@ -1524,6 +1544,7 @@ function createA9AgentRuntime(options) {
           });
         },
         onQuestionPending: (question) => {
+          markInboxActive();
           const safeQuestion = redactForProjection(question);
           currentPendingQuestion = safeQuestion;
           persistence.recordQuestionPending(canonicalWorkspace, safeQuestion);
@@ -2206,6 +2227,7 @@ function createA9AgentRuntime(options) {
         return presentAuditFailure(auditFailureBlock);
       }
       if (continuation.duplicate) return { ok: true, continuation };
+      markInboxActive();
       lifecycle = { taskId: input.taskId, turnId: continuation.turnId, runId: `run-${continuation.turnId}`,
         requestPrompt: fact.originalGoal, continuation: { interruptedTurnId: input.interruptedTurnId, recoveryRevision: input.recoveryRevision } };
       activeLifecycle = lifecycle;
@@ -2282,6 +2304,7 @@ function createA9AgentRuntime(options) {
       const requestPrompt = String(prompt || '').slice(0, 8000);
       const persistedRequestPrompt = redactSecrets(requestPrompt);
       persistence.upsertTask(createdTaskId, a9SessionId, 'active');
+      markInboxActive();
       persistence.recordModelEvent(a9SessionId, null, 'conversation.request', {
         schemaVersion: 1,
         taskId: createdTaskId,
@@ -2544,6 +2567,7 @@ function createA9AgentRuntime(options) {
           conversationId: a9SessionId, taskId: original.taskId,
           interruptedTurnId: original.turnId, recoveryRevision: fact.recoveryRevision,
         }, continuationTurnId, requestPrompt);
+        markInboxActive();
         lifecycle = {
           taskId: original.taskId, turnId: continuation.turnId,
           runId: `run-${continuation.turnId}`, requestPrompt: fact.originalGoal,
@@ -2732,7 +2756,7 @@ function createA9AgentRuntime(options) {
       ...(agentStatus === 'needs_input' ? { questionState: { awaitingReply: true } } : {}),
       activeConversationId: a9SessionId,
       conversations: persistence.listConversations(canonicalWorkspace)
-        .map(item => ({ ...item, hasDraft: composer.hasContent(item.sessionId) })),
+        .map(item => ({ ...item, ...persistence.getConversationInboxSummary(item.sessionId), hasDraft: composer.hasContent(item.sessionId) })),
       conversationControls: {
         canSwitch: !blockReason,
         reason: blockReason,
@@ -3085,6 +3109,9 @@ function createA9AgentRuntime(options) {
     renameConversation,
     archiveConversation,
     restoreConversation,
+    settleConversation: sessionId => updateConversationInbox(sessionId, 'settle'),
+    reopenConversation: sessionId => updateConversationInbox(sessionId, 'reopen'),
+    visitConversation: sessionId => updateConversationInbox(sessionId, 'visit'),
     canLeaveWorkspace,
     setMode,
     getSnapshot,
@@ -3211,6 +3238,9 @@ function createSqliteUnavailableRuntime(reason) {
     renameConversation() { throw new Error('ELECTRON_SQLITE_UNAVAILABLE'); },
     archiveConversation() { throw new Error('ELECTRON_SQLITE_UNAVAILABLE'); },
     restoreConversation() { throw new Error('ELECTRON_SQLITE_UNAVAILABLE'); },
+    settleConversation() { return { ok: false, error: { code: 'ELECTRON_SQLITE_UNAVAILABLE' } }; },
+    reopenConversation() { return { ok: false, error: { code: 'ELECTRON_SQLITE_UNAVAILABLE' } }; },
+    visitConversation() { return { ok: false, error: { code: 'ELECTRON_SQLITE_UNAVAILABLE' } }; },
     canLeaveWorkspace() { return { allowed: true, reason: null }; },
     setMode() { throw new Error('ELECTRON_SQLITE_UNAVAILABLE'); },
     getSnapshot() { return { schemaVersion: 1, status: 'electron_sqlite_unavailable', diagnostics: { code: 'ELECTRON_SQLITE_UNAVAILABLE', detail: safeReason } }; },
@@ -3257,6 +3287,9 @@ function createDiagnosticsRuntime(outcome) {
     renameConversation() { throw new Error('A9_DIAGNOSTICS_MODE'); },
     archiveConversation() { throw new Error('A9_DIAGNOSTICS_MODE'); },
     restoreConversation() { throw new Error('A9_DIAGNOSTICS_MODE'); },
+    settleConversation() { return { ok: false, error: { code: 'A9_DIAGNOSTICS_MODE' } }; },
+    reopenConversation() { return { ok: false, error: { code: 'A9_DIAGNOSTICS_MODE' } }; },
+    visitConversation() { return { ok: false, error: { code: 'A9_DIAGNOSTICS_MODE' } }; },
     canLeaveWorkspace() { return { allowed: true, reason: null }; },
     setMode() { throw new Error('A9_DIAGNOSTICS_MODE'); },
     getSnapshot() { return { schemaVersion: A9_PROTOCOL_VERSION, status: diagnosticStatus, diagnostics: safeDiagnostics }; },

@@ -29,6 +29,9 @@ const A9_ACTIONS = Object.freeze({
   CONVERSATION_RENAME: 'a9.conversation.rename',
   CONVERSATION_ARCHIVE: 'a9.conversation.archive',
   CONVERSATION_RESTORE: 'a9.conversation.restore',
+  CONVERSATION_SETTLE: 'a9.conversation.settle',
+  CONVERSATION_REOPEN: 'a9.conversation.reopen',
+  CONVERSATION_VISIT: 'a9.conversation.visit',
   DRAFT_SAVE: 'a9.draft.save',
   QUEUE_UPDATE: 'a9.queue.update',
   CHECKPOINT_LIST: 'a9.checkpoint.list',
@@ -90,6 +93,10 @@ function createA9ProductRequestHandler(options) {
         throw Object.assign(new Error(`A9_ACTION_UNAVAILABLE:${request.action}`), { code: 'A9_ACTION_UNAVAILABLE' });
       }
       const registry = config.workspaceRegistry;
+      if ([A9_ACTIONS.CONVERSATION_SETTLE, A9_ACTIONS.CONVERSATION_REOPEN, A9_ACTIONS.CONVERSATION_VISIT].includes(request.action)
+        && (request.schemaVersion !== 9 || !request.scope)) {
+        throw Object.assign(new Error('A9_SCOPE_REQUIRED'), { code: 'A9_SCOPE_REQUIRED' });
+      }
       const workspaceActions = [A9_ACTIONS.WORKSPACE_LIST, A9_ACTIONS.WORKSPACE_ACTIVATE, A9_ACTIONS.WORKSPACE_CLOSE];
       const restrictedRuntime = restrictedScopeRuntime(registry, request);
       if (request.scope !== undefined && !restrictedRuntime) {
@@ -287,6 +294,17 @@ function createA9ProductRequestHandler(options) {
         case A9_ACTIONS.CONVERSATION_RESTORE:
           exactObject(payload, ['conversationId'], 'A9_PAYLOAD_INVALID');
           return await runtime.restoreConversation(payload.conversationId);
+        case A9_ACTIONS.CONVERSATION_SETTLE:
+        case A9_ACTIONS.CONVERSATION_REOPEN:
+        case A9_ACTIONS.CONVERSATION_VISIT: {
+          exactObject(request.payload, ['conversationId'], 'A9_PAYLOAD_INVALID');
+          if (typeof payload.conversationId !== 'string' || !payload.conversationId.trim() || payload.conversationId.length > 256) {
+            throw Object.assign(new Error('A9_PAYLOAD_INVALID'), { code: 'A9_PAYLOAD_INVALID' });
+          }
+          const method = { [A9_ACTIONS.CONVERSATION_SETTLE]: 'settleConversation',
+            [A9_ACTIONS.CONVERSATION_REOPEN]: 'reopenConversation', [A9_ACTIONS.CONVERSATION_VISIT]: 'visitConversation' }[request.action];
+          return await runtime[method](payload.conversationId);
+        }
         case A9_ACTIONS.QUEUE_UPDATE: {
           exactObject(payload, ['conversationId', 'operation'], 'A9_PAYLOAD_INVALID', ['text', 'itemId']);
           const validId = value => typeof value === 'string' && value.length > 0 && value.length <= 256;

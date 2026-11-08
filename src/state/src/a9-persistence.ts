@@ -25,6 +25,13 @@ export type A9ConversationStateValue = 'active' | 'archived';
 export type A9ConversationActivityValue = 'idle' | 'running' | 'waiting_approval' | 'waiting_input' | 'interrupted';
 export type A9ConversationTitleSource = 'auto' | 'manual' | 'legacy';
 
+export interface A9ConversationInbox {
+  version: 1;
+  settledAt: string | null;
+  activeSince: string | null;
+  lastVisitedAt: string | null;
+}
+
 function a9PersistenceError(code: string, message: string): Error & { code: string } {
   const error = new Error(`${code}: ${message}`) as Error & { code: string };
   error.code = code;
@@ -666,7 +673,7 @@ export class A9PersistenceManager {
     const existing = this.db.prepare('SELECT session_id FROM a9_sessions WHERE session_id = ?').get(sessionId);
     if (existing) {
       this.db.prepare('UPDATE a9_sessions SET workspace_path = ?, updated_at = ?, metadata_json = ? WHERE session_id = ?')
-        .run(workspacePath, now, JSON.stringify(metadata), sessionId);
+        .run(workspacePath, now, JSON.stringify({ ...this.getConversationMetadata(sessionId), ...metadata }), sessionId);
     } else {
       this.db.prepare(`
         INSERT INTO a9_sessions
@@ -878,6 +885,50 @@ export class A9PersistenceManager {
     const metadata = { ...this.getConversationMetadata(sessionId), ...patch };
     this.db.prepare('UPDATE a9_sessions SET metadata_json = ?, updated_at = ? WHERE session_id = ?')
       .run(JSON.stringify(metadata), new Date().toISOString(), sessionId);
+  }
+
+  getConversationInbox(sessionId: string): A9ConversationInbox {
+    return parseConversationInbox(this.getConversationMetadata(sessionId).inbox);
+  }
+
+  /** Inbox timestamps never change the conversation's sorting timestamp. */
+  mergeConversationInbox(sessionId: string, workspacePath: string,
+    patch: Partial<Omit<A9ConversationInbox, 'version'>>): A9ConversationInbox {
+    const conversation = this.requireConversation(sessionId);
+    if (!sameWorkspacePath(conversation.workspacePath, workspacePath)) {
+      throw a9PersistenceError('A9_CONVERSATION_WORKSPACE_MISMATCH', '对话不属于当前工作区。');
+    }
+    if (conversation.state === 'archived') {
+      throw a9PersistenceError('A9_CONVERSATION_ARCHIVED', '已归档对话不能修改收件箱状态。');
+    }
+    const metadata = this.getConversationMetadata(sessionId);
+    const previous = metadata.inbox;
+    const inbox = { ...(previous && typeof previous === 'object' && !Array.isArray(previous) ? previous : {}),
+      ...parseConversationInbox(previous), ...patch, version: 1 };
+    this.db.prepare('UPDATE a9_sessions SET metadata_json = ? WHERE session_id = ?')
+      .run(JSON.stringify({ ...metadata, inbox }), sessionId);
+    return parseConversationInbox(inbox);
+  }
+
+  getConversationInboxSummary(sessionId: string): {
+    settledAt: string | null; lastVisitedAt: string | null; lastCompletedAt: string | null; lastActivityAt: string;
+  } {
+    const inbox = this.getConversationInbox(sessionId);
+    const row = this.db.prepare(`
+      SELECT s.created_at,
+        (SELECT MAX(updated_at) FROM a9_runs WHERE session_id = s.session_id AND status = 'completed') AS completed_at,
+        (SELECT MAX(created_at) FROM a9_runs WHERE session_id = s.session_id) AS started_at,
+        (SELECT MAX(updated_at) FROM a9_runs WHERE session_id = s.session_id AND status <> 'active') AS ended_at,
+        (SELECT MAX(created_at) FROM a9_approvals WHERE session_id = s.session_id AND decision = 'pending') AS approval_at,
+        (SELECT MAX(created_at) FROM a9_events WHERE session_id = s.session_id
+          AND event_type IN ('approval_required', 'question_pending')) AS pending_at
+      FROM a9_sessions s WHERE s.session_id = ?
+    `).get(sessionId) as any;
+    const activity = [row.started_at, row.ended_at, row.approval_at, row.pending_at,
+      inbox.activeSince, inbox.lastVisitedAt].filter((value): value is string => typeof value === 'string' && Number.isFinite(Date.parse(value)));
+    activity.sort((left, right) => Date.parse(right) - Date.parse(left));
+    return { settledAt: inbox.settledAt, lastVisitedAt: inbox.lastVisitedAt,
+      lastCompletedAt: row.completed_at || null, lastActivityAt: activity[0] || row.created_at };
   }
 
   private requireConversation(sessionId: string): A9ConversationRecord {
@@ -2301,6 +2352,21 @@ function normalizeConversationTitle(value: string, maxLength: number): string {
     .trim()
     .slice(0, maxLength)
     .trim();
+}
+
+function parseConversationInbox(value: unknown): A9ConversationInbox {
+  const empty: A9ConversationInbox = { version: 1, settledAt: null, activeSince: null, lastVisitedAt: null };
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return empty;
+  const inbox = value as Record<string, unknown>;
+  if (inbox.version !== 1) return empty;
+  for (const key of ['settledAt', 'activeSince', 'lastVisitedAt']) {
+    const time = inbox[key];
+    if (time !== undefined && time !== null && (typeof time !== 'string'
+      || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(time)
+      || !Number.isFinite(Date.parse(time)))) return empty;
+  }
+  return { version: 1, settledAt: inbox.settledAt as string ?? null,
+    activeSince: inbox.activeSince as string ?? null, lastVisitedAt: inbox.lastVisitedAt as string ?? null };
 }
 
 function safeParse(text: string): Record<string, unknown> {
