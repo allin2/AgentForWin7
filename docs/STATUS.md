@@ -15,7 +15,7 @@
 
 ## 当前交付、进行中的工作与授权
 
-- [A9-53](tasks/A9_53_ALPHA7_MULTIWORKSPACE_RELEASE.md)：`A9_53_PREPARATION`。负责人要求推进 Win7 验收与发版，并按 ADR-0320 选择甲：同包 Win7 DEV_CHANNEL 加负责人限定接受，不做门 A/B。alpha.7 / WIN7-60 身份与 Win7 多工作区驱动在准备中；Win7 目标窗口、接受、推送与发布均未批准，NOT_PERFORMED。
+- [A9-53](tasks/A9_53_ALPHA7_MULTIWORKSPACE_RELEASE.md#6-负责人限定接受2026-11-08-utc)：`A9_53_WIN7_60_PASS_WITH_KNOWN_LIMITS`。负责人按 ADR-0320 甲限定接受 alpha.7 / WIN7-60：源码 `22b575cc…`、ZIP `5b8ae87f…`、manifest `e39b88f0…`。同 ZIP Win7 DEV_CHANNEL 证据：多工作区 run `7949d383…` PASS（第 4 次，候选外驱动 `0a1f81c4…`），alpha.6 队列与 A9-49 可靠性回归 run `a25a26db…` PASS。前三次失败与根因保留（小写持久化路径已修复产品；Shell 失败为驱动向 PowerShell 发出 cmd 语法）。第 4 次前 Codex 独审三轮，末轮 P0/P1 为 0。Win7 开发根现 21.27 GB，高于默认 20 GB；alpha.6 进程未变，未删除内容，A9-53 容量例外已移除。已知限制 5 项见任务书 §6。门 A/B 未执行；推送、标签与发布 NOT_PERFORMED。
 
 - [A9-52](tasks/A9_52_MULTIWORKSPACE_CONVERSATIONS.md#5-收件箱式导航修订2026-11-08-utc开发机)：`A9_52_DEVELOPER_VERIFIED`。多工作区并行、目标绑定 IPC 与收件箱式导航已本地提交为 `7db11cd…`（代码与测试 20 个文件）。Mac 开发机 Shell 67/67 套件、1479 PASS / 12 跳过；真实 Electron 22 产品首轮 9 组、重启 1 组通过，覆盖收件箱切换、筛选菜单关闭后台工作区和命令面板重开。结果在 `outputs/a9-52-multiworkspace/INBOX_RESULT.json`。Win7/Win10、打包运行、Windows DPAPI 与 D-013 并发均 NOT_PERFORMED；未推送。
 

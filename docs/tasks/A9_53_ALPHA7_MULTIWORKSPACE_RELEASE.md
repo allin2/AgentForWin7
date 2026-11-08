@@ -7,8 +7,8 @@ Target Branch: main
 Source Baseline: 7db11cd (A9-52 代码与测试本地提交)
 Target Version: 0.3.0-alpha.7
 Candidate: WIN7-60
-Phase-Gate: A9_53_PREPARATION
-Win7-Validation: NOT_PERFORMED
+Phase-Gate: A9_53_WIN7_60_PASS_WITH_KNOWN_LIMITS
+Win7-Validation: DEV_CHANNEL
 ```
 
 ## 1. 当前范围
@@ -48,3 +48,37 @@ Win10 同包、原生 125% DPI、外部模型、完整 Review/batch2 和跨机�
 版本为内部试用预发布，不宣称完整 Alpha、RC 或稳定版；结论只能为 DEV_CHANNEL 加负责人限定接受。
 本轮保留现有 alpha.6 用户进程、他人锁、所有历史候选和证据；不执行删除或根外终止。
 发布范围不授权接管活动锁、扩容、安装、修改系统或复制目标凭据。
+
+## 5. Win7 DEV_CHANNEL 运行结果（2026-11-08 UTC）
+
+候选 WIN7-60：源码 `22b575cc…`，ZIP `5b8ae87f…`，111,192,055 字节，manifest `e39b88f0…`。
+四次尝试均由执行代理在负责人逐次批准的窗口内执行，持锁者 `a946lanrx`，未接管锁。
+
+| 尝试 | run | 结果 | 根因与处理 |
+|---|---|---|---|
+| 1 | `a3b32318…`（ZIP `78c0222c…`） | 多工作区 FAIL；队列、可靠性 PASS | Windows 小写持久化路径致重开超时；产品修复 `22b575cc…` |
+| 2 | `a25a26db…` | 多工作区收尾断言 FAIL；队列、可靠性 PASS | A 未写出 `shell-result.txt`，当时 UNKNOWN；驱动补记录 `5b6efceb…` |
+| 3 | `69721b1d…` | 多工作区 FAIL（诊断） | 驱动向 PowerShell 5.1 发出 cmd 语法，`&` 被拒；驱动修复 `0a1f81c4…` |
+| 4 | `7949d383…` | 多工作区 PASS | A、B 各写出本工作区文件，退出码 0；11 项检查通过 |
+
+第 4 次前，Codex 独立审核三轮，第 3 轮 P0/P1 为 0，余 1 项工具 P2。
+第 4 次回环请求 15 次，外部模型 0 次；SQLite integrity=ok，无活动任务或锁。
+后检：开发根 21.27 GB，锁 inactive，任务为空，alpha.6 四进程未变；未删除任何内容。
+窗口结束后，A9-53 容量例外已从 `common.ps1` 移除。
+汇总见本机 `outputs/alpha7-r1/TARGET_RUN_1_SUMMARY.json` 至 `TARGET_RUN_4_SUMMARY.json`。
+
+## 6. 负责人限定接受（2026-11-08 UTC）
+
+负责人选择 A，接受 WIN7-60 为 `A9_53_WIN7_60_PASS_WITH_KNOWN_LIMITS`（ADR-0320 甲）。
+接受记录在本机 `outputs/alpha7-r1/publish/OWNER_ACCEPTANCE.json`，绑定源码、ZIP、manifest 与三组 run。
+同 ZIP 证据：多工作区取第 4 次，alpha.6 队列与 A9-49 可靠性回归取第 2 次。
+
+登记的已知限制：
+
+1. 证据类别为 DEV_CHANNEL；未执行门 A/B、双干净构建与冻结。
+2. 多工作区证据使用修正后的候选外驱动 `0a1f81c4…`；产品字节未变。
+3. Mac 开发机打包运行不执行 Windows Shell 写文件检查；该项只有 Win7 实机证据。
+4. Win7 开发根 21.27 GB，高于默认 20 GB；后续上传需另行批准清理或扩容。
+5. 通道工具容量检查不能发现 `common.ps1` 其他位置的改动；属工具问题，不属产品。
+
+§4 沿用的未执行边界保持。推送、标签与公开发布未授权，NOT_PERFORMED。
