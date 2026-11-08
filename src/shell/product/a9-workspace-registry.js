@@ -7,6 +7,16 @@ const crypto = require('crypto');
 function failure(code, message) { return Object.assign(new Error(message), { code }); }
 function pathKey(value) { return process.platform === 'win32' ? value.toLowerCase() : value; }
 function workspaceId(value) { return crypto.createHash('sha256').update(pathKey(value), 'utf8').digest('hex'); }
+// Windows persistence keys workspaces by a lowercased path; reopening from that key
+// must show the on-disk casing again. Only the casing is taken from the native
+// realpath, so subst drives and short names keep their existing identity.
+function displayCasing(resolved, platform = process.platform, nativeRealpath = fs.realpathSync.native) {
+  if (platform !== 'win32' || typeof nativeRealpath !== 'function') return resolved;
+  try {
+    const native = nativeRealpath(resolved);
+    return typeof native === 'string' && native.toLowerCase() === resolved.toLowerCase() ? native : resolved;
+  } catch (_error) { return resolved; }
+}
 function contains(parent, child) {
   const relative = path.relative(pathKey(parent), pathKey(child));
   return !relative || (!path.isAbsolute(relative) && relative !== '..' && !relative.startsWith(`..${path.sep}`));
@@ -90,7 +100,7 @@ function createA9WorkspaceRegistry(options) {
   }
 
   function identity(workspace) {
-    const resolved = fs.realpathSync(workspace);
+    const resolved = displayCasing(fs.realpathSync(workspace));
     if (!fs.statSync(resolved).isDirectory()) throw failure('A9_WORKSPACE_INVALID', '工作区必须是目录。');
     return { workspaceId: workspaceId(resolved), workspaceRoot: resolved, git: gitIdentity(resolved) };
   }
@@ -137,10 +147,15 @@ function createA9WorkspaceRegistry(options) {
     return entry;
   }
 
+  // Persisted (lowercased on Windows) path -> display casing, resolved once per path.
+  const displayRoots = new Map();
   function directory() {
     const paths = new Map();
     if (persistenceOutcome && persistenceOutcome.status === 'ready') {
-      for (const workspace of persistenceOutcome.manager.listWorkspacePaths()) paths.set(workspaceId(workspace), workspace);
+      for (const workspace of persistenceOutcome.manager.listWorkspacePaths()) {
+        if (!displayRoots.has(workspace)) displayRoots.set(workspace, displayCasing(workspace));
+        paths.set(workspaceId(workspace), displayRoots.get(workspace));
+      }
     }
     for (const entry of entries.values()) paths.set(entry.workspaceId, entry.workspaceRoot);
     return Array.from(paths, ([id, workspace]) => {
@@ -227,4 +242,4 @@ function createA9WorkspaceRegistry(options) {
   };
 }
 
-module.exports = { createA9WorkspaceRegistry, workspaceId };
+module.exports = { createA9WorkspaceRegistry, workspaceId, displayCasing };

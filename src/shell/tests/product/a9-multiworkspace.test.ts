@@ -292,3 +292,15 @@ describe('A9-52 scoped IPC with A9-49 restricted runtimes', () => {
     expect([...ready.calls, ...restricted.calls]).toEqual([]);
   });
 });
+
+describe('A9-53 Windows workspace casing on reopen', () => {
+  const { displayCasing } = require('../../product/a9-workspace-registry');
+  it('restores on-disk casing for a lowercased persisted Windows path only', () => {
+    const disk = 'C:\\A9-DEV\\run\\x\\B space';
+    expect(displayCasing(disk.toLowerCase(), 'win32', () => disk)).toBe(disk);
+    // A native path that differs beyond casing (subst drive, short name) keeps the existing identity.
+    expect(displayCasing('s:\\b space', 'win32', () => 'D:\\Real\\B space')).toBe('s:\\b space');
+    expect(displayCasing('c:\\b space', 'win32', () => { throw new Error('EPERM'); })).toBe('c:\\b space');
+    expect(displayCasing('/tmp/b space', 'darwin', () => '/private/tmp/b space')).toBe('/tmp/b space');
+  });
+});

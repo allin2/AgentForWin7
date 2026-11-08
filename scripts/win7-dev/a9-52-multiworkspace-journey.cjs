@@ -136,7 +136,21 @@ async function child() {
   const click = id => evaluate(value => document.getElementById(value).click(), id);
   const input = value => evaluate(text => { const el = document.getElementById('task-prompt'); el.value = text; el.dispatchEvent(new Event('input', { bubbles: true })); }, value);
   const submit = async prompt => { await input(prompt); await until(() => evaluate(() => !document.getElementById('run-task').disabled), 'send enabled'); await click('run-task'); await until(async () => (await control('/facts')).held.includes(prompt), 'request ' + prompt); };
-  const check = async (name, run) => { const detail = await run(); report.checks.push({ name, status: 'PASS', detail }); };
+  const check = async (name, run) => {
+    try { const detail = await run(); report.checks.push({ name, status: 'PASS', detail }); }
+    catch (error) {
+      // Failure facts for the next minimal diagnosis; collection never masks the original error.
+      const facts = { name };
+      try { fs.writeFileSync(path.join(out, 'failure.png'), (await win.webContents.capturePage()).toPNG()); facts.screenshot = 'failure.png'; } catch (e) { facts.screenshot = String(e.message); }
+      try { facts.dom = await evaluate(() => ({ banner: document.getElementById('error-banner').textContent, bannerHidden: document.getElementById('error-banner').hidden,
+        newError: document.getElementById('conversation-new-error')?.textContent || '', dialogOpen: document.getElementById('conversation-new-dialog').open,
+        workspaceLabel: document.getElementById('workspace-label').textContent, directoryNote: document.getElementById('conversation-directory-note')?.textContent || '' })); } catch (e) { facts.dom = String(e.message); }
+      try { facts.snapshot = await evaluate(() => window.win7Agent.a9.snapshot().then(r => ({ ok: r.ok, error: r.error, status: r.snapshot?.status, workspaceRoot: r.snapshot?.workspaceRoot,
+        scope: r.snapshot?.scope, diagnostics: r.snapshot?.diagnostics, managed: (r.snapshot?.managedProcesses || []).map(m => [m.lastProbeStatus, m.ownershipState, m.status]) }))); } catch (e) { facts.snapshot = String(e.message); }
+      try { facts.workspaces = await evaluate(() => window.win7Agent.a9.listWorkspaces()); } catch (e) { facts.workspaces = String(e.message); }
+      report.failure = facts; throw error;
+    }
+  };
   // Resource facts are recorded, not asserted; Win7 limits are decided from these numbers (A9-53 §3).
   const handleCount = pid => { if (!windows) return 'NOT_PERFORMED'; try { const text = cp.execFileSync('wmic', ['process', 'where', `ProcessId=${pid}`, 'get', 'HandleCount', '/value'], { encoding: 'utf8', timeout: 10000, windowsHide: true }); const match = /HandleCount=(\d+)/.exec(text); return match ? Number(match[1]) : 'UNKNOWN'; } catch (_error) { return 'UNKNOWN'; } };
   const sample = label => { const metrics = app.getAppMetrics(); const processes = metrics.map(item => ({ pid: item.pid, type: item.type, workingSetKB: item.memory.workingSetSize, privateKB: item.memory.privateBytes ?? 'UNKNOWN', handles: handleCount(item.pid) }));
