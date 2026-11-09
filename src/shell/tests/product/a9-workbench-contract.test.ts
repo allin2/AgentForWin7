@@ -1758,6 +1758,14 @@ describe('A9 unified desktop workbench contract', () => {
     expect(t.el('task-prompt').value).toBe('首条消息');
   });
 
+  it('A9-55 ordinary workspace without workdir metadata hides directory management', () => {
+    const t = createWorkdirHarness();
+    delete t.state.snapshot.workdir;
+    t.renderWorkdir(t.state.snapshot);
+    expect(t.el('workdir-control').hidden).toBe(true);
+    expect(t.el('workdir-menu').hidden).toBe(true);
+  });
+
   it.each([
     [false, false, 'auto', '未创建', true, true],
     [true, false, 'auto', '任务_1109', false, false],

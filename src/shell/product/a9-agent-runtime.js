@@ -176,6 +176,9 @@ function createA9AgentRuntime(options) {
 
   function getWorkdirInfo(options = {}) {
     const workdir = persistence.getConversationMetadata(a9SessionId).workdir;
+    if (!workdir || workdir.version !== 1 || !['auto', 'linked'].includes(workdir.origin)) {
+      throw Object.assign(new Error('仅默认目录对话支持目录管理。'), { code: 'A9_WORKDIR_NOT_AUTO' });
+    }
     const state = options.verifyIdentity !== false && config.defaultWorkdirRoot && workdir && workdir.version === 1 && workdir.origin === 'auto'
       ? verifyWorkdir(config.defaultWorkdirRoot, workspaceRoot) : { created: fs.existsSync(workspaceRoot) };
     return { path: workspaceRoot, origin: workdir && workdir.origin === 'auto' ? 'auto' : 'linked',
@@ -2778,8 +2781,10 @@ function createA9AgentRuntime(options) {
     let workdir;
     try { workdir = getWorkdirInfo(); }
     catch (error) {
-      if (error.code !== 'A9_WORKDIR_IDENTITY_CHANGED') throw error;
-      workdir = { ...getWorkdirInfo({ verifyIdentity: false }), created: false, identityChanged: true };
+      if (error.code === 'A9_WORKDIR_NOT_AUTO') workdir = undefined;
+      else if (error.code === 'A9_WORKDIR_IDENTITY_CHANGED') {
+        workdir = { ...getWorkdirInfo({ verifyIdentity: false }), created: false, identityChanged: true };
+      } else throw error;
     }
     return {
       schemaVersion: A9_PROTOCOL_VERSION,

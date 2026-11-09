@@ -55,6 +55,24 @@ describe('A9-55 default workdir real State/runtime/IPC', () => {
   }
   function tool(name: string, args: any) { steps.push({ id: 'tool', content: '', finishReason: 'tool_calls', toolCalls: [{ id: 'call', name, arguments: JSON.stringify(args) }] }, done); }
 
+  it('keeps ordinary workspace snapshots and directory management outside the default conversation feature', async () => {
+    const ordinary = path.join(root, '普通项目'); fs.mkdirSync(ordinary);
+    registry.activate(ordinary); const original = scope();
+    expect(runtime().getSnapshot().workdir).toBeUndefined();
+    const listed = await call('workspace.list', {}, null);
+    expect(listed.workspaces.find((item: any) => item.workspaceId === original.workspaceId).workdir).toBeUndefined();
+    expect(() => runtime().getWorkdirInfo()).toThrow(expect.objectContaining({ code: 'A9_WORKDIR_NOT_AUTO' }));
+    chosen = path.join(root, '不能迁入'); fs.mkdirSync(chosen);
+    for (const [action, payload] of [['workdir.get', {}], ['workdir.open', {}],
+      ['workdir.rename', { name: '不应改名' }], ['workdir.link', {}]] as const) {
+      expect((await call(action, payload, original)).error.code).toBe('A9_WORKDIR_NOT_AUTO');
+      expect(scope()).toEqual(original);
+    }
+    expect(opened).toEqual([]);
+    expect(store.getConversationMetadata(original.conversationId).workdir).toBeUndefined();
+    expect(fs.readdirSync(chosen)).toEqual([]);
+  });
+
   it('normalizes illegal characters, devices, empty titles and twelve Unicode characters', () => {
     for (const value of ['', '  ', 'CON', 'prn', 'AUX', 'nul', 'com1', 'LPT9']) expect(defaultWorkdirName(value, date, normalizeConversationTitle)).toBe('新任务_1109');
     expect(defaultWorkdirName('<a>:"/\\|?*... ', date, normalizeConversationTitle)).toBe('a_1109');
@@ -186,7 +204,7 @@ describe('A9-55 default workdir real State/runtime/IPC', () => {
     expect(listed.ok).toBe(true); expect(listed.workspaces).toHaveLength(2);
     expect(listed.workspaces.find((w: any) => w.workspaceId === result.scope.workspaceId).workdir)
       .toMatchObject({ path: result.workdir.path, origin: 'auto', created: false, identityChanged: true });
-    expect(listed.workspaces.find((w: any) => w.workspaceId === seedScope.workspaceId).workdir.identityChanged).toBeUndefined();
+    expect(listed.workspaces.find((w: any) => w.workspaceId === seedScope.workspaceId).workdir).toBeUndefined();
     expect((await call('snapshot.get', {}, null)).snapshot.workdir.identityChanged).toBe(true);
     for (const [action, payload] of [
       ['workspace.read', { path: 'keep.txt', startLine: 1, maxLines: 10 }],
