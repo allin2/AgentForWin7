@@ -1,12 +1,21 @@
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import * as vm from 'vm';
 import { EventEmitter } from 'events';
 
-function loadMainHarness(options: { failHost?: boolean; deferPaint?: boolean; restore?: Promise<void>; platform?: NodeJS.Platform; appAlreadyReady?: boolean } = {}) {
+const temporaryWorkspaces: string[] = [];
+afterEach(() => {
+  for (const workspace of temporaryWorkspaces.splice(0)) fs.rmSync(workspace, { recursive: true, force: true });
+});
+
+function loadMainHarness(options: { failHost?: boolean; deferPaint?: boolean; restore?: Promise<void>; platform?: NodeJS.Platform; appAlreadyReady?: boolean; ordinaryWorkspace?: boolean } = {}) {
   const productMain = path.join(__dirname, '..', '..', 'product', 'main.js');
   const source = fs.readFileSync(productMain, 'utf8');
   const calls: string[] = [];
+  const workspacePath = options.restore || options.ordinaryWorkspace ? fs.mkdtempSync(path.join(os.tmpdir(), 'w7ca-startup-')) : '/workspace';
+  if (options.restore || options.ordinaryWorkspace) temporaryWorkspaces.push(workspacePath);
+  let a9Config: any;
   const ipc: Record<string, any> = {};
   const app = new EventEmitter() as any;
   app.disableHardwareAcceleration = () => calls.push('app.disableHardwareAcceleration');
@@ -14,7 +23,10 @@ function loadMainHarness(options: { failHost?: boolean; deferPaint?: boolean; re
   app.isReady = () => Boolean(options.appAlreadyReady);
   app.requestSingleInstanceLock = () => true;
   app.whenReady = () => { calls.push('app.whenReady'); return Promise.resolve(); };
-  app.getPath = () => '/tmp/a9-startup-test';
+  app.getPath = (name: string) => {
+    if (name === 'documents') throw new Error('DEFAULT_ROOT_MUST_STAY_LAZY');
+    return '/tmp/a9-startup-test';
+  };
   app.quit = () => { calls.push('app.quit'); app.emit('will-quit'); };
   app.exit = () => calls.push('app.exit');
   const window = new (class extends EventEmitter {
@@ -25,16 +37,22 @@ function loadMainHarness(options: { failHost?: boolean; deferPaint?: boolean; re
     destroy() { this.destroyed = true; this.emit('closed'); } close() { this.emit('close', { preventDefault() {} }); }
   })();
   const electron = { app, BrowserWindow: class { constructor() { return window as any; } }, dialog: { showOpenDialog: async () => ({ canceled: true, filePaths: [] }), showErrorBox() {}, showMessageBox: async () => ({ response: 0 }) }, ipcMain: { handle: (name: string, handler: any) => { ipc[name] = handler; }, on: () => {} }, safeStorage: {}, session: { defaultSession: {} } };
-  const host = { selectWorkspace: async () => { calls.push('restore.start'); if (options.restore) await options.restore; calls.push('restore.end'); return { workspacePath: '/workspace', displayName: 'test' }; }, listSessions: () => [], createSession: () => ({ sessionId: 's1' }), getDiagnostics: () => ({}), getSettings: () => ({}), dispose: () => calls.push('host.dispose'), getActiveWorkspacePath: () => null };
+  const host = { selectWorkspace: async () => { calls.push('restore.start'); if (options.restore) await options.restore; calls.push('restore.end'); return { workspacePath, displayName: 'test' }; }, listSessions: () => [], createSession: () => ({ sessionId: 's1' }), getDiagnostics: () => ({}), getSettings: () => ({}), dispose: () => calls.push('host.dispose'), getActiveWorkspacePath: () => null };
   const local = (request: string): any => {
     if (request.endsWith('/policy')) return { createWindowOptions: () => ({}), isTrustedLocalUrl: () => true };
     if (request.endsWith('/desktop-ipc')) return { createDesktopRequestHandler: () => async (event: any) => { if (event.sender !== window.webContents) throw new Error('RENDERER_CAPABILITY_DENIED'); calls.push('desktop.handler'); return { ok: true }; } };
     if (request.endsWith('/a8-product-ipc')) return { createA8ProductRequestHandler: () => async () => ({ ok: true }) };
-    if (request.endsWith('/a9-product-ipc')) return { createA9ProductRequestHandler: () => async () => ({ ok: true }) };
+    if (request.endsWith('/a9-product-ipc')) return { createA9ProductRequestHandler: (config: any) => { a9Config = config; return async () => ({ ok: true }); } };
     if (request.endsWith('/a9-workspace-registry')) return require('../../product/a9-workspace-registry');
-    if (request.endsWith('/a9-agent-runtime')) return { createA9AgentRuntime: () => ({}) };
+    if (request.endsWith('/a9-agent-runtime')) return {
+      createA9AgentRuntime: () => ({
+        getWorkdirInfo: () => { throw Object.assign(new Error('ordinary workspace'), { code: 'A9_WORKDIR_NOT_AUTO' }); },
+        getSnapshot: () => ({ status: 'ready', activeConversationId: 'ordinary', conversationControls: { canSwitch: true } }),
+      }),
+      openA9RuntimePersistence: () => ({ status: 'ready', manager: { getWorkspaceWorkdir: () => null } }),
+    };
     if (request.endsWith('/a9-package-runtime')) return { loadA9PackageRuntime: () => null };
-    if (request.endsWith('/active-workspace-store')) return { createActiveWorkspaceStore: () => ({ load: () => options.restore ? { workspacePath: '/workspace' } : null, save() {} }) };
+    if (request.endsWith('/active-workspace-store')) return { createActiveWorkspaceStore: () => ({ load: () => options.restore ? { workspacePath } : null, save() {} }) };
     if (request.endsWith('/security-policy')) return { installSessionPolicy() {}, installWindowPolicy() {} };
     if (request.endsWith('/desktop-host')) return { createDesktopHost: () => { calls.push('createDesktopHost'); if (options.failHost) throw new Error('HOST_FAIL'); return host; }, serializeError: (e: any) => ({ code: e.code || 'ERR', message: e.message }) };
     if (request.endsWith('/credential-vault')) return { createDpapiCredentialVault: () => ({}) };
@@ -49,7 +67,7 @@ function loadMainHarness(options: { failHost?: boolean; deferPaint?: boolean; re
   Object.defineProperty(processMock, 'platform', { value: options.platform || process.platform });
   const context: any = { require: (request: string) => request === 'electron' ? electron : request.startsWith('.') ? local(path.resolve(path.dirname(productMain), request)) : request === 'fs' ? fsMock : require(request), __dirname: path.dirname(productMain), __filename: productMain, process: processMock, console, Buffer, setImmediate, clearTimeout, setTimeout, Promise, Date, Object, String, Number, Array, JSON, Error };
   vm.runInNewContext(source, context, { filename: productMain });
-  return { app, window, ipc, calls };
+  return { app, window, ipc, calls, a9Config, workspacePath };
 }
 
 describe('A9-17 real main entry startup ordering', () => {
@@ -130,6 +148,22 @@ describe('A9-17 real main entry startup ordering', () => {
     await result;
     expect(h.calls).toContain('host.dispose');
     expect(h.calls).not.toContain('desktop.handler');
+  });
+
+  test('ordinary workspace activation keeps the main desktop-host selection path', async () => {
+    const h = loadMainHarness({ ordinaryWorkspace: true });
+    await new Promise(resolve => setImmediate(resolve));
+    await new Promise(resolve => setImmediate(resolve));
+    await expect(h.a9Config.selectWorkspace(h.workspacePath)).resolves.toMatchObject({ workspacePath: h.workspacePath });
+    expect(h.calls).toContain('restore.end');
+  });
+
+  test('ordinary workspace startup restoration does not call default-directory management', async () => {
+    const h = loadMainHarness({ restore: Promise.resolve() });
+    await new Promise(resolve => setImmediate(resolve));
+    await new Promise(resolve => setImmediate(resolve));
+    expect(h.calls).toContain('restore.start');
+    expect(h.calls).toContain('restore.end');
   });
 
   test('invalid sender is rejected without waiting for startup', async () => {

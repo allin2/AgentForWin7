@@ -834,6 +834,62 @@ export class A9PersistenceManager {
       .map(row => row.workspace_path);
   }
 
+  /** All reservations, including archived sessions and mode-only workspaces. */
+  listReservedWorkspacePaths(): string[] {
+    return (this.db.prepare('SELECT workspace_path FROM a9_workspaces UNION SELECT workspace_path FROM a9_sessions').all() as any[])
+      .map(row => row.workspace_path);
+  }
+
+  getWorkspaceWorkdir(workspacePath: string): Record<string, unknown> | null {
+    for (const item of this.listConversations(workspacePath)) {
+      const workdir = this.getConversationMetadata(item.sessionId).workdir as any;
+      if (workdir?.version === 1 && workdir.origin === 'auto') return workdir;
+    }
+    return null;
+  }
+
+  assertWorkdirChangeAllowed(sessionId: string, source: string, target?: string): void {
+    const record = this.requireConversation(sessionId);
+    if (!sameWorkspacePath(record.workspacePath, source)) {
+      throw a9PersistenceError('A9_CONVERSATION_WORKSPACE_MISMATCH', '对话不属于当前工作区。');
+    }
+    if (this.listConversations(source).some(item => ['running', 'waiting_approval', 'waiting_input'].includes(item.activity))
+      || this.listManagedProcesses(source).some(item => item.cleanupRequired || ['starting', 'running', 'running_unknown', 'identity_mismatch'].includes(item.lastProbeStatus || ''))) {
+      throw a9PersistenceError('A9_CONVERSATION_BUSY', '请先结束任务及托管进程。');
+    }
+    if (target && !sameWorkspacePath(source, target)
+      && this.listConversations(target).filter(item => item.state === 'active').length >= A9_MAX_ACTIVE_CONVERSATIONS) {
+      throw a9PersistenceError('A9_CONVERSATION_LIMIT', '目标工作区未归档对话已达上限。');
+    }
+  }
+
+  /** Caller has closed both affected runtimes. Never rewrite historical facts. */
+  changeWorkdir(sessionId: string, source: string, target: string, rename: boolean): void {
+    this.db.transaction(() => {
+      this.assertWorkdirChangeAllowed(sessionId, source, target);
+      if (this.db.prepare('SELECT 1 FROM a9_workspace_locks WHERE workspace_path IN (?, ?) LIMIT 1').get(source, target)) {
+        throw a9PersistenceError('A9_WORKSPACE_LOCKED', '路径更新要求先关闭 Runtime。');
+      }
+      const now = new Date().toISOString();
+      if (rename) {
+        if (this.listReservedWorkspacePaths().some(value => value.toLowerCase() === target.toLowerCase())) {
+          throw a9PersistenceError('A9_WORKDIR_NAME_CONFLICT', '目录名已被预留。');
+        }
+        this.db.prepare('UPDATE a9_workspaces SET workspace_path = ?, display_name = ?, updated_at = ? WHERE workspace_path = ?')
+          .run(target, displayNameFor(target), now, source);
+        this.db.prepare('UPDATE a9_sessions SET workspace_path = ?, updated_at = ? WHERE workspace_path = ?').run(target, now, source);
+        this.db.prepare('UPDATE a9_workspace_conversation_state SET workspace_path = ?, updated_at = ? WHERE workspace_path = ?').run(target, now, source);
+      } else {
+        this.saveSession(sessionId, target, { workdir: { version: 1, origin: 'linked', createdAt: null } });
+        const remaining = this.listConversations(source).find(item => item.state === 'active');
+        if (remaining) this.setActiveConversation(source, remaining.sessionId, now);
+        else this.db.prepare('DELETE FROM a9_workspace_conversation_state WHERE workspace_path = ?').run(source);
+        this.setActiveConversation(target, sessionId, now);
+        // saveSession merges all unrelated metadata; no history is migrated.
+      }
+    })();
+  }
+
   listConversations(workspacePath: string): A9ConversationRecord[] {
     return (this.db.prepare(`
       SELECT s.*,
@@ -2345,7 +2401,7 @@ function conversationFromRow(row: any): A9ConversationRecord {
   };
 }
 
-function normalizeConversationTitle(value: string, maxLength: number): string {
+export function normalizeConversationTitle(value: string, maxLength: number): string {
   return String(value ?? '')
     .replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ')
     .replace(/\s+/g, ' ')

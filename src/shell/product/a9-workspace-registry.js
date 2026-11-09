@@ -3,6 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { reserveWorkdir, validateWorkdirName, pathOccupied, verifyWorkdir } = require('./a9-default-workdir');
 
 function failure(code, message) { return Object.assign(new Error(message), { code }); }
 function pathKey(value) { return process.platform === 'win32' ? value.toLowerCase() : value; }
@@ -68,6 +69,31 @@ function createA9WorkspaceRegistry(options) {
   const accounting = { maxConcurrentRequests: 2, activeRequests: 0, requests: 0, usageReports: 0, missingUsageReports: 0,
     reportedTokens: { promptTokens: 0, completionTokens: 0, totalTokens: 0 } };
 
+  let defaultRoot = null;
+  let creatingDefault = false;
+  function initializePersistence() {
+    if (!persistenceOutcome && config.openPersistence) persistenceOutcome = config.openPersistence();
+  }
+  function manager() {
+    initializePersistence();
+    if (!persistenceOutcome || persistenceOutcome.status !== 'ready') throw failure('A9_PERSISTENCE_UNAVAILABLE', '对话状态库不可用。');
+    return persistenceOutcome.manager;
+  }
+  const canonical = value => process.platform === 'win32' ? path.resolve(value).toLowerCase() : path.resolve(value);
+  function getDefaultRoot() {
+    if (!defaultRoot) {
+      const documents = fs.realpathSync(config.getDocumentsPath());
+      const requested = path.join(documents, 'Win7CodingAgent');
+      try { fs.mkdirSync(requested); } catch (error) { if (error.code !== 'EEXIST') throw error; }
+      defaultRoot = displayCasing(fs.realpathSync(requested));
+    }
+    return defaultRoot;
+  }
+  function autoWorkdir(workspace) {
+    return persistenceOutcome && persistenceOutcome.status === 'ready'
+      && persistenceOutcome.manager.getWorkspaceWorkdir && persistenceOutcome.manager.getWorkspaceWorkdir(canonical(workspace));
+  }
+
   function assertExecutionAllowed() {
     if (providerChanging || closingAll) throw failure('A9_APPLICATION_BUSY', '全应用配置或退出正在进行，请稍后重试。');
   }
@@ -99,18 +125,26 @@ function createA9WorkspaceRegistry(options) {
     });
   }
 
-  function identity(workspace) {
+  function identity(workspace, initialWorkdir) {
+    const workdir = initialWorkdir || autoWorkdir(workspace);
+    if (workdir && workdir.origin === 'auto') {
+      const root = getDefaultRoot();
+      const reserved = path.join(root, path.basename(workspace));
+      if (pathKey(path.resolve(workspace)) !== pathKey(reserved)) throw failure('A9_WORKDIR_IDENTITY_CHANGED', '预留路径不在默认根目录下。');
+      verifyWorkdir(root, reserved);
+      return { workspaceId: workspaceId(reserved), workspaceRoot: reserved, git: gitIdentity(reserved), defaultWorkdirRoot: root };
+    }
     const resolved = displayCasing(fs.realpathSync(workspace));
     if (!fs.statSync(resolved).isDirectory()) throw failure('A9_WORKSPACE_INVALID', '工作区必须是目录。');
     return { workspaceId: workspaceId(resolved), workspaceRoot: resolved, git: gitIdentity(resolved) };
   }
 
-  function admit(workspace) {
-    const next = identity(workspace);
+  function admit(workspace, initialWorkdir, replacingId) {
+    const next = identity(workspace, initialWorkdir);
     if (closingAll || providerChanging || closing.has(next.workspaceId)) throw failure('A9_APPLICATION_BUSY', '工作区或全应用配置正在关闭或变更。');
-    if (!entries.has(next.workspaceId) && entries.size >= 8) throw failure('A9_WORKSPACE_LIMIT', '最多同时打开八个工作区，请先关闭一个。');
+    if (!entries.has(next.workspaceId) && !replacingId && entries.size >= 8) throw failure('A9_WORKSPACE_LIMIT', '最多同时打开八个工作区，请先关闭一个。');
     for (const entry of entries.values()) {
-      if (entry.workspaceId === next.workspaceId) continue;
+      if (entry.workspaceId === next.workspaceId || entry.workspaceId === replacingId) continue;
       if (contains(entry.workspaceRoot, next.workspaceRoot) || contains(next.workspaceRoot, entry.workspaceRoot)
         || (next.git && gitIdentity(entry.workspaceRoot) === next.git)) {
         throw failure('A9_WORKSPACE_OVERLAP', '该目录与已打开工作区重叠或共享 Git 元数据，请先关闭相关工作区。');
@@ -119,11 +153,14 @@ function createA9WorkspaceRegistry(options) {
     return next;
   }
 
-  function open(workspace) {
-    const next = admit(workspace);
+  function open(workspace, initialWorkdir) {
+    initializePersistence();
+    const next = admit(workspace, initialWorkdir);
     let entry = entries.get(next.workspaceId);
     if (!entry) {
       const runtime = config.createRuntime(next.workspaceRoot, {
+        ...(next.defaultWorkdirRoot ? { defaultWorkdirRoot: next.defaultWorkdirRoot } : {}),
+        ...(initialWorkdir ? { initialWorkdir } : {}),
         openPersistence: (values, open) => {
           if (!persistenceOutcome) persistenceOutcome = open(values);
           return persistenceOutcome;
@@ -142,14 +179,114 @@ function createA9WorkspaceRegistry(options) {
 
   function activate(workspace) {
     const entry = open(workspace);
+    if (config.onActivate) config.onActivate(entry.workspaceRoot);
     activeId = entry.workspaceId;
     selectionClosed = false;
     return entry;
   }
 
+  function startDefaultConversation(prompt, mode) {
+    assertExecutionAllowed();
+    if (creatingDefault) throw failure('A9_WORKSPACE_SELECTION_BUSY', '正在创建默认目录对话。');
+    creatingDefault = true;
+    try {
+      const store = manager();
+      const root = getDefaultRoot();
+      const workspace = reserveWorkdir(root, prompt, config.now ? config.now() : new Date(),
+        config.normalizeConversationTitle, store.listReservedWorkspacePaths());
+      const entry = open(workspace, { version: 1, origin: 'auto', createdAt: null });
+      if (config.onActivate) config.onActivate(entry.workspaceRoot);
+      activeId = entry.workspaceId;
+      selectionClosed = false;
+      const conversationId = entry.runtime.getSnapshot({ conversationPage: true }).activeConversationId;
+      if (mode !== undefined) entry.runtime.setMode(mode);
+      return { runtime: entry.runtime, scope: { workspaceId: entry.workspaceId, conversationId }, workdir: entry.runtime.getWorkdirInfo() };
+    } finally { creatingDefault = false; }
+  }
+
+  function assertWorkdirIdle(entry, conversationId, target) {
+    const leave = entry.runtime.canLeaveWorkspace();
+    if (!leave.allowed) throw failure('A9_CONVERSATION_BUSY', leave.reason);
+    manager().assertWorkdirChangeAllowed(conversationId, canonical(entry.workspaceRoot), target && canonical(target));
+  }
+  async function changeWorkdir(scope, operation, value) {
+    assertExecutionAllowed();
+    const runtime = operation === 'link' ? resolveWorkdirLinkScope(scope) : resolve(scope);
+    const entry = entries.get(scope.workspaceId);
+    const info = runtime.getWorkdirInfo({ verifyIdentity: operation !== 'link' });
+    if (operation === 'rename' && info.origin !== 'auto') throw failure('A9_WORKDIR_NOT_AUTO', '仅默认目录支持重命名。');
+    assertWorkdirIdle(entry, scope.conversationId);
+    // Block target-bound requests across picker/shutdown awaits.
+    closing.add(entry.workspaceId);
+    let targetEntry = null;
+    let closed = false;
+    let renamed = false;
+    let committed = false;
+    let target;
+    try {
+      if (operation === 'rename') {
+        if (!info.created) throw failure('A9_WORKDIR_NOT_CREATED', '工作目录尚未创建。');
+        const name = validateWorkdirName(value);
+        if (pathOccupied(path.dirname(info.path), name, manager().listReservedWorkspacePaths())) {
+          throw failure('A9_WORKDIR_NAME_CONFLICT', '目录名已存在或被预留。');
+        }
+        target = path.join(path.dirname(info.path), name);
+      } else {
+        const chosen = await value();
+        if (!chosen) return { ok: false, cancelled: true };
+        if (!fs.statSync(chosen).isDirectory()) throw failure('A9_WORKSPACE_INVALID', '关联目标必须是已存在目录。');
+        target = identity(chosen).workspaceRoot;
+      }
+      assertWorkdirIdle(entry, scope.conversationId, target);
+      const next = admit(target, operation === 'rename' ? { origin: 'auto' } : undefined, entry.workspaceId);
+      targetEntry = entries.get(next.workspaceId);
+      if (targetEntry && targetEntry !== entry) assertWorkdirIdle(targetEntry,
+        targetEntry.runtime.getSnapshot({ conversationPage: true }).activeConversationId);
+      const cleanup = await runtime.shutdown({ cancelPending: true });
+      if (cleanup && ((cleanup.unresolved || []).length || (cleanup.leftToSystem || []).length)) throw failure('A9_WORKSPACE_CLEANUP_UNCONFIRMED', '工作区关闭未确认。');
+      entries.delete(entry.workspaceId); closed = true;
+      if (targetEntry && targetEntry !== entry) {
+        const cleanupTarget = await targetEntry.runtime.shutdown({ cancelPending: true });
+        if (cleanupTarget && ((cleanupTarget.unresolved || []).length || (cleanupTarget.leftToSystem || []).length)) throw failure('A9_WORKSPACE_CLEANUP_UNCONFIRMED', '目标工作区关闭未确认。');
+        entries.delete(targetEntry.workspaceId);
+      }
+      // Recheck physical identity after closing and before moving any bytes.
+      if (operation === 'rename') verifyWorkdir(getDefaultRoot(), info.path);
+      if (operation === 'rename') {
+        if (pathOccupied(path.dirname(target), path.basename(target), manager().listReservedWorkspacePaths())) {
+          throw failure('A9_WORKDIR_NAME_CONFLICT', '目录名在关闭期间已被占用。');
+        }
+        fs.renameSync(info.path, target); renamed = true;
+      } else if (identity(target).workspaceId !== next.workspaceId) {
+        throw failure('A9_WORKDIR_IDENTITY_CHANGED', '关联目标在关闭期间身份已变化。');
+      }
+      try { manager().changeWorkdir(scope.conversationId, canonical(info.path), canonical(target), operation === 'rename'); }
+      catch (error) {
+        if (renamed) {
+          try { fs.renameSync(target, info.path); renamed = false; }
+          catch (_rollback) { throw failure('A9_WORKDIR_ROLLBACK_FAILED', '数据库更新失败且磁盘回滚未确认，请保留现场。'); }
+        }
+        throw error;
+      }
+      committed = true;
+      closing.delete(entry.workspaceId);
+      const opened = activate(target);
+      opened.runtime.activateConversation(scope.conversationId);
+      return { ok: true, scope: { workspaceId: opened.workspaceId, conversationId: scope.conversationId }, workdir: opened.runtime.getWorkdirInfo() };
+    } finally {
+      closing.delete(entry.workspaceId);
+      if (closed && !committed && !renamed) {
+        const restored = activate(info.path);
+        restored.runtime.activateConversation(scope.conversationId);
+        if (targetEntry && targetEntry !== entry && !entries.has(targetEntry.workspaceId)) open(targetEntry.workspaceRoot);
+      }
+    }
+  }
+
   // Persisted (lowercased on Windows) path -> display casing, resolved once per path.
   const displayRoots = new Map();
   function directory() {
+    initializePersistence();
     const paths = new Map();
     if (persistenceOutcome && persistenceOutcome.status === 'ready') {
       for (const workspace of persistenceOutcome.manager.listWorkspacePaths()) {
@@ -162,6 +299,7 @@ function createA9WorkspaceRegistry(options) {
       const entry = entries.get(id);
       const snapshot = entry && entry.runtime.getSnapshot({ conversationPage: true });
       return { workspaceId: id, workspaceRoot: workspace, displayName: path.basename(workspace),
+        ...(snapshot && snapshot.workdir ? { workdir: snapshot.workdir } : {}),
         opened: Boolean(entry), active: id === activeId,
         status: snapshot ? snapshot.agentStatus || snapshot.status : 'closed',
         activeConversationId: snapshot && snapshot.activeConversationId,
@@ -185,6 +323,18 @@ function createA9WorkspaceRegistry(options) {
     if (admit(entry.workspaceRoot).workspaceId !== entry.workspaceId) throw failure('A9_SCOPE_STALE', '工作区目录身份已变化。');
     const snapshot = entry.runtime.getSnapshot({ conversationPage: true });
     if (snapshot.activeConversationId !== scope.conversationId) throw failure('A9_SCOPE_STALE', '对话目标已变化，请刷新后重试。');
+    return entry.runtime;
+  }
+
+  // Linking authorizes a new native-picker target and retains the source bytes.
+  // It must remain available when the old root is absent or substituted. Only
+  // this recovery action skips source filesystem identity; scope stays bound.
+  function resolveWorkdirLinkScope(scope) {
+    const entry = entries.get(scope && scope.workspaceId);
+    if (!entry || entry.workspaceId !== activeId || closing.has(entry.workspaceId) || closingAll
+      || !entry.runtime.getWorkdirConversationId || entry.runtime.getWorkdirConversationId() !== scope.conversationId) {
+      throw failure('A9_SCOPE_STALE', '工作区或对话目标已变化，请刷新后重试。');
+    }
     return entry.runtime;
   }
 
@@ -248,7 +398,7 @@ function createA9WorkspaceRegistry(options) {
     } finally { closingAll = false; }
   }
 
-  return { admit, open, activate, resolve, resolveInboxScope, directory, configureProvider, close, shutdown,
+  return { admit, open, activate, startDefaultConversation, changeWorkdir, resolve, resolveWorkdirLinkScope, resolveInboxScope, directory, configureProvider, close, shutdown,
     getActive: () => entries.get(activeId) || null,
     getById: id => entries.get(id) || null,
     get size() { return entries.size; },

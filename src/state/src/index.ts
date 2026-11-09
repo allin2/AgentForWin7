@@ -126,6 +126,7 @@ export type {
 } from './a8-persistence';
 
 export {
+  normalizeConversationTitle,
   A9_SCHEMA_VERSION,
   A9_DEFAULT_RETENTION_DAYS,
   A9_MAX_ACTIVE_CONVERSATIONS,

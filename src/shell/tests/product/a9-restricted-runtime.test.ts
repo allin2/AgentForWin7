@@ -72,6 +72,13 @@ describe.each([
       .toMatchObject({ ok: false, error: { code: refusalCode } });
   });
 
+  it('returns no workdir identity and refuses workdir creation and browsing', async () => {
+    expect(restricted.getWorkdirInfo()).toEqual({});
+    expect(restricted.getWorkdirConversationId()).toBeNull();
+    expect(() => restricted.ensureWorkdir()).toThrow(expect.objectContaining({ code: refusalCode }));
+    expect(await restricted.listWorkspaceDirectory('.')).toEqual({ ok: false, error: { code: refusalCode } });
+  });
+
   it.each(actions)('returns its original refusal through the real %s handler', async (action, payload) => {
     expect(await handler({}, { schemaVersion: A9_IPC_SCHEMA_VERSION, action, payload }))
       .toEqual({ ok: false, error: { code: refusalCode } });

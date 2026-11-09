@@ -124,6 +124,8 @@
     eventsStatusNote: null,
     workspaceSelectionGeneration: 0,
     workspaceOperation: false,
+    defaultConversationPending: false,
+    workdirBusy: false,
     workspaceDirectory: [],
     snapshotGeneration: 0,
     snapshotRequest: null,
@@ -219,6 +221,8 @@
   }
 
   function canSubmit() {
+    if (state.workdirBusy) return false;
+    if (state.defaultConversationPending) return !state.workspaceOperation && Boolean(el('task-prompt').value.trim());
     return root.win7AgentComposerController.controls(state.snapshot, state.running, el('task-prompt').value).canSend;
   }
 
@@ -334,6 +338,17 @@
   }
 
   function syncComposer() {
+    if (state.defaultConversationPending) {
+      el('task-prompt').disabled = state.workspaceOperation;
+      el('run-task').hidden = false;
+      el('run-task').disabled = !canSubmit();
+      el('cancel-task').hidden = true;
+      el('rail-stop').hidden = true;
+      el('queue-task').hidden = true;
+      el('composer-queue').hidden = true;
+      text('session-status', '发送首条消息后创建对话；需要文件或命令工具时才创建默认目录。');
+      return;
+    }
     const snapshot = state.snapshot;
     const runtimeUnavailable = Boolean(snapshot && snapshot.status !== 'ready');
     const blockedMode = !snapshot || runtimeUnavailable || !SUPPORTED_MODES.has(snapshot.mode);
@@ -348,7 +363,7 @@
     const stopKind = state.running
       ? 'turn'
       : snapshot && snapshot.controls ? snapshot.controls.stopKind : hasManaged ? 'managed_process' : 'none';
-    prompt.disabled = !root.win7AgentComposerController.controls(snapshot, state.running, prompt.value).canDraft;
+    prompt.disabled = Boolean(state.workdirBusy) || !root.win7AgentComposerController.controls(snapshot, state.running, prompt.value).canDraft;
     const draftingWhileRunning = state.running && !prompt.disabled;
     prompt.placeholder = draftingWhileRunning
       ? '起草下一条消息，当前任务结束后手动发送…'
@@ -361,7 +376,7 @@
     const queueButton = el('queue-task');
     if (queueButton) {
       queueButton.hidden = !state.running;
-      queueButton.disabled = state.queueBusy || !root.win7AgentComposerController.controls(snapshot, state.running, prompt.value).canQueue;
+      queueButton.disabled = state.workdirBusy || state.queueBusy || !root.win7AgentComposerController.controls(snapshot, state.running, prompt.value).canQueue;
     }
     renderQueue(snapshot);
     stop.hidden = !canStop;
@@ -977,6 +992,7 @@
   }
 
   function attachActivityDetail(item, data) {
+    appendWorkdirBoundaryAction(item.li, data);
     if (data.image && data.image.reference && window.A9ImagePreview) {
       item.li.appendChild(window.A9ImagePreview.create(data.image, (conversationId, reference) =>
         api.a9.previewImage(conversationId, reference)));
@@ -2013,7 +2029,7 @@
   function inboxConversations(snapshot) {
     const controls = snapshot.conversationControls || {};
     const currentId = (snapshot.scope && snapshot.scope.workspaceId) || 'current';
-    const current = { workspaceId: currentId, workspaceRoot: snapshot.workspaceRoot || '', displayName: pathName(snapshot.workspaceRoot) || '当前工作区' };
+    const current = { workspaceId: currentId, workspaceRoot: snapshot.workspaceRoot || '', displayName: pathName(snapshot.workspaceRoot) || '当前工作区', workdir: snapshot.workdir };
     const items = [];
     // ADR-0322：结束、恢复、记录查看按行自己的工作区组成 scope；当前工作区没有 scope 时不提供这些动作。
     const currentScopeId = snapshot.scope && snapshot.scope.workspaceId ? snapshot.scope.workspaceId : null;
@@ -2223,6 +2239,9 @@
     const button = document.createElement('button');
     button.type = 'button';
     const workspace = conversation.workspace || { workspaceId: 'current', displayName: pathName(snapshot.workspaceRoot) };
+    const defaultWorkdir = workspace.workdir && workspace.workdir.origin === 'auto';
+    const directoryName = defaultWorkdir ? pathName(workspace.workdir.path) : workspace.displayName;
+    const badgeWorkspace = defaultWorkdir ? { ...workspace, displayName: '默认' } : workspace;
     const viewed = archived ? false : conversation.viewed === true;
     button.className = `conversation-row${compact || archived ? ' compact' : ''}${conversation.unread ? ' unread' : ''}`;
     button.disabled = archived || !conversation.switchable;
@@ -2243,20 +2262,27 @@
     const reason = archived ? '已归档，请先恢复对话' : viewed ? '当前对话' : lockReason;
     const statusText = status ? status.text : '空闲';
     const countdown = !archived && Number.isInteger(conversation.settleInDays) ? `${conversation.settleInDays} 天后结束` : '';
-    const label = `${conversation.title || '新对话'}，${workspace.displayName}，${statusText}${conversation.hasDraft ? '，有未发送草稿' : ''}${countdown ? `，${countdown}` : ''}${updated ? `，更新于 ${updated}` : ''}${reason ? `，${reason}` : ''}`;
+    const label = `${conversation.title || '新对话'}，${defaultWorkdir ? `默认目录 ${directoryName}` : workspace.displayName}，${statusText}${conversation.hasDraft ? '，有未发送草稿' : ''}${countdown ? `，${countdown}` : ''}${updated ? `，更新于 ${updated}` : ''}${reason ? `，${reason}` : ''}`;
     button.setAttribute('aria-label', label);
     button.title = `${conversation.title || '新对话'}\n${workspace.workspaceRoot || workspace.displayName}\n${statusText}${updated ? ` · ${updated}` : ''}${reason ? `\n${reason}` : ''}`;
     if (status) { meta.textContent = status.text; meta.className = `conversation-state ${status.kind}`; }
     if (compact || archived) {
-      title.appendChild(workspaceBadgeNode(workspace));
+      title.appendChild(workspaceBadgeNode(badgeWorkspace));
+      if (defaultWorkdir) {
+        const directory = document.createElement('small');
+        directory.textContent = `${directoryName} · `;
+        title.appendChild(directory);
+      }
       title.appendChild(document.createTextNode(conversation.title || '新对话'));
       button.appendChild(title);
       button.appendChild(meta);
     } else {
       const line = document.createElement('span');
       line.className = 'conversation-workspace';
-      line.appendChild(workspaceBadgeNode(workspace));
-      line.appendChild(document.createTextNode(workspace.displayName));
+      line.appendChild(workspaceBadgeNode(badgeWorkspace));
+      const directory = document.createElement('span');
+      directory.textContent = directoryName;
+      line.appendChild(directory);
       title.textContent = conversation.title || '新对话';
       const flags = document.createElement('span');
       flags.className = 'conversation-flags';
@@ -2369,7 +2395,7 @@
     appendConversationGroup(activeList, '置顶', pinned, snapshot, false);
     appendConversationGroup(activeList, '活跃', active, snapshot, false);
     appendConversationGroup(activeList, '已结束', settled, snapshot, true);
-    archived.forEach((item) => appendConversationRow(archivedList, { ...item, workspace: { workspaceId: currentId, displayName: pathName(snapshot.workspaceRoot) } }, snapshot, true));
+    archived.forEach((item) => appendConversationRow(archivedList, { ...item, workspace: { workspaceId: currentId, displayName: pathName(snapshot.workspaceRoot), workdir: snapshot.workdir } }, snapshot, true));
     if (query && visible.length === 0 && archived.length === 0) {
       const empty = document.createElement('li');
       empty.className = 'conversation-empty-note';
@@ -2570,6 +2596,7 @@
     el('workspace-label').title = workspace;
     el('task-prompt').setAttribute('aria-description', workspace ? `执行目录：${workspace}` : '尚未选择工作区');
     renderComposerWorkspace(snapshot);
+    renderWorkdir(snapshot);
     text('a9-workspace-value', workspace || '-');
     text('a9-mode-value', modeLabel(snapshot.mode));
     const shell = snapshot.shell || {};
@@ -2695,6 +2722,10 @@
       try {
         const response = await a9.snapshot();
         if (!isFresh()) return null;
+        if (state.defaultConversationPending) {
+          if (response?.ok && response.snapshot.workspaces) state.workspaceDirectory = response.snapshot.workspaces;
+          return null;
+        }
         if (!response || response.ok !== true) {
           const code = response && response.error && response.error.code;
           if (code === 'A9_WORKSPACE_REQUIRED') {
@@ -2713,6 +2744,7 @@
             text('workspace-path', '尚未选择');
             text('workspace-label', '未连接工作区');
             renderComposerWorkspace(null);
+            renderWorkdir(null);
             text('task-prompt', '');
             el('task-prompt').value = '';
             el('a9-empty-state').hidden = false;
@@ -2765,6 +2797,7 @@
   }
 
   async function saveDraftNow() {
+    if (state.defaultConversationPending) return null;
     if (!a9 || !state.activeConversationId) return null;
     if (state.draftTimer) {
       root.clearTimeout(state.draftTimer);
@@ -2795,6 +2828,7 @@
   }
 
   function scheduleDraftSave() {
+    if (state.defaultConversationPending) return;
     if (state.draftTimer) root.clearTimeout(state.draftTimer);
     text('draft-status', '正在保存当前对话草稿…');
     el('draft-status').dataset.tone = 'info';
@@ -2802,6 +2836,7 @@
   }
 
   async function runConversationOperation(operation) {
+    if (state.workspaceOperation) return null;
     state.snapshotGeneration += 1;
     state.snapshotPollingPauses += 1;
     syncSnapshotPolling();
@@ -2917,6 +2952,7 @@
     const recent = state.workspaceDirectory.filter((workspace) => workspace.opened === false && match(workspace));
     list.textContent = '';
     let index = 0;
+    pickerOption(list, index++, { value: '__default__', title: '不选目录，直接开始', meta: '需要文件或命令工具时才创建默认目录', shortcut: 'Ctrl 1' });
     pickerSection(list, '已打开的工作区');
     if (!opened.length) {
       const empty = document.createElement('li');
@@ -3050,6 +3086,7 @@
         if (!response?.cancelled) throw new Error(errorMessage(response, '工作区切换失败。'));
         return response;
       }
+      state.defaultConversationPending = false;
       state.localRequest = null; state.conversationSignature = null;
       state.approvalDecision = null; state.questionReply = null; state.continuingTaskId = null; state.queueBusy = false;
       stopLiveTracking();
@@ -3062,7 +3099,7 @@
       const snapshot = await refreshSnapshot();
       if (snapshot) {
         await ensureExplorerSession(snapshot.workspaceRoot);
-        if (!state.explorerSessionId) {
+        if (!snapshot.workdir && !state.explorerSessionId) {
           const session = await api.createSession(snapshot.workspaceRoot, pathName(snapshot.workspaceRoot));
           state.explorerSessionId = session?.session?.sessionId || null;
           await refreshWorkspace('');
@@ -3080,6 +3117,7 @@
   }
 
   async function chooseWorkspaceFromPicker(value) {
+    if (value === '__default__') return prepareDefaultConversation();
     const dialog = el('conversation-new-dialog');
     const items = dialog.querySelectorAll('.project-picker-item');
     if (state.workspaceOperation || Array.from(items).some((item) => item.disabled)) return;
@@ -3125,6 +3163,7 @@
   }
 
   function switchConversation(conversationId) {
+    if (state.defaultConversationPending && state.defaultPreviousScope) return activateWorkspace({ workspaceId: state.defaultPreviousScope.workspaceId, conversationId });
     if (conversationId === state.activeConversationId) return Promise.resolve(null);
     return runConversationOperation(() => a9.activateConversation(conversationId));
   }
@@ -3165,6 +3204,7 @@
   }
 
   async function ensureExplorerSession(workspaceRoot) {
+    if (state.snapshot && state.snapshot.workdir) { await refreshWorkspace(''); return; }
     if (!workspaceRoot || state.explorerSessionId) return;
     const result = await api.listSessions();
     const sessions = result && result.sessions ? result.sessions : [];
@@ -3219,7 +3259,9 @@
   }
 
   async function refreshWorkspace(pathValue) {
-    if (!state.explorerSessionId) return;
+    const scope = state.snapshot && state.snapshot.scope;
+    const scopedDirectory = Boolean(state.snapshot && state.snapshot.workdir && scope);
+    if (!scopedDirectory && !state.explorerSessionId) return;
     const request = ++state.explorerRequest;
     const sessionId = state.explorerSessionId;
     const tree = el('workspace-tree');
@@ -3228,10 +3270,10 @@
     el('workspace-tree-empty').hidden = false;
     let response;
     try {
-      response = await api.listWorkspace(sessionId, pathValue || '');
+      response = scopedDirectory ? await a9.listWorkspaceDirectory(pathValue || '') : await api.listWorkspace(sessionId, pathValue || '');
       if (!response || response.ok === false || !response.result) throw response;
     } catch (error) {
-      if (request !== state.explorerRequest || sessionId !== state.explorerSessionId) return;
+      if (request !== state.explorerRequest || sessionId !== state.explorerSessionId || (scopedDirectory && (state.snapshot?.scope?.workspaceId !== scope.workspaceId || state.snapshot?.scope?.conversationId !== scope.conversationId))) return;
       const message = `文件列表读取失败：${errorMessage(error, '服务未返回目录')}，可重试。`;
       text('workspace-tree-empty', message);
       showGlobalError(message, '重试', () => {
@@ -3240,7 +3282,7 @@
       });
       return;
     }
-    if (request !== state.explorerRequest || sessionId !== state.explorerSessionId) return;
+    if (request !== state.explorerRequest || sessionId !== state.explorerSessionId || (scopedDirectory && (state.snapshot?.scope?.workspaceId !== scope.workspaceId || state.snapshot?.scope?.conversationId !== scope.conversationId))) return;
     const listing = response.result;
     state.explorerPath = listing.path || '';
     text('explorer-path', state.explorerPath || '/');
@@ -3263,7 +3305,7 @@
   }
 
   async function openWorkspaceFile(filePath, startLine, encoding) {
-    if (!state.explorerSessionId || !filePath) return;
+    if ((!state.explorerSessionId && !state.snapshot?.workdir) || !filePath) return;
     const sameFile = Boolean(state.viewer && state.viewer.path === filePath);
     const selectedEncoding = encoding === undefined
       ? (sameFile ? el('viewer-encoding').value : '')
@@ -3375,6 +3417,7 @@
   }
 
   async function submitPrompt() {
+    if (state.defaultConversationPending) return submitDefaultPrompt();
     const requestConversationId = state.activeConversationId;
     const requestGeneration = state.snapshotGeneration;
     const isCurrent = () => state.activeConversationId === requestConversationId && state.snapshotGeneration === requestGeneration;
@@ -4304,6 +4347,228 @@
     });
   }
 
+  // A9-55：所有目录动作只使用捕获的 preload scope。
+  function workdirError(response) {
+    const code = response?.error?.code || response?.code;
+    return ({
+      A9_WORKDIR_NOT_CREATED: '目录尚未创建。',
+      A9_WORKDIR_NOT_AUTO: '关联目录不能重命名。',
+      A9_CONVERSATION_BUSY: '对话正在运行或仍有后台进程，请结束后重试。',
+      A9_WORKDIR_NAME_INVALID: '目录名无效，请使用不超过 20 个字符的有效名称。',
+      A9_WORKDIR_NAME_CONFLICT: '目录名已存在或已被预留，请换一个名称。',
+      A9_WORKDIR_IDENTITY_CHANGED: '目录身份已变化。请关联已有目录后继续。',
+      A9_MODE_SELECTION_REQUIRED: '请先选择此对话的权限模式，再发送保留的消息。',
+      A9_WORKSPACE_OVERLAP: '所选目录与已打开的工作区重叠，请选择其他目录。',
+      A9_WORKSPACE_LIMIT: '已打开的工作区已达上限，请先关闭其他工作区。',
+      A9_SCOPE_STALE: '当前对话目标已变化，请刷新后重试。',
+      A9_DRAFT_SAVE_FAILED: '草稿保存失败，请保留输入后重试。',
+    })[code] || `目录操作失败${code ? `（${String(code).slice(0, 80)}）` : ''}，请刷新后重试。`;
+  }
+
+  function renderWorkdir(snapshot) {
+    const info = snapshot && snapshot.workdir;
+    const host = el('workdir-control');
+    if (!host) return;
+    host.hidden = !info;
+    if (state.workdirDisplayPath !== (info && info.path)) {
+      state.workdirDisplayPath = info && info.path;
+      setWorkdirMenu(false);
+      el('workdir-path').hidden = true;
+      text('workdir-result', '');
+    }
+    if (!info) { setWorkdirMenu(false); return; }
+    text('workdir-label', info.identityChanged ? '目录身份已变化' : info.created ? pathName(info.path) : '未创建');
+    el('workdir-label').title = info.path;
+    text('workdir-path', info.path);
+    text('workdir-warning', info.identityChanged ? '目录身份已变化，已禁用打开与重命名。请关联已有目录。' : '');
+    el('workdir-warning').hidden = !info.identityChanged;
+    el('workdir-open').disabled = state.workdirBusy || !info.created || info.identityChanged === true;
+    el('workdir-rename').disabled = state.workdirBusy || !info.created || info.identityChanged === true || info.origin !== 'auto';
+    el('workdir-link').disabled = state.workdirBusy;
+  }
+
+  function setWorkdirMenu(open) {
+    const menu = el('workdir-menu');
+    if (!menu) return;
+    menu.hidden = !open;
+    el('workdir-label').setAttribute('aria-expanded', String(open));
+    if (open) el('workdir-view').focus();
+  }
+
+  function bindWorkdirScope(response) {
+    state.defaultConversationPending = false;
+    state.snapshotGeneration += 1;
+    state.snapshot = { ...state.snapshot, scope: response.scope, activeConversationId: response.scope.conversationId,
+      workspaceRoot: response.workdir?.path || '', workdir: response.workdir || null };
+    state.activeConversationId = response.scope.conversationId;
+    state.draftHydratedConversationId = null;
+    state.conversationSignature = null;
+    resetConversationEvents();
+    state.explorerSessionId = null;
+    state.explorerRequest += 1;
+    state.explorerPath = '';
+    state.viewer = null;
+    el('workspace-tree').textContent = '';
+    el('viewer-panel').hidden = true;
+    el('code-viewer').textContent = '';
+    setWorkdirMenu(false);
+    renderWorkdir(state.snapshot);
+  }
+
+  async function prepareDefaultConversation() {
+    if (state.workspaceOperation) return;
+    state.workspaceOperation = true;
+    try {
+      const saved = await saveDraftNow();
+      if (saved && !saved.ok) { setFieldError('conversation-new-error', '草稿保存失败，请保留输入后重试。'); return; }
+      state.snapshotGeneration += 1;
+      state.defaultConversationPending = true;
+      state.defaultPreviousScope = state.snapshot && state.snapshot.scope;
+      if (state.snapshot) renderConversationDirectory({ ...state.snapshot, activeConversationId: null });
+      state.snapshot = null;
+      state.activeConversationId = null;
+      state.renderedConversationId = null;
+      state.running = false;
+      state.localRequest = null;
+      state.explorerSessionId = null;
+      state.explorerRequest += 1;
+      state.draftHydratedConversationId = null;
+      stopLiveTracking();
+      resetConversationEvents();
+      clearGlobalError();
+      closeDialog(el('conversation-new-dialog'));
+      closeDialog(el('a9-mode-dialog'));
+      ['a9-managed-processes', 'a9-approval-card', 'a9-question-host', 'a9-empty-state', 'viewer-panel', 'a9-mode-open'].forEach((id) => { el(id).hidden = true; });
+      el('workspace-tree').textContent = '';
+      el('task-prompt').value = '';
+      text('draft-status', '');
+      text('workbench-title', '新对话');
+      text('workspace-label', '默认工作目录');
+      renderComposerWorkspace(null);
+      renderWorkdir(null);
+      setTaskState('待发送', 'idle');
+    } finally {
+      state.workspaceOperation = false;
+      syncComposer();
+      el('task-prompt').focus();
+    }
+  }
+
+  async function submitDefaultPrompt() {
+    const prompt = el('task-prompt').value.trim();
+    if (!prompt || !canSubmit()) return null;
+    state.workspaceOperation = true;
+    state.snapshotGeneration += 1;
+    state.snapshotPollingPauses += 1;
+    syncSnapshotPolling();
+    syncComposer();
+    clearGlobalError();
+    let response;
+    try {
+      // 不沿用旧工作区的权限，也不自动授予 Full Access。
+      response = await api.a9.startDefaultConversation(prompt);
+      if (response?.scope) {
+        bindWorkdirScope(response);
+        if (response.ok === true) el('task-prompt').value = '';
+        await refreshSnapshot();
+        if (response.ok !== true) {
+          el('task-prompt').value = prompt;
+          await saveDraftNow();
+        }
+        await loadConversationEvents();
+      }
+      if (!response?.ok) showGlobalError(workdirError(response));
+      return response;
+    } catch (error) {
+      showGlobalError(workdirError(error));
+      return null;
+    } finally {
+      state.workspaceOperation = false;
+      state.snapshotPollingPauses -= 1;
+      syncSnapshotPolling();
+      resizeComposer();
+    }
+  }
+
+  function openWorkdirRename() {
+    if (el('workdir-rename').disabled) return;
+    state.workdirRenameScope = state.snapshot.scope;
+    el('workdir-rename-input').value = pathName(state.snapshot.workdir.path);
+    setFieldError('workdir-rename-error', '');
+    setWorkdirMenu(false);
+    openDialog(el('workdir-rename-dialog'));
+    el('workdir-rename-input').focus();
+    el('workdir-rename-input').select();
+  }
+
+  async function runWorkdirAction(action) {
+    const scope = action === 'rename' ? state.workdirRenameScope : state.snapshot?.scope;
+    if (!scope || state.workspaceOperation || state.workdirBusy) return null;
+    if (scope.workspaceId !== state.snapshot?.scope?.workspaceId || scope.conversationId !== state.activeConversationId) {
+      setFieldError('workdir-rename-error', '当前对话目标已变化，请关闭后重新打开。'); return null;
+    }
+    state.workspaceOperation = true;
+    state.workdirBusy = true;
+    syncComposer();
+    state.snapshotGeneration += 1;
+    state.snapshotPollingPauses += 1;
+    syncSnapshotPolling();
+    renderWorkdir(state.snapshot);
+    el('workdir-rename-apply').disabled = true;
+    setFieldError('workdir-rename-error', '');
+    clearGlobalError();
+    let response;
+    try {
+      const saved = await saveDraftNow();
+      if (saved && !saved.ok) throw { code: 'A9_DRAFT_SAVE_FAILED' };
+      const target = api.a9.forScope(scope);
+      response = action === 'rename' ? await target.renameWorkdir(el('workdir-rename-input').value.trim())
+        : action === 'link' ? await target.linkWorkdir() : await target.openWorkdir();
+      if (response?.cancelled) return response;
+      if (!response?.ok) {
+        if (action === 'rename') setFieldError('workdir-rename-error', workdirError(response));
+        else showGlobalError(workdirError(response));
+        return response;
+      }
+      if (response.scope && response.workdir) bindWorkdirScope(response);
+      if (action === 'rename') closeDialog(el('workdir-rename-dialog'));
+      await refreshSnapshot();
+      if (response.scope) await loadConversationEvents();
+      return response;
+    } catch (error) {
+      if (action === 'rename') setFieldError('workdir-rename-error', workdirError(error));
+      else showGlobalError(workdirError(error));
+      return null;
+    } finally {
+      state.workspaceOperation = false;
+      state.workdirBusy = false;
+      syncComposer();
+      state.snapshotPollingPauses -= 1;
+      el('workdir-rename-apply').disabled = false;
+      renderWorkdir(state.snapshot);
+      syncSnapshotPolling();
+    }
+  }
+
+  function appendWorkdirBoundaryAction(container, data) {
+    const scope = state.snapshot?.scope;
+    if (state.snapshot?.workdir?.origin !== 'auto' || !scope) return;
+    let code = data.error && typeof data.error === 'object' ? data.error.code : data.error;
+    if (typeof data.result === 'string') {
+      try { code = JSON.parse(data.result)?.error?.code || code; } catch (_error) { /* 有界结果可能被截断；只识别错误信封。 */
+        if (/^\s*\{\s*"error"\s*:\s*\{\s*"code"\s*:\s*"WORKSPACE_BOUNDARY_VIOLATION"/.test(data.result)) code = 'WORKSPACE_BOUNDARY_VIOLATION';
+      }
+    }
+    if (!/^WORKSPACE_BOUNDARY_VIOLATION(?::|$)/.test(String(code || ''))) return;
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = '关联已有目录…';
+    button.addEventListener('click', () => {
+      if (state.snapshot?.scope?.workspaceId === scope.workspaceId && state.activeConversationId === scope.conversationId) void runWorkdirAction('link');
+    });
+    container.appendChild(button);
+  }
+
   function copyOutput() {
     const output = el('a9-shell-output');
     const selection = root.getSelection();
@@ -4342,6 +4607,27 @@
       root.clearTimeout(state.inboxSettleTimer);
       state.inboxSettleTimer = null;
       cancelPendingUndo();
+    });
+    el('workdir-label').addEventListener('click', () => {
+      const open = el('workdir-menu').hidden;
+      setWorkdirMenu(open);
+      if (open) void refreshSnapshot();
+    });
+    el('workdir-view').addEventListener('click', () => { el('workdir-path').hidden = !el('workdir-path').hidden; });
+    el('workdir-copy').addEventListener('click', () => {
+      const info = state.snapshot && state.snapshot.workdir;
+      if (info) text('workdir-result', copyText(info.path) ? '已复制路径。' : '复制失败，请手工选择路径。');
+    });
+    el('workdir-open').addEventListener('click', () => { void runWorkdirAction('open'); });
+    el('workdir-rename').addEventListener('click', openWorkdirRename);
+    el('workdir-link').addEventListener('click', () => { void runWorkdirAction('link'); });
+    el('workdir-rename-apply').addEventListener('click', () => { void runWorkdirAction('rename'); });
+    el('workdir-rename-cancel').addEventListener('click', () => closeDialog(el('workdir-rename-dialog')));
+    el('workdir-menu').addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') { setWorkdirMenu(false); el('workdir-label').focus(); }
+    });
+    document.addEventListener('click', (event) => {
+      if (!el('workdir-menu').hidden && !el('workdir-control').contains(event.target)) setWorkdirMenu(false);
     });
     el('workspace-select').addEventListener('click', () => { void chooseWorkspace(); });
     el('task-prompt').addEventListener('input', () => { resizeComposer(); scheduleDraftSave(); });
