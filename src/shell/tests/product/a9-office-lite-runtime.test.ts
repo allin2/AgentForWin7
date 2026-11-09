@@ -15,18 +15,48 @@ type FixtureStep =
   | { kind: 'write'; name: string; args: any }
   | { kind: 'text'; content: string };
 
+const fixtureCleanups = new Set<() => Promise<void>>();
+afterEach(async () => {
+  for (const close of fixtureCleanups) await close();
+});
+
 async function setup(options: { steps: FixtureStep[]; mode?: string; journey?: boolean } = { steps: [] }) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-42-question-'));
+  let runtime: any, server: http.Server;
+  let db: InstanceType<typeof Database> | undefined;
+  const databases: Array<InstanceType<typeof Database>> = [];
+  const openDatabase = (file: string, options: any = {}) => {
+    const database = new Database(file, options);
+    databases.push(database);
+    return database;
+  };
+  const responses: http.ServerResponse[] = [];
+  const close = async () => {
+    try {
+      for (const response of responses) response.destroy();
+      await runtime?.shutdown();
+    } finally {
+      try { for (const database of databases) if ((database as any).open) database.close(); }
+      finally {
+        try {
+          if (server?.listening) await new Promise<void>((resolve) => server.close(() => resolve()));
+        } finally {
+          fs.rmSync(root, { recursive: true, force: true });
+          fixtureCleanups.delete(close);
+        }
+      }
+    }
+  };
+  fixtureCleanups.add(close);
   const workspaceRoot = path.join(root, '中文 workspace');
   const dataRoot = path.join(root, 'data');
   fs.mkdirSync(workspaceRoot); fs.mkdirSync(dataRoot);
   fs.writeFileSync(path.join(workspaceRoot, 'note.txt'), 'current\n', 'utf8');
   const requests: any[] = [];
-  const responses: http.ServerResponse[] = [];
   let stepIndex = 0;
   const journey = require('../../../../scripts/win7-dev/a9-42-office-journey.cjs');
   const journeyState = options.journey ? journey.makeFixtureState() : null;
-  const server = http.createServer((req, res) => {
+  server = http.createServer((req, res) => {
     let body = '';
     req.on('data', (chunk) => { body += chunk.toString('utf8'); });
     req.on('end', () => {
@@ -65,12 +95,12 @@ async function setup(options: { steps: FixtureStep[]; mode?: string; journey?: b
   const baseUrl = `http://127.0.0.1:${(server.address() as any).port}`;
   const make = () => createA9AgentRuntime({
     workspaceRoot, dataRoot, ownerId: `a9-42-${process.pid}-${Math.random()}`,
-    openDatabase: (databasePath: string, openOptions: any) => new Database(databasePath, openOptions),
+    openDatabase,
   });
-  let runtime = make();
+  runtime = make();
   runtime.setMode(options.mode || 'full_access');
   await runtime.configureProvider({ baseUrl, model: 'fixture', skipProbe: true });
-  const db = new Database(path.join(dataRoot, 'a9-state.db'));
+  db = openDatabase(path.join(dataRoot, 'a9-state.db'));
   const ipc = () => createA9ProductRequestHandler({ isValidRendererSender: () => true, getA9Runtime: () => runtime });
   return {
     root, workspaceRoot, dataRoot, requests, db, journeyState,
@@ -80,11 +110,7 @@ async function setup(options: { steps: FixtureStep[]; mode?: string; journey?: b
       return ipc()({}, { schemaVersion: 7, action: 'a9.question.reply', payload });
     },
     async restart() { await runtime.shutdown(); runtime = make(); },
-    async close() {
-      for (const response of responses) response.destroy();
-      await runtime.shutdown(); db.close();
-      await new Promise<void>((resolve) => server.close(() => resolve()));
-    },
+    close,
   };
 }
 

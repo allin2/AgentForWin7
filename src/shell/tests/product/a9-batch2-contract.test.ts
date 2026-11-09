@@ -10,6 +10,16 @@ import * as util from 'util';
 import * as vm from 'vm';
 import Database from 'better-sqlite3';
 
+const temporaryRoots: string[] = [];
+function temporaryDirectory(prefix: string) {
+  const root = fs.mkdtempSync(prefix);
+  temporaryRoots.push(root);
+  return root;
+}
+afterAll(() => {
+  for (const root of temporaryRoots.reverse()) fs.rmSync(root, { recursive: true, force: true });
+});
+
 // A9-33 batch-2 contract tests. Dev-machine evidence only: nothing here starts Electron, PowerShell, Win10 or Win7.
 const releaseDir = path.resolve(__dirname, '../../../../release/win7-product-v3');
 const fixtures = require(path.join(releaseDir, 'a9-batch2-fixtures.cjs')) as any;
@@ -198,7 +208,7 @@ describe('A9-36 independent supplemental request and inputs', () => {
     expires_at: '2026-10-15T20:00:00Z', provider: { base_url: 'https://api.deepseek.com', model: 'deepseek-v4-flash', max_turns: 3, max_requests: 40, max_response_bytes: 1048576 },
     credential_source: 'C:\\Users\\agent\\AppData\\Local\\Win7CodingAgent\\a9',
     tools: { python: { path: 'C:\\Python38\\python.exe', sha256: H('python') }, git: { path: 'C:\\Git\\cmd\\git.exe', sha256: H('git') } }, m6: baseM6() });
-  const root = () => fs.mkdtempSync(path.join(os.tmpdir(), 'a9-36-contract-'));
+  const root = () => temporaryDirectory(path.join(os.tmpdir(), 'a9-36-contract-'));
   const changedAuthority = (key: string, value: any) => {
     const a: any = baseAuthority(); const parts = key.split('.'); let parent = a;
     for (const part of parts.slice(0, -1)) parent = parent[part];
@@ -801,7 +811,7 @@ describe('A9-36 independent supplemental request and inputs', () => {
     expect(supplement.M6_CALL_LABELS).toHaveLength(13);
     const results: any = {};
     for (const scenario of supplement.M6_SCENARIOS) {
-      const work = fs.mkdtempSync(path.join(base, 'probe-')); const copy = path.join(work, 'a9.sqlite'); fs.copyFileSync(path.join(fixturesDir, scenario.fixture + '.sqlite'), copy);
+      const work = temporaryDirectory(path.join(base, 'probe-')); const copy = path.join(work, 'a9.sqlite'); fs.copyFileSync(path.join(fixturesDir, scenario.fixture + '.sqlite'), copy);
       results[scenario.name] = supplement.m6Probe(scenario.name, packageRoot, sqliteDir, copy);
     }
     for (const name of ['S1', 'S2', 'S3', 'S4', 'S5', 'S6']) { expect(results[name].business.open_status).toBe('ready'); expect(results[name].business.calls).toHaveLength(13); }
@@ -1246,7 +1256,7 @@ describe('A9-36 supplement: implementation review round 1', () => {
   const driverSource = fs.readFileSync(path.resolve(__dirname, 'a9-batch2-driver-entry.cjs'), 'utf8');
   const orchestratorSource = fs.readFileSync(path.join(releaseDir, 'a9-alpha2-supplement.cjs'), 'utf8');
   const H = (n: string) => n.repeat(64).slice(0, 64); const G = 'a'.repeat(40);
-  const temp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'a9-36-review1-'));
+  const temp = () => temporaryDirectory(path.join(os.tmpdir(), 'a9-36-review1-'));
   const clone = (value: any) => JSON.parse(JSON.stringify(value));
   const setPath = (value: any, pathText: string, replacement: any) => { const copy = clone(value); const keys = pathText.split('.'); let node = copy; for (const key of keys.slice(0, -1)) node = node[key]; if (replacement === undefined) delete node[keys[keys.length - 1]]; else node[keys[keys.length - 1]] = replacement; return copy; };
   const judge = (fn: (facts: any) => any, good: any, mutations: Array<[string, any]>) => {
@@ -1721,7 +1731,7 @@ describe('Alpha2 supplemental public continuation schema', () => {
   });
 
   test('workspace comparison detects changed bytes and retains an empty-directory change', () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a2-schema-facts-'));
+    const root = temporaryDirectory(path.join(os.tmpdir(), 'a2-schema-facts-'));
     fs.writeFileSync(path.join(root, 'file.txt'), 'before');
     const before = driver.supplementalWorkspaceFacts(root);
     fs.writeFileSync(path.join(root, 'file.txt'), 'after!');
@@ -1768,7 +1778,7 @@ describe('Alpha2 supplemental public continuation schema', () => {
 const RUN_ID = '3f1c2a52-6b0e-4c1e-9f5e-0d7b8a1c2e44';
 const TARGET = { machine_name: 'TEST-ONLY-HOST', account_name: 'TEST-ONLY\\runner', account_sid: 'S-1-5-21-1-2-3-1001', integrity_level: 'Medium', session_id: 1, elevated: false, in_job: false };
 const sha = (value: string | Buffer) => crypto.createHash('sha256').update(value).digest('hex');
-const temp = (label: string) => fs.mkdtempSync(path.join(os.tmpdir(), `a9-batch2-${label}-`));
+const temp = (label: string) => temporaryDirectory(path.join(os.tmpdir(), `a9-batch2-${label}-`));
 // A process listing is two queries: the table (wmic_processes) and the command lines (wmic_process_commands, /format:list, printed on Win7 with
 // CR CR LF line ends; rehearsal 11 R1). answers() serves both from one place; any other command gets an empty success.
 const commandLineList = (entries: Array<[number, string]> = [[304, '\\SystemRoot\\System32\\smss.exe']]) => ({ status: 0, error: null, stderr: '',
@@ -6946,7 +6956,7 @@ describe('A9-39 phase 2 collection boundaries', () => {
     expect((await smoke.phase2PostExit(pre, sid, answer(true), async () => {})).reason).toBe('PROCESS_RESIDUE');
   });
   test('the run scanner covers new encoded credentials in SQLite bytes and UTF-16LE and keeps only the exact pre-registration input exception', () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a939-scan-'));
+    const root = temporaryDirectory(path.join(os.tmpdir(), 'a939-scan-'));
     const c = fixtures.secretCredentials(); const value = fixtures.secretForm(c.username + ':' + c.password, 'base64', 'latin1');
     fs.writeFileSync(path.join(root, 'state.sqlite'), value, 'utf8');
     fs.writeFileSync(path.join(root, 'projection.json'), fixtures.secretForm(c.username + ':' + c.password, 'base64url'), 'utf16le');
@@ -6959,7 +6969,7 @@ describe('A9-39 phase 2 collection boundaries', () => {
     const changed = smoke.scanRun(root, fixtures.testOnlySecret()); expect(changed.controlled_inputs).toHaveLength(0); expect(changed.findings).toHaveLength(3);
   });
   test('the real loopback fixture gates model chunk two and accepts only a fixed sample ID', async () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a939-http-')); const fixture = new smoke.ProviderFixture(path.join(root, 'requests.jsonl'));
+    const root = temporaryDirectory(path.join(os.tmpdir(), 'a939-http-')); const fixture = new smoke.ProviderFixture(path.join(root, 'requests.jsonl'));
     const port = await fixture.listen();
     const send = (pathname: string, body?: any) => new Promise<{ status: number; body: string }>((resolve, reject) => {
       const req = http.request({ hostname: '127.0.0.1', port, path: pathname, method: body ? 'POST' : 'GET' }, (res) => {
@@ -6991,7 +7001,7 @@ describe('A9-39 phase 2 collection boundaries', () => {
 
 
 test('A9-39 ordinary packaged modes derive identity from the candidate fixtures without the new-mode override', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a939-identity-')); fs.mkdirSync(path.join(root, 'validation'));
+  const root = temporaryDirectory(path.join(os.tmpdir(), 'a939-identity-')); fs.mkdirSync(path.join(root, 'validation'));
   fs.copyFileSync(path.join(releaseDir, 'a9-batch2-fixtures.cjs'), path.join(root, 'validation/a9-batch2-fixtures.cjs'));
   const candidate = process.env.A9_BATCH2_CANDIDATE_ROOT; const override = process.env.A9_BATCH2_FIXTURES;
   try { process.env.A9_BATCH2_CANDIDATE_ROOT = root; delete process.env.A9_BATCH2_FIXTURES;
@@ -7015,7 +7025,7 @@ describe('ADR-0264 scoped cleanup authority', () => {
       SessionId: '2', CreationDate: stamp(second) };
   }
   function harness(extras: any[] = [], patch: any = {}) {
-    const attemptDir = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-cleanup-TEST_ONLY-')); dirs.push(attemptDir);
+    const attemptDir = temporaryDirectory(path.join(os.tmpdir(), 'a9-cleanup-TEST_ONLY-')); dirs.push(attemptDir);
     // Real request layout: sibling candidate (p) and evidence (e) roots inside the run container.
     const container = 'C:\\A9-DEV\\run\\01234567';
     const root = patch.runRoot || `${container}\\e`;

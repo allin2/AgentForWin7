@@ -3,6 +3,16 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 
+const temporaryRoots: string[] = [];
+function temporaryDirectory(prefix: string) {
+  const root = fs.mkdtempSync(prefix);
+  temporaryRoots.push(root);
+  return root;
+}
+afterEach(() => {
+  for (const root of temporaryRoots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
+});
+
 const continuation = { turnId: 'new-turn', taskId: 'task', interruptedTurnId: 'old-turn', recoveryRevision: 'a'.repeat(64), unknownPaths: ['中文 文件.txt'], opaqueUnknown: false };
 function scenario(calls: Array<{ name: string; args: any }>, options: { readFailure?: boolean; auditFailure?: boolean; budget?: number; instructions?: any; readError?: any; readResult?: any; listError?: any; auditEventFailure?: string; platform?: 'win32' | 'posix'; caseInsensitive?: boolean; workspaceRoot?: string; onRead?: () => void } = {}) {
   let round = 0;
@@ -14,7 +24,7 @@ function scenario(calls: Array<{ name: string; args: any }>, options: { readFail
   }) };
   const workspaceService: any = { read: jest.fn(async () => { options.onRead?.(); if (options.readError) throw options.readError; if (options.readFailure) throw new Error('read failed'); return options.readResult || { content: 'current facts' }; }), write: jest.fn(async () => ({ written: true })), list: jest.fn(async () => { if (options.listError) throw options.listError; return { entries: [] }; }), search: jest.fn(async () => ({ matches: [] })) };
   const runner = { execute: jest.fn(async () => ({ exitCode: 0, stdout: '', stderr: '', durationMs: 1, timedOut: false })) };
-  const loop = new A9AgentLoop({ workspaceRoot: options.workspaceRoot || fs.mkdtempSync(path.join(os.tmpdir(), 'a9-32-core-')), recoveryPathPlatform: options.platform, recoveryPathCaseInsensitive: options.caseInsensitive, permissionMode: PermissionMode.FULL_ACCESS, provider, workspaceService, runner,
+  const loop = new A9AgentLoop({ workspaceRoot: options.workspaceRoot || temporaryDirectory(path.join(os.tmpdir(), 'a9-32-core-')), recoveryPathPlatform: options.platform, recoveryPathCaseInsensitive: options.caseInsensitive, permissionMode: PermissionMode.FULL_ACCESS, provider, workspaceService, runner,
     contextBudgetChars: options.budget, loadProjectInstructions: () => options.instructions || { status: 'missing', bytes: 0 },
     onAuditEvent: (event) => { events.push(event); if ((options.auditFailure && event.type === 'turn_started') || options.auditEventFailure === event.type) throw new Error('audit failed'); } });
   return { loop, provider, workspaceService, runner, events };
@@ -70,14 +80,14 @@ it.each([{ outsideWorkspace: true }, { error: 'failure' }, { timedOut: true }, {
   await f.loop.runTurn('continue', { continuation }); expect(f.workspaceService.write).not.toHaveBeenCalled();
 });
 it.each(['read', 'list'])('tool_end audit failure on %s cannot release recovery', async (name) => {
-  const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-32-audit-'));
+  const workspaceRoot = temporaryDirectory(path.join(os.tmpdir(), 'a9-32-audit-'));
   fs.mkdirSync(path.join(workspaceRoot, 'dir'));
   const f = scenario([{ name, args: { path: name === 'read' ? 'missing' : 'dir' } }, { name: 'write', args: { path: 'other', content: 'unsafe' } }], { workspaceRoot, auditEventFailure: 'tool_end', ...(name === 'read' ? { readError: Object.assign(new Error('absent'), { code: 'ENOENT' }) } : {}) });
   const result = await f.loop.runTurn('continue', { continuation: { ...continuation, unknownPaths: [name === 'read' ? 'missing' : 'dir'] } });
   expect(result.auditIncomplete).toBeDefined(); expect(f.workspaceService.write).not.toHaveBeenCalled();
 });
 it('directory scan permissions are checked even when Workspace list reports success', async () => {
-  const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-32-directory-'));
+  const workspaceRoot = temporaryDirectory(path.join(os.tmpdir(), 'a9-32-directory-'));
   fs.mkdirSync(path.join(workspaceRoot, 'dir'));
   const scan = jest.spyOn(fs.promises, 'readdir').mockRejectedValue(Object.assign(new Error('permission denied'), { code: 'EACCES' }));
   try {
@@ -87,7 +97,7 @@ it('directory scan permissions are checked even when Workspace list reports succ
   } finally { scan.mockRestore(); }
 });
 it.each(['../outside-missing', 'link/missing'])('outside or symlink escape ENOENT stays closed: %s', async (target) => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-32-boundary-')), workspaceRoot = path.join(root, 'workspace');
+  const root = temporaryDirectory(path.join(os.tmpdir(), 'a9-32-boundary-')), workspaceRoot = path.join(root, 'workspace');
   fs.mkdirSync(workspaceRoot); fs.symlinkSync(root, path.join(workspaceRoot, 'link'));
   const f = scenario([{ name: 'read', args: { path: target } }, { name: 'write', args: { path: 'other', content: 'unsafe' } }], { workspaceRoot, readError: Object.assign(new Error('absent'), { code: 'ENOENT' }) });
   await f.loop.runTurn('continue', { continuation: { ...continuation, unknownPaths: [target] } });
@@ -114,7 +124,7 @@ it.each([
   expect(f.workspaceService.write).toHaveBeenCalledTimes(allowed ? 1 : 0);
 });
 it('absolute workspace paths match relative paths; explicit case-fold override is respected', async () => {
-  const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-32-path-'));
+  const workspaceRoot = temporaryDirectory(path.join(os.tmpdir(), 'a9-32-path-'));
   const f = scenario([{ name: 'read', args: { path: path.join(workspaceRoot, 'note.txt') } }, { name: 'write', args: { path: 'other', content: 'fresh' } }], { workspaceRoot });
   await f.loop.runTurn('continue', { continuation: { ...continuation, unknownPaths: ['./note.txt'] } });
   expect(f.workspaceService.write).toHaveBeenCalledTimes(1);
@@ -154,7 +164,7 @@ it('reading the affected path clears only that path; the opaque gate waits for a
   expect(gateBlocks(f)).toBe(1);
 });
 it.each(['ENOENT', 'ENOTDIR'])('%s below a file parent observes the exact target as absent', async (code) => {
-  const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-32-notdir-'));
+  const workspaceRoot = temporaryDirectory(path.join(os.tmpdir(), 'a9-32-notdir-'));
   fs.writeFileSync(path.join(workspaceRoot, 'file.txt'), 'x');
   const f = scenario([{ name: 'read', args: { path: 'file.txt/child' } }, { name: 'write', args: { path: 'other.txt', content: 'fresh' } }],
     { workspaceRoot, readError: Object.assign(new Error(code), { code }) });
@@ -162,7 +172,7 @@ it.each(['ENOENT', 'ENOTDIR'])('%s below a file parent observes the exact target
   expect(f.workspaceService.write).toHaveBeenCalledTimes(1);
 });
 it('a dangling symlink is not an absent file even when the read reports ENOENT', async () => {
-  const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-32-dangling-'));
+  const workspaceRoot = temporaryDirectory(path.join(os.tmpdir(), 'a9-32-dangling-'));
   fs.symlinkSync(path.join(workspaceRoot, 'nowhere'), path.join(workspaceRoot, 'link'));
   const f = scenario([{ name: 'read', args: { path: 'link' } }, { name: 'write', args: { path: 'other.txt', content: 'unsafe' } }],
     { workspaceRoot, readError: Object.assign(new Error('absent'), { code: 'ENOENT' }) });
@@ -170,7 +180,7 @@ it('a dangling symlink is not an absent file even when the read reports ENOENT',
   expect(f.workspaceService.write).not.toHaveBeenCalled();
 });
 it('an ENOENT read of a file that actually exists does not observe it as absent', async () => {
-  const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-32-exists-'));
+  const workspaceRoot = temporaryDirectory(path.join(os.tmpdir(), 'a9-32-exists-'));
   fs.writeFileSync(path.join(workspaceRoot, 'exists.txt'), 'x');
   const f = scenario([{ name: 'read', args: { path: 'exists.txt' } }, { name: 'write', args: { path: 'other.txt', content: 'unsafe' } }],
     { workspaceRoot, readError: Object.assign(new Error('absent'), { code: 'ENOENT' }) });
@@ -186,7 +196,7 @@ it('a successful search does not release an opaque unknown Shell; a verified lis
   expect(gateBlocks(f)).toBe(1);
 });
 it('ENOTDIR below a symlink to an outside file stays closed', async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-32-notdir-link-')), workspaceRoot = path.join(root, 'workspace');
+  const root = temporaryDirectory(path.join(os.tmpdir(), 'a9-32-notdir-link-')), workspaceRoot = path.join(root, 'workspace');
   fs.mkdirSync(workspaceRoot); fs.writeFileSync(path.join(root, 'outside.txt'), 'x'); fs.symlinkSync(path.join(root, 'outside.txt'), path.join(workspaceRoot, 'link'));
   const f = scenario([{ name: 'read', args: { path: 'link/child' } }, { name: 'write', args: { path: 'other.txt', content: 'unsafe' } }],
     { workspaceRoot, readError: Object.assign(new Error('ENOTDIR'), { code: 'ENOTDIR' }) });

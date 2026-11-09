@@ -8,12 +8,17 @@ const CHUNK = 64 * 1024;
 const hash = (bytes: Buffer) => crypto.createHash('sha256').update(bytes).digest('hex');
 
 describe('A9-10 explicit encoding and bounded streaming read', () => {
-  // Keep this isolated fixture directory; never clean user/workspace paths.
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-read-streaming-'));
-  const target = path.join(root, '中文 空格 %#.txt');
+  let root: string, target: string;
   let service: A9WorkspaceService;
-  beforeEach(() => { service = new A9WorkspaceService(root); });
-  afterEach(() => { jest.restoreAllMocks(); });
+  beforeEach(() => {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-read-streaming-'));
+    target = path.join(root, '中文 空格 %#.txt');
+    service = new A9WorkspaceService(root);
+  });
+  afterEach(() => {
+    try { jest.restoreAllMocks(); }
+    finally { if (root) fs.rmSync(root, { recursive: true, force: true }); }
+  });
 
   function fixture(bytes: Buffer | string) {
     fs.writeFileSync(target, bytes, typeof bytes === 'string' ? 'utf8' : undefined);

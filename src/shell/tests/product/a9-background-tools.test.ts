@@ -257,10 +257,16 @@ it.each([false, true])('A9-35 still blocks unknown cleanup or real terminal audi
   } finally { f.close(); }
 });
 
+const consumerWorkspaces: string[] = [];
+afterEach(() => {
+  for (const workspace of consumerWorkspaces.splice(0)) fs.rmSync(workspace, { recursive: true, force: true });
+});
+
 // Load the same current compiled runner and adapter that the product loads.
 it.each(['preflight', 'confirmed', 'unknown'] as const)('A9-35 current-dist consumer preserves %s failure semantics', async (kind) => {
   const os = require('os');
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-built-consumer-'));
+  consumerWorkspaces.push(workspace);
   const f = await scenario(false, false, { workspace, builtRunner: true,
     ...(kind === 'preflight' ? { commandCwd: path.join(workspace, 'missing') } : { startFailure: kind }) });
   try {

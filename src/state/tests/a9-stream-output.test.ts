@@ -2,8 +2,21 @@
 import Database from 'better-sqlite3';
 import { A9PersistenceManager } from '../src/a9-persistence';
 
+const temporaryRoots: string[] = [];
+const databases: Array<InstanceType<typeof Database>> = [];
+function openDatabase(file: string, options: any = {}) {
+  const database = new Database(file, options);
+  databases.push(database);
+  return database;
+}
+afterEach(() => {
+  const fs = require('fs');
+  try { for (const database of databases.splice(0)) if ((database as any).open) database.close(); }
+  finally { for (const root of temporaryRoots.splice(0)) fs.rmSync(root, { recursive: true, force: true }); }
+});
+
 function setup() {
-  const opened = A9PersistenceManager.open({ databasePath: ':memory:', dataRoot: '/memory', openDatabase: () => new Database(':memory:') as any });
+  const opened = A9PersistenceManager.open({ databasePath: ':memory:', dataRoot: '/memory', openDatabase: () => openDatabase(':memory:') as any });
   if (opened.status !== 'ready') throw new Error(opened.status);
   const manager = opened.manager;
   manager.createConversation('conversation', '/workspace');
@@ -34,8 +47,9 @@ it.each([{ conversationId: 'wrong' }, { turnId: 'wrong' }, { outputSeq: 0 }, { r
 it('restores stable output facts from a reopened on-disk SQLite database without replay', () => {
   const fs = require('fs'); const os = require('os'); const path = require('path');
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-stream-recovery-'));
+  temporaryRoots.push(root);
   const file = path.join(root, 'events.db');
-  const open = () => A9PersistenceManager.open({ databasePath: file, dataRoot: root, openDatabase: (p) => new Database(p) as any });
+  const open = () => A9PersistenceManager.open({ databasePath: file, dataRoot: root, openDatabase: (p) => openDatabase(p) as any });
   const first = open(); if (first.status !== 'ready') throw new Error(first.status);
   first.manager.createConversation('c', '/workspace');
   const data = { schemaVersion: 1, conversationId: 'c', taskId: 'task', turnId: 'turn', toolCallId: 'call', requestId: 'req', stream: 'stdout', outputSeq: 1, sourceSeqThrough: 1, text: 'persisted', rawBytesRead: 9, truncated: false };

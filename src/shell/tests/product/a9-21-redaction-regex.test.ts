@@ -222,23 +222,24 @@ describe('A9-21 M1b: redactUrlUserinfo performance on 1 MiB inputs', () => {
 describe('A9-21 M1b: boundedDiagnosticText via persistence failure path', () => {
   function runWithThrowingOpenDatabase(errorMessage: string) {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-21-m1b-'));
-    const workspaceRoot = path.join(root, 'ws');
-    const dataRoot = path.join(root, 'data');
-    fs.mkdirSync(workspaceRoot, { recursive: true });
-    fs.mkdirSync(dataRoot, { recursive: true });
-    const started = msNow();
-    const runtime = createA9AgentRuntime({
-      workspaceRoot,
-      dataRoot,
-      ownerId: `m1b-${process.pid}`,
-      openDatabase: () => {
-        throw new Error(errorMessage);
-      },
-    });
-    const elapsed = msNow() - started;
-    const detail = String(runtime.getSnapshot().diagnostics?.detail || '');
-    fs.rmSync(root, { recursive: true, force: true });
-    return { elapsed, detail };
+    try {
+      const workspaceRoot = path.join(root, 'ws');
+      const dataRoot = path.join(root, 'data');
+      fs.mkdirSync(workspaceRoot, { recursive: true });
+      fs.mkdirSync(dataRoot, { recursive: true });
+      const started = msNow();
+      const runtime = createA9AgentRuntime({
+        workspaceRoot,
+        dataRoot,
+        ownerId: `m1b-${process.pid}`,
+        openDatabase: () => {
+          throw new Error(errorMessage);
+        },
+      });
+      const elapsed = msNow() - started;
+      const detail = String(runtime.getSnapshot().diagnostics?.detail || '');
+      return { elapsed, detail };
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
   }
 
   it('credential at start: redacts, bounds length, finishes within 2s on 1 MiB error', () => {

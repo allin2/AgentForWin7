@@ -6,8 +6,21 @@ import { execFileSync } from 'child_process';
 import Database from 'better-sqlite3';
 import { A9PersistenceManager } from '../src/a9-persistence';
 
+const temporaryRoots: string[] = [];
+const databases: Array<InstanceType<typeof Database>> = [];
+function openDatabase(file: string, options: any = {}) {
+  const database = new Database(file, options);
+  databases.push(database);
+  return database;
+}
+afterEach(() => {
+  const fs = require('fs');
+  try { for (const database of databases.splice(0)) if ((database as any).open) database.close(); }
+  finally { for (const root of temporaryRoots.splice(0)) fs.rmSync(root, { recursive: true, force: true }); }
+});
+
 function open(file = ':memory:') {
-  const result = A9PersistenceManager.open({ databasePath: file, dataRoot: file === ':memory:' ? '/memory' : path.dirname(file), openDatabase: (p, options) => new Database(p, options) as any });
+  const result = A9PersistenceManager.open({ databasePath: file, dataRoot: file === ':memory:' ? '/memory' : path.dirname(file), openDatabase: (p, options) => openDatabase(p, options) as any });
   if (result.status !== 'ready') throw new Error(result.status);
   return result.manager;
 }
@@ -92,6 +105,7 @@ it.each(['active', 'pending', 'archived', 'not-current', 'wrong-workspace', 'sta
 });
 it('preserves committed dedup through a separate process exiting before dispatch; restart never replays', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-32-state-')), file = path.join(root, 'state.db');
+  temporaryRoots.push(root);
   const first = open(file), fact = seed(first); first.db.close();
   const code = `const {A9PersistenceManager}=require(process.argv[1]);const Database=require(process.argv[2]);const m=A9PersistenceManager.open({databasePath:process.argv[3],dataRoot:process.argv[4],openDatabase:p=>new Database(p)}).manager;m.requestTaskContinuation('/workspace',JSON.parse(process.argv[5]),'crash-turn','safe');process.exit(0);`;
   execFileSync(process.execPath, ['-e', code, path.resolve(__dirname, '../dist/a9-persistence.js'), require.resolve('better-sqlite3'), file, root, JSON.stringify(fact)]);

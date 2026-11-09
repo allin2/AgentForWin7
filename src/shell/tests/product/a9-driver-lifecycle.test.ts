@@ -296,8 +296,13 @@ describe('WIN7-35 Driver entry lifecycle and exit contracts', () => {
 });
 
 describe('Node subprocess lifecycle counter-examples with Electron mocks', () => {
+  const temporaryRoots: string[] = [];
+  afterEach(() => {
+    for (const root of temporaryRoots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
+  });
   test('Node mock counter-example 1: loading driver when app is already ready exits non-zero with A9_W35_DRIVER_PRODUCT_ENTRY_LATE_LOAD', () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-counter-1-'));
+    temporaryRoots.push(tmpDir);
     const reportOut = path.join(tmpDir, 'late-load-report.json');
 
     // Create a standalone harness script that sets up an already-ready electron mock and requires driver
@@ -355,11 +360,11 @@ try {
     expect(report.error).toContain('A9_W35_DRIVER_PRODUCT_ENTRY_LATE_LOAD');
     expect(report.cases.some((c: any) => c.id === 'A9_W35_DRIVER_PRODUCT_ENTRY_LATE_LOAD')).toBe(true);
 
-    fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
   test('Node mock counter-example 2: forced stage ERROR returns non-zero after the mocked product will-quit cleanup', () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-counter-2-'));
+    temporaryRoots.push(tmpDir);
     const reportOut = path.join(tmpDir, 'forced-error-report.json');
     const cleanupMarker = path.join(tmpDir, 'mock-product-cleanup.txt');
 
@@ -439,6 +444,5 @@ require(${JSON.stringify(driverSourcePath)});
     expect(report.error).toContain('A9_FORCED_STAGE_ERROR_FOR_TEST');
     expect(fs.readFileSync(cleanupMarker, 'utf8')).toBe('cleanup-ran');
 
-    fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 });

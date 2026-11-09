@@ -4,7 +4,16 @@ import * as path from 'path';
 import { A9WorkspaceService, readOfficeFile, createOfficeCopy } from '../../src';
 
 describe('Office Lite file boundary and checkpoint', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-office-files-'));
+  let root: string;
+  let outside: string | undefined;
+  beforeEach(() => { root = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-office-files-')); });
+  afterEach(() => {
+    try { if (root) fs.rmSync(root, { recursive: true, force: true }); }
+    finally {
+      if (outside) fs.rmSync(outside, { recursive: true, force: true });
+      outside = undefined;
+    }
+  });
   it('creates a complete new file on a Chinese path and participates in durable undo', async () => {
     const service = new A9WorkspaceService(root);
     const bytes = Buffer.from([0x50, 0x4b, 3, 4]);
@@ -23,7 +32,7 @@ describe('Office Lite file boundary and checkpoint', () => {
     expect(fs.readFileSync(path.join(root, 'source.docx'), 'utf8')).toBe('original');
   });
   it('rejects outside paths, reparse escapes, folders and pre-cancelled reads', async () => {
-    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-office-outside-'));
+    outside = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-office-outside-'));
     fs.writeFileSync(path.join(outside, 'x.docx'), 'secret');
     fs.symlinkSync(outside, path.join(root, 'escape'));
     await expect(readOfficeFile(root, 'escape/x.docx')).rejects.toHaveProperty('code', 'A9_OFFICE_OUTSIDE_WORKSPACE');

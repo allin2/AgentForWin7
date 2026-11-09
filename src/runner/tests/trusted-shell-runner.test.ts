@@ -3,8 +3,20 @@ import {
   TrustedShellRequest,
 } from '../src';
 
+const temporaryRoots: string[] = [];
+afterEach(() => {
+  const fs = require('fs');
+  for (const root of temporaryRoots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
+});
+
 describe('A9-02: TrustedShellRunner', () => {
-  const runner = new TrustedShellRunner();
+  let runner: TrustedShellRunner;
+  beforeEach(() => {
+    const fs = require('fs'); const os = require('os'); const path = require('path');
+    const logDir = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-shell-runner-'));
+    temporaryRoots.push(logDir);
+    runner = new TrustedShellRunner({ logDir });
+  });
 
   it('executes simple echo command and captures stdout', async () => {
     const result = await runner.execute({
@@ -76,6 +88,7 @@ describe('A9-30 Runner secure projection', () => {
   it('uses one bounded redacted projection for callbacks, logs and final result', async () => {
     const fs = require('fs'); const os = require('os'); const path = require('path');
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-stream-runner-'));
+    temporaryRoots.push(dir);
     const secret = 'sentinel-stream-value';
     const text = `tick\napi_key=${secret}\n中文\n`;
     let complete = false;
@@ -116,6 +129,7 @@ it('A9-30 real child protocol transport exposes 2-second ticks before terminal',
   const fs = require('fs'); const os = require('os'); const path = require('path');
   const { StdioHelperTransport } = require('../src/native-transport');
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-native-protocol-child-'));
+  temporaryRoots.push(root);
   const script = path.join(root, 'helper-fixture');
   // This is a live stdio protocol peer, not Windows native execution evidence.
   fs.writeFileSync(script, `#!${process.execPath}

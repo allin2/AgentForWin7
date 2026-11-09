@@ -6,13 +6,30 @@ const realWorkspace = require('../../../workspace/dist');
 const { processOffice } = require('../../product/office-lite-engine');
 
 describe('Office Worker lifecycle', () => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-office-worker-'));
-  const script = path.join(directory, 'pending.js');
-  fs.writeFileSync(script, "const {parentPort}=require('worker_threads');parentPort.postMessage({ok:true,result:{units:[]}});setInterval(()=>{},1000);", 'utf8');
-  const make = (timeoutMs = 3000) => createOfficeService({ workspaceRoot: directory, timeoutMs, workerPath: script,
-    workspace: { officePath: () => ({}), readOfficeFile: async () => ({ path: 'file.docx', sha256: 'a'.repeat(64), bytes: 2, buffer: Buffer.from('PK') }) },
-    workspaceService: { writeDocumentCopy: jest.fn() },
+  let directory: string, script: string;
+  const directories: string[] = [];
+  const services = new Set<ReturnType<typeof createOfficeService>>();
+  beforeEach(() => {
+    directory = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-office-worker-'));
+    directories.push(directory);
+    script = path.join(directory, 'pending.js');
+    fs.writeFileSync(script, "const {parentPort}=require('worker_threads');parentPort.postMessage({ok:true,result:{units:[]}});setInterval(()=>{},1000);", 'utf8');
   });
+  afterEach(async () => {
+    try { for (const service of services) await service.close(); }
+    finally {
+      services.clear();
+      for (const root of directories.splice(0)) fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+  const make = (timeoutMs = 3000) => {
+    const service = createOfficeService({ workspaceRoot: directory, timeoutMs, workerPath: script,
+      workspace: { officePath: () => ({}), readOfficeFile: async () => ({ path: 'file.docx', sha256: 'a'.repeat(64), bytes: 2, buffer: Buffer.from('PK') }) },
+      workspaceService: { writeDocumentCopy: jest.fn() },
+    });
+    services.add(service);
+    return service;
+  };
   it('waits for exit after a message, terminates on timeout and can start another operation', async () => {
     const service = make(50);
     await expect(service.read({ path: 'file.docx' })).rejects.toHaveProperty('code', 'A9_OFFICE_TIMEOUT');
@@ -41,8 +58,10 @@ describe('Office Worker lifecycle', () => {
 
   it('binds a rewrite to source hash, retains the original, refuses ordinary/changed sources and existing outputs', async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'office-rewrite-'));
+    directories.push(root);
     const workspaceService = new realWorkspace.A9WorkspaceService(root);
     const service = createOfficeService({ workspaceRoot: root, workspace: realWorkspace, workspaceService });
+    services.add(service);
     const content = { schemaVersion: 1, format: 'docx', blocks: [{ type: 'paragraph', text: 'original' }] };
     const bytes = (await processOffice({ action: 'write', format: 'docx', content })).buffer;
     fs.writeFileSync(path.join(root, 'source.docx'), bytes);

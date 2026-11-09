@@ -231,8 +231,14 @@ function fakeSafeStorage() {
   };
 }
 
+const temporaryRoots: string[] = [];
+afterEach(() => {
+  for (const root of temporaryRoots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
+});
+
 function makeEnv() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-f5-'));
+  temporaryRoots.push(root);
   const workspaceRoot = path.join(root, 'ws');
   const dataRoot = path.join(root, 'data');
   fs.mkdirSync(workspaceRoot, { recursive: true });

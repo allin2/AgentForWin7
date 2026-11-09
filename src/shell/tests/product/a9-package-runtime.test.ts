@@ -62,8 +62,8 @@ describe('A9 v3 package runtime', () => {
 
   it('is inert for source launches without a package descriptor', () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-source-runtime-'));
-    expect(loadA9PackageRuntime({ productRoot: root })).toBeNull();
-    fs.rmSync(root, { recursive: true, force: true });
+    try { expect(loadA9PackageRuntime({ productRoot: root })).toBeNull(); }
+    finally { fs.rmSync(root, { recursive: true, force: true }); }
   });
 
   it('binds the native closure and documented LOCALAPPDATA root', () => {

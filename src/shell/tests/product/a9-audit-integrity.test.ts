@@ -11,6 +11,10 @@ import * as Core from '../../../core/src';
 import * as State from '../../../state/src/a9-persistence';
 
 describe('A9-29 real Runtime and SQLite audit failure', () => {
+  const logDirectories: string[] = [];
+  afterEach(() => {
+    for (const directory of logDirectories.splice(0)) fs.rmSync(directory, { recursive: true, force: true });
+  });
   async function scenario(failedEvent?: string, failAll = false, streaming = false) {
     const disk = new Map<string, unknown>();
     const memoryFs = { mkdirSync() {}, existsSync: (p: string) => disk.has(p),
@@ -62,8 +66,12 @@ describe('A9-29 real Runtime and SQLite audit failure', () => {
     }) : undefined;
     const identity = { canonicalPath: 'C:\\Windows\\System32\\cmd.exe', sha256: 'a'.repeat(64), fileId: 'fixture', version: '6.1.7601' };
     class StreamingRunner extends RunnerModule.TrustedShellRunner {
-      constructor(options: any) { super({ ...options, platform: 'win32', logDir: fs.mkdtempSync(path.join(require('os').tmpdir(), 'a9-audit-pipe-')),
-        resolveShellIdentity: () => identity, getConfiguredShellIdentity: () => identity }); }
+      constructor(options: any) {
+        const logDir = fs.mkdtempSync(path.join(require('os').tmpdir(), 'a9-audit-pipe-'));
+        logDirectories.push(logDir);
+        super({ ...options, platform: 'win32', logDir,
+          resolveShellIdentity: () => identity, getConfiguredShellIdentity: () => identity });
+      }
       execute(request: any) { return super.execute({ ...request, shellKind: 'cmd', shellPath: identity.canonicalPath }); }
     }
     class Provider { async sendStreamRequest() { return ++requests === 1

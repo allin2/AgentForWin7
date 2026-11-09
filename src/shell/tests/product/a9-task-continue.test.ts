@@ -9,12 +9,42 @@ import Database from 'better-sqlite3';
 const { createA9AgentRuntime } = require('../../product/a9-agent-runtime');
 const { createA9ProductRequestHandler } = require('../../product/a9-product-ipc');
 const seed = (f: any, tool: string, args: any) => f.db.prepare("INSERT INTO a9_events(session_id,turn_id,kind,event_type,payload_json,created_at) VALUES(?,'old-turn','tool','tool_start',?,'2026-01-01')").run(f.fact().conversationId, JSON.stringify({ data: { toolName: tool, callId: 'unknown-' + tool, args } }));
+const fixtureCleanups = new Set<() => Promise<void>>();
+afterEach(async () => {
+  for (const close of fixtureCleanups) await close();
+});
+
 async function setup(options: { fail?: boolean; hold?: boolean; budget?: boolean; unconfigured?: boolean; sequence?: Array<{ name: string; args: any }> } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-32-runtime-')), workspaceRoot = path.join(root, '中文 workspace'), dataRoot = path.join(root, 'data');
+  let runtime: any, server: http.Server;
+  let db: InstanceType<typeof Database> | undefined;
+  const databases: Array<InstanceType<typeof Database>> = [];
+  const openDatabase = (file: string, options: any = {}) => {
+    const database = new Database(file, options);
+    databases.push(database);
+    return database;
+  };
+  const pending: http.ServerResponse[] = [];
+  const close = async () => {
+    try {
+      for (const response of pending) response.destroy();
+      await runtime?.shutdown();
+    } finally {
+      try { for (const database of databases) if ((database as any).open) database.close(); }
+      finally {
+        try {
+          if (server?.listening) await new Promise<void>((resolve) => server.close(() => resolve()));
+        } finally {
+          fs.rmSync(root, { recursive: true, force: true });
+          fixtureCleanups.delete(close);
+        }
+      }
+    }
+  };
+  fixtureCleanups.add(close);
   fs.mkdirSync(workspaceRoot); fs.mkdirSync(dataRoot); fs.writeFileSync(path.join(workspaceRoot, 'note.txt'), 'current fact\n', 'utf8');
   const requests: any[] = []; let fail = options.fail === true, hold = options.hold === true;
-  const pending: http.ServerResponse[] = [];
-  const server = http.createServer((req, res) => {
+  server = http.createServer((req, res) => {
     let body = ''; req.on('data', (chunk) => { body += chunk.toString('utf8'); }); req.on('end', () => {
       const payload = JSON.parse(body); requests.push(payload);
       if (fail) { res.writeHead(401); res.end('{}'); return; }
@@ -27,11 +57,11 @@ async function setup(options: { fail?: boolean; hold?: boolean; budget?: boolean
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const baseUrl = `http://127.0.0.1:${(server.address() as any).port}`;
-  const make = () => createA9AgentRuntime({ workspaceRoot, dataRoot, ownerId: `a9-32-${process.pid}-${Math.random()}`, openDatabase: (p: string, opts: any) => new Database(p, opts) });
-  let runtime = make(); runtime.setMode('full_access');
+  const make = () => createA9AgentRuntime({ workspaceRoot, dataRoot, ownerId: `a9-32-${process.pid}-${Math.random()}`, openDatabase });
+  runtime = make(); runtime.setMode('full_access');
   if (!options.unconfigured) await runtime.configureProvider({ baseUrl, model: 'fixture', skipProbe: true, ...(options.budget ? { contextBudgetChars: 16000 } : {}) });
   const conversationId = runtime.getSnapshot().activeConversationId;
-  const db = new Database(path.join(dataRoot, 'a9-state.db'));
+  db = openDatabase(path.join(dataRoot, 'a9-state.db'));
   db.prepare('INSERT INTO a9_tasks(task_id,session_id,status,created_at,updated_at) VALUES(?,?,?,?,?)').run('task', conversationId, 'active', '2026-01-01', '2026-01-01');
   db.prepare('INSERT INTO a9_turns(turn_id,task_id,session_id,status,outcome_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?)').run('old-turn', 'task', conversationId, 'active', '{}', '2026-01-01', '2026-01-01');
   db.prepare("INSERT INTO a9_events(session_id,turn_id,kind,event_type,payload_json,created_at) VALUES(?,?, 'model','conversation.request',?,?)").run(conversationId, null, JSON.stringify({ taskId: 'task', requestPrompt: '修复 note.txt' }), '2026-01-01');
@@ -46,7 +76,7 @@ async function setup(options: { fail?: boolean; hold?: boolean; budget?: boolean
     setFail: (value: boolean) => { fail = value; },
     release: () => { hold = false; for (const response of pending.splice(0)) response.end(`data: ${JSON.stringify({ choices: [{ delta: { content: 'done' }, finish_reason: 'stop' }] })}\n\ndata: [DONE]\n\n`); },
     restart: async () => { await runtime.shutdown(); runtime = make(); },
-    close: async () => { for (const response of pending) response.destroy(); await runtime.shutdown(); db.close(); await new Promise<void>((resolve) => server.close(() => resolve())); }, ipc,
+    close, ipc,
   };
 }
 it('restart and refresh send zero requests; concurrent duplicate/restart return the same new Turn', async () => {
