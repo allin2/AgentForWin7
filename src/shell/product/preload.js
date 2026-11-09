@@ -30,7 +30,7 @@ function a8Request(action, sessionId, payload) {
 
 function a9Request(action, payload, scope) {
   return ipcRenderer.invoke('product:a9-request', {
-    schemaVersion: scope || ['a9.workspace.list', 'a9.workspace.activate', 'a9.workspace.close'].includes(action) || action === 'a9.snapshot.get' ? 9 : action === 'a9.queue.update' ? 8 : 7,
+    schemaVersion: scope || ['a9.workspace.list', 'a9.workspace.activate', 'a9.workspace.close', 'a9.workdir.start'].includes(action) || action === 'a9.snapshot.get' ? 9 : action === 'a9.queue.update' ? 8 : 7,
     action,
     payload: payload || {},
     ...(scope ? { scope } : {}),
@@ -56,6 +56,12 @@ function createA9Api(scope) {
     activateWorkspace: values => a9Request('a9.workspace.activate', values),
     closeWorkspace: workspaceId => a9Request('a9.workspace.close', { workspaceId, confirmed: true }),
     forScope: scope => createA9Api(scope),
+    startDefaultConversation: (prompt, mode) => a9Request('a9.workdir.start', { prompt, ...(mode !== undefined ? { mode } : {}) }),
+    getWorkdir: () => boundRequest('a9.workdir.get', {}),
+    openWorkdir: () => boundRequest('a9.workdir.open', {}),
+    renameWorkdir: name => boundRequest('a9.workdir.rename', { name }),
+    linkWorkdir: () => boundRequest('a9.workdir.link', {}),
+    listWorkspaceDirectory: path => boundRequest('a9.workspace.browse', { path: path || '' }),
     queryConversation: (values) => boundRequest('a9.conversation.query', values || {}),
     setMode: (mode) => boundRequest('a9.mode.set', { mode }),
     configureProvider: (values) => boundRequest('a9.provider.configure', values),

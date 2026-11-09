@@ -8,6 +8,7 @@ const {
   app,
   BrowserWindow,
   dialog,
+  shell,
   ipcMain,
   safeStorage,
   nativeImage,
@@ -33,7 +34,7 @@ const {
 const { createDesktopRequestHandler } = require('./desktop-ipc');
 const { createA8ProductRequestHandler } = require('./a8-product-ipc');
 const { createA9ProductRequestHandler } = require('./a9-product-ipc');
-const { createA9AgentRuntime } = require('./a9-agent-runtime');
+const { createA9AgentRuntime, openA9RuntimePersistence, normalizeConversationTitle } = require('./a9-agent-runtime');
 const { createA9WorkspaceRegistry } = require('./a9-workspace-registry');
 const { loadA9PackageRuntime } = require('./a9-package-runtime');
 const { createActiveWorkspaceStore } = require('./active-workspace-store');
@@ -950,7 +951,13 @@ ipcMain.handle('product:a8-request', withStartupBarrier(createA8ProductRequestHa
 })));
 
 // A9 Trusted Agent Runtime（A9-06）：Renderer 只经此窄 IPC 访问。
-const a9Workspaces = createA9WorkspaceRegistry({ createRuntime: createWorkspaceRuntime });
+const a9Workspaces = createA9WorkspaceRegistry({
+  createRuntime: createWorkspaceRuntime,
+  getDocumentsPath: () => app.getPath('documents'),
+  onActivate: workspacePath => { if (activeWorkspaceStore) activeWorkspaceStore.save(workspacePath); },
+  normalizeConversationTitle,
+  openPersistence: () => openA9RuntimePersistence(workspaceRuntimeOptions()),
+});
 // F1：未选择工作区时的结构化哨兵（不创建 runtime，不落 userData）。
 const A9_WORKSPACE_REQUIRED_SENTINEL = Object.freeze({
   __a9WorkspaceRequired: true,
@@ -976,10 +983,8 @@ async function getOrCreateA9Runtime() {
   return a9Workspaces.activate(desiredWorkspace).runtime;
 }
 
-function createWorkspaceRuntime(desiredWorkspace, hostOptions) {
-  return createA9AgentRuntime({
-    ...hostOptions,
-    workspaceRoot: desiredWorkspace,
+function workspaceRuntimeOptions() {
+  return {
     dataRoot: getA9DataRoot(),
     ...(fs.existsSync(path.join(app.getPath('userData'), 'state', 'agent-events-v2.db'))
       ? { a8DatabasePath: path.join(app.getPath('userData'), 'state', 'agent-events-v2.db') }
@@ -1004,13 +1009,24 @@ function createWorkspaceRuntime(desiredWorkspace, hostOptions) {
     ...(process.env.WIN7AGENT_A9_ELECTRON_SQLITE
       ? { electronSqliteRoot: process.env.WIN7AGENT_A9_ELECTRON_SQLITE }
       : a9PackageRuntime ? { electronSqliteRoot: a9PackageRuntime.storageRoot } : {}),
-  });
+  };
+}
+function createWorkspaceRuntime(desiredWorkspace, hostOptions) {
+  return createA9AgentRuntime({ ...workspaceRuntimeOptions(), ...hostOptions, workspaceRoot: desiredWorkspace });
 }
 ipcMain.handle('product:a9-request', withStartupBarrier(createA9ProductRequestHandler({
   getA9Runtime: getOrCreateA9Runtime,
   isValidRendererSender: validRendererSender,
   workspaceRegistry: a9Workspaces,
-  selectWorkspace: async (workspacePath) => desktopHost.selectWorkspace(workspacePath),
+  openWorkdir: async workspacePath => {
+    const error = await shell.openPath(workspacePath);
+    if (error) throw Object.assign(new Error(error), { code: 'A9_WORKDIR_OPEN_FAILED' });
+  },
+  selectWorkspace: async workspacePath => {
+    const runtime = a9Workspaces.open(workspacePath).runtime;
+    if (runtime.getWorkdirInfo && runtime.getWorkdirInfo().origin === 'auto') return;
+    return desktopHost.selectWorkspace(workspacePath);
+  },
   chooseWorkspace: async () => {
     const choice = await dialog.showOpenDialog(mainWindow, { title: '选择代码工作区', properties: ['openDirectory'] });
     return choice.canceled || !choice.filePaths.length ? null : choice.filePaths[0];
@@ -1093,6 +1109,12 @@ async function restoreActiveWorkspace() {
     return;
   }
   try {
+    const entry = a9Workspaces.open(record.workspacePath);
+    if (entry.runtime.getWorkdirInfo && entry.runtime.getWorkdirInfo().origin === 'auto') {
+      a9Workspaces.activate(entry.workspaceRoot);
+      runtimeState.activeWorkspaceRestore = { status: 'restored', workspacePath: entry.workspaceRoot };
+      return;
+    }
     const selected = await desktopHost.selectWorkspace(record.workspacePath);
     const activeSession = desktopHost.listSessions().find((sessionRecord) =>
       sessionRecord.status === 'ACTIVE' && sessionRecord.workspacePath === selected.workspacePath);

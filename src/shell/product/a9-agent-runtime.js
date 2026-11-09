@@ -17,6 +17,7 @@ const os = require('os');
 const { serializeError } = require('./desktop-host');
 const { createDpapiCredentialVault } = require('./credential-vault');
 const { createComposerState } = require('./a9-composer-state');
+const { verifyWorkdir } = require('./a9-default-workdir');
 
 function requireModule(relativeName) {
   const candidates = [
@@ -118,14 +119,8 @@ function boundedDiagnosticText(value) {
     .slice(0, 600);
 }
 
-function createA9AgentRuntime(options) {
-  const config = options || {};
-  const modules = config.modules || loadModules();
-  const workspaceRoot = config.workspaceRoot;
+function openA9RuntimePersistence(config, modules = config.modules || loadModules()) {
   const dataRoot = config.dataRoot;
-  const ownerId = config.ownerId || `window-${process.pid}`;
-  if (!workspaceRoot || !dataRoot) throw new Error('A9_RUNTIME_CONFIG_INVALID');
-
   // ----- 持久化（真实 SQLite；openDatabase 由宿主注入或使用 better-sqlite3） -----
   const openDatabase = config.openDatabase || ((databasePath, opts) => {
     // 生产包内为 Electron ABI 的 better-sqlite3（D-014）；开发/测试注入。
@@ -139,7 +134,7 @@ function createA9AgentRuntime(options) {
   if (config.electronSqliteRoot) {
     const preflight = preflightElectronSqlite(config.electronSqliteRoot);
     if (!preflight.ok) {
-      return createSqliteUnavailableRuntime(preflight.reason);
+      return { status: 'electron_sqlite_unavailable', reason: preflight.reason };
     }
     resolvedOpenDatabase = preflight.openDatabase;
   }
@@ -158,13 +153,73 @@ function createA9AgentRuntime(options) {
   };
   // A9-52: one host opens/recoveries the database once. Creating another
   // workspace must never run restart recovery over a live sibling task.
+  return modules.state.A9PersistenceManager.open(persistenceOptions);
+
+}
+
+function createA9AgentRuntime(options) {
+  const config = options || {};
+  const modules = config.modules || loadModules();
+  const workspaceRoot = config.workspaceRoot;
+  const dataRoot = config.dataRoot;
+  const ownerId = config.ownerId || `window-${process.pid}`;
+  if (!workspaceRoot || !dataRoot) throw new Error('A9_RUNTIME_CONFIG_INVALID');
+
   const persistenceOutcome = config.openPersistence
-    ? config.openPersistence(persistenceOptions, values => modules.state.A9PersistenceManager.open(values))
-    : modules.state.A9PersistenceManager.open(persistenceOptions);
+    ? config.openPersistence(config, values => openA9RuntimePersistence(values, modules))
+    : openA9RuntimePersistence(config, modules);
+  if (persistenceOutcome.status === 'electron_sqlite_unavailable') return createSqliteUnavailableRuntime(persistenceOutcome.reason);
   if (persistenceOutcome.status !== 'ready') {
     return createDiagnosticsRuntime(persistenceOutcome);
   }
   const persistence = persistenceOutcome.manager;
+
+  function getWorkdirInfo(options = {}) {
+    const workdir = persistence.getConversationMetadata(a9SessionId).workdir;
+    const state = options.verifyIdentity !== false && config.defaultWorkdirRoot && workdir && workdir.version === 1 && workdir.origin === 'auto'
+      ? verifyWorkdir(config.defaultWorkdirRoot, workspaceRoot) : { created: fs.existsSync(workspaceRoot) };
+    return { path: workspaceRoot, origin: workdir && workdir.origin === 'auto' ? 'auto' : 'linked',
+      created: state.created, createdAt: workdir && workdir.createdAt || null };
+  }
+  function ensureWorkdir(create = true) {
+    if (!config.defaultWorkdirRoot) return true;
+    const state = verifyWorkdir(config.defaultWorkdirRoot, workspaceRoot, create);
+    if (state.made) {
+      const workdir = persistence.getConversationMetadata(a9SessionId).workdir || { version: 1, origin: 'auto', createdAt: null };
+      const message = `${workdir.createdAt ? '已重建' : '已创建'}工作目录：${workspaceRoot}`;
+      persistence.db.transaction(() => {
+        persistence.saveSession(a9SessionId, canonicalWorkspace, { workdir: { ...workdir, createdAt: workdir.createdAt || new Date().toISOString() } });
+        const data = { role: 'system', message, path: workspaceRoot };
+        const { eventId } = persistence.recordToolEvent(a9SessionId, null, 'workdir.created', { type: 'system_message', data });
+        pushTimeline({ type: 'system_message', timestamp: new Date().toISOString(), data, eventId });
+      })();
+    }
+    return state.created;
+  }
+  function validateWorkdirPath(target) {
+    const workdir = persistence.getConversationMetadata(a9SessionId).workdir;
+    if (!config.defaultWorkdirRoot && !(workdir && workdir.version === 1 && workdir.origin === 'linked')) return;
+    const absolute = path.resolve(workspaceRoot, target || '.');
+    const relative = path.relative(workspaceRoot, absolute);
+    const validation = relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)
+      ? { valid: false, error: 'WORKSPACE_BOUNDARY_VIOLATION: path escapes workspace root' }
+      : fs.existsSync(workspaceRoot) ? modules.workspace.validatePath(target || '.', workspaceRoot) : { valid: true };
+    if (!validation.valid) throw Object.assign(new Error(validation.error), { code: validation.error.split(':')[0] });
+  }
+  function guardedWorkspaceService(options) {
+    const service = new modules.workspace.A9WorkspaceService(workspaceRoot, options);
+    return new Proxy(service, { get(target, property) {
+      const value = target[property];
+      if (typeof value !== 'function') return value;
+      return (...args) => {
+        if (!['getCheckpointManager'].includes(property)) ensureWorkdir();
+        if (['list', 'read', 'write', 'edit', 'delete', 'writeDocumentCopy'].includes(property)) validateWorkdirPath(args[0]);
+        if (['copy', 'move'].includes(property)) { validateWorkdirPath(args[0]); validateWorkdirPath(args[1]); }
+        if (property === 'search') validateWorkdirPath(args[1] && args[1].path);
+        return value.apply(target, args);
+      };
+    } });
+  }
 
   // ----- 工作区模式（R1：键绑定 canonical 路径的 SHA-256，fail-closed） -----
   const canonicalWorkspace = modules.core.canonicalizeWorkspacePath(workspaceRoot);
@@ -172,12 +227,14 @@ function createA9AgentRuntime(options) {
   const shellConfigPath = path.join(dataRoot, 'a9-shell-config.v1.json');
   // v3 及更早版本按工作区派生 Session；v4 将它确定性迁移为“历史对话”。
   const legacyA9SessionId = `a9-${crypto.createHash('sha256').update(canonicalWorkspace, 'utf8').digest('hex').slice(0, 16)}`;
-  let activeConversation = persistence.ensureActiveConversation(
+  const previousAutoConversation = config.defaultWorkdirRoot && persistence.listConversations(canonicalWorkspace)[0];
+  let activeConversation = previousAutoConversation || persistence.ensureActiveConversation(
     canonicalWorkspace,
     legacyA9SessionId,
     createConversationId(),
   );
   let a9SessionId = activeConversation.sessionId;
+  if (config.initialWorkdir) persistence.saveSession(a9SessionId, canonicalWorkspace, { workdir: config.initialWorkdir });
   const modeStore = new modules.core.WorkspaceModeSettingsStore(
     modules.core.WorkspaceModeSettingsStore.settingsFilePathFor(dataRoot, workspaceRoot),
     { legacyPath: modules.core.WorkspaceModeSettingsStore.legacyBasenameFilePathFor(dataRoot, workspaceRoot) },
@@ -801,7 +858,7 @@ function createA9AgentRuntime(options) {
   }
 
   // 独立于 loop 的工作区服务：撤销/Diff/Git 是状态操作，不需要 Provider。
-  const standaloneWorkspaceService = new modules.workspace.A9WorkspaceService(workspaceRoot, {
+  const standaloneWorkspaceService = guardedWorkspaceService({
     containsSensitiveData: containsSensitiveCheckpointData,
   });
   try {
@@ -1292,6 +1349,7 @@ function createA9AgentRuntime(options) {
 
   function createConversation() {
     assertConversationSwitchAllowed();
+    if (config.defaultWorkdirRoot) throw Object.assign(new Error('默认目录绑定独立对话，请用不选目录入口新建。'), { code: 'A9_WORKDIR_CONVERSATION_BOUND' });
     const record = persistence.createConversation(createConversationId(), canonicalWorkspace);
     return loadConversation(record);
   }
@@ -1315,7 +1373,8 @@ function createA9AgentRuntime(options) {
       err.code = 'A9_CONVERSATION_NOT_CURRENT';
       throw err;
     }
-    const next = persistence.archiveConversation(a9SessionId, createConversationId());
+    const next = persistence.archiveConversation(a9SessionId, config.defaultWorkdirRoot ? undefined : createConversationId());
+    if (!next) { activeConversation = { ...activeConversation, state: 'archived' }; return { ok: true, conversationId: a9SessionId, archived: true }; }
     return loadConversation(next);
   }
 
@@ -1344,6 +1403,7 @@ function createA9AgentRuntime(options) {
   }
 
   function ensureRuntime() {
+    ensureWorkdir(false);
     if (config.assertExecutionAllowed) config.assertExecutionAllowed();
     if (!retryWorkspaceLock()) {
       const err = new Error(`A9_WORKSPACE_LOCKED: 工作区写锁由 ${lock.holder} 持有`);
@@ -1383,11 +1443,15 @@ function createA9AgentRuntime(options) {
       }
     }
     if (!loop) {
-      const workspaceService = new modules.workspace.A9WorkspaceService(workspaceRoot, {
+      const workspaceService = guardedWorkspaceService({
         containsSensitiveData: containsSensitiveCheckpointData,
         containsSensitiveFeedbackData: containsSensitiveProjectInstructionData,
       });
-      const runnerAdapter = modules.runner.createTrustedShellLoopAdapter(loopTrustedRunner);
+      const baseRunnerAdapter = modules.runner.createTrustedShellLoopAdapter(loopTrustedRunner);
+      const runnerAdapter = { ...baseRunnerAdapter, execute(command, options) {
+        ensureWorkdir(); validateWorkdirPath(options.cwd);
+        return baseRunnerAdapter.execute(command, options);
+      } };
       const configuredShell = shellOptions || {};
       const shellSelection = configuredShell.path
         ? { kind: configuredShell.kind, path: configuredShell.path, version: configuredShell.version, available: true }
@@ -1418,12 +1482,12 @@ function createA9AgentRuntime(options) {
         targetOs: `${detectedPlatform} ${detectedRelease} ${detectedArch}`,
         environmentFacts,
         ...(officeModule.officeAvailable() ? { office: {
-          inspect: (args, signal) => getOfficeService().inspect(args, signal).then(redactForProjection),
-          read: (args, signal) => getOfficeService().read(args, signal).then(redactForProjection),
-          writeCopy: (args, turnId, signal) => getOfficeService().writeCopy(args, turnId, signal),
+          inspect: (args, signal) => { ensureWorkdir(); validateWorkdirPath(args.path); return getOfficeService().inspect(args, signal).then(redactForProjection); },
+          read: (args, signal) => { ensureWorkdir(); validateWorkdirPath(args.path); return getOfficeService().read(args, signal).then(redactForProjection); },
+          writeCopy: (args, turnId, signal) => { ensureWorkdir(); return getOfficeService().writeCopy(args, turnId, signal); },
         } } : {}),
         ...(providerConfig.imageInputEnabled === true && config.nativeImage ? {
-          readImage: (target, turnId, signal) => getImageService().read(target, { conversationId: a9SessionId, turnId }, signal),
+          readImage: (target, turnId, signal) => { ensureWorkdir(); validateWorkdirPath(target); return getImageService().read(target, { conversationId: a9SessionId, turnId }, signal); },
         } : {}),
         provider,
         workspaceService,
@@ -1480,6 +1544,7 @@ function createA9AgentRuntime(options) {
         },
         onAuditEvent: (event) => {
           if (managedAuditFailure) throw new Error('A9_MANAGED_AUDIT_BLOCKED');
+          if (event.type === 'tool_start' && !['update_plan', 'ask_user'].includes(event.data.toolName)) ensureWorkdir();
           if (event.type === 'model_chunk') {
             if (!liveModelPreview || liveModelPreview.turnId !== event.turnId) markLivePreviewBoundary(event.turnId);
             const previous = pendingModelChunks.get(event.turnId) || { content: '', timestamp: event.timestamp };
@@ -2276,6 +2341,7 @@ function createA9AgentRuntime(options) {
   }
 
   async function submitTurn(prompt, options = {}) {
+    if (activeConversation.state === 'archived') return { ok: false, error: { code: 'A9_CONVERSATION_ARCHIVED' } };
     if (managedAuditFailure) return presentAuditFailure(managedAuditFailure);
     if (auditFailureBlock) return presentAuditFailure(auditFailureBlock);
     if (activeController) {
@@ -2712,6 +2778,7 @@ function createA9AgentRuntime(options) {
       schemaVersion: A9_PROTOCOL_VERSION,
       status: 'ready',
       workspaceRoot,
+      workdir: getWorkdirInfo(),
       lock: { held: lockHeld && !workspaceLockReleased, holder: lock.holder },
       mode: permissionMode === undefined ? 'needs_selection' : permissionMode,
       modeRecommended: 'full_access',
@@ -2937,6 +3004,7 @@ function createA9AgentRuntime(options) {
   }
 
   function getDiff(turnId) {
+    if (!ensureWorkdir(false)) return { ok: true, diff: [], review: { files: [] } };
     assertCheckpointForCurrentConversation(turnId);
     const manager = workspaceServiceForState().getCheckpointManager();
     return { ok: true, diff: manager.getTurnDiff(String(turnId)), review: manager.getTurnReview(String(turnId)) };
@@ -2948,17 +3016,20 @@ function createA9AgentRuntime(options) {
   }
 
   async function gitStatus() {
+    if (!ensureWorkdir(false)) return { ok: true, projection: { schemaVersion: '1.0', isGit: false, degradedReason: '工作目录尚未创建', entries: [], diffPreview: '', diffTruncated: false, externalMechanisms: [], notes: [] } };
     const projection = await modules.gitAdapter.projectTrustedGit(workspaceRoot);
     return { ok: true, projection: redactForProjection(projection) };
   }
 
   async function readWorkspaceFile(input) {
     const requestedPath = String(input && input.path || '');
+    validateWorkdirPath(requestedPath);
     if (!requestedPath || path.isAbsolute(requestedPath) || requestedPath.split(/[\\/]+/).includes('..')) {
       const err = new Error('A9_WORKSPACE_READ_PATH_INVALID: Viewer 只能读取当前工作区内的相对路径');
       err.code = 'A9_WORKSPACE_READ_PATH_INVALID';
       throw err;
     }
+    if (!ensureWorkdir(false)) return { ok: true, result: { path: requestedPath, isText: true, content: '', lines: [], linesRead: 0, startLine: input.startLine } };
     const result = await standaloneWorkspaceService.read(requestedPath, {
       startLine: input.startLine,
       maxLines: input.maxLines,
@@ -3113,6 +3184,14 @@ function createA9AgentRuntime(options) {
     reopenConversation: sessionId => updateConversationInbox(sessionId, 'reopen'),
     visitConversation: sessionId => updateConversationInbox(sessionId, 'visit'),
     canLeaveWorkspace,
+    getWorkdirInfo,
+    getWorkdirConversationId: () => a9SessionId,
+    ensureWorkdir,
+    async listWorkspaceDirectory(target = '.') {
+      validateWorkdirPath(target);
+      if (!ensureWorkdir(false)) return { ok: true, result: { entries: [], truncated: false } };
+      return { ok: true, result: await standaloneWorkspaceService.list(target) };
+    },
     setMode,
     getSnapshot,
     listCheckpoints,
@@ -3306,4 +3385,4 @@ function createDiagnosticsRuntime(outcome) {
   };
 }
 
-module.exports = { createA9AgentRuntime, A9_PROTOCOL_VERSION, redactUrlUserinfo };
+module.exports = { createA9AgentRuntime, openA9RuntimePersistence, normalizeConversationTitle: (...args) => requireModule('state/dist').normalizeConversationTitle(...args), A9_PROTOCOL_VERSION, redactUrlUserinfo };

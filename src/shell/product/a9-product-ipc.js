@@ -13,6 +13,12 @@ const A9_ACTIONS = Object.freeze({
   WORKSPACE_LIST: 'a9.workspace.list',
   WORKSPACE_ACTIVATE: 'a9.workspace.activate',
   WORKSPACE_CLOSE: 'a9.workspace.close',
+  WORKDIR_START: 'a9.workdir.start',
+  WORKDIR_GET: 'a9.workdir.get',
+  WORKDIR_OPEN: 'a9.workdir.open',
+  WORKDIR_RENAME: 'a9.workdir.rename',
+  WORKDIR_LINK: 'a9.workdir.link',
+  WORKSPACE_BROWSE: 'a9.workspace.browse',
   MODE_SET: 'a9.mode.set',
   PROVIDER_CONFIGURE: 'a9.provider.configure',
   PROVIDER_PROBE: 'a9.provider.probe',
@@ -106,6 +112,18 @@ function createA9ProductRequestHandler(options) {
           throw Object.assign(new Error('A9_SCOPE_INVALID'), { code: 'A9_SCOPE_INVALID' });
         }
       }
+      if (request.action === A9_ACTIONS.WORKDIR_START) {
+        if (!registry || request.schemaVersion !== 9 || request.scope) throw Object.assign(new Error('A9_SCOPE_INVALID'), { code: 'A9_SCOPE_INVALID' });
+        exactObject(request.payload, ['prompt'], 'A9_PAYLOAD_INVALID', ['mode']);
+        if (request.payload.mode !== undefined && !['full_access', 'read_only'].includes(request.payload.mode)) throw Object.assign(new Error('A9_PAYLOAD_INVALID'), { code: 'A9_PAYLOAD_INVALID' });
+        if (typeof request.payload.prompt !== 'string' || !request.payload.prompt.trim() || request.payload.prompt.length > 8000) {
+          throw Object.assign(new Error('A9_PAYLOAD_INVALID'), { code: 'A9_PAYLOAD_INVALID' });
+        }
+        if (selectionInFlight) throw Object.assign(new Error('A9_WORKSPACE_SELECTION_BUSY'), { code: 'A9_WORKSPACE_SELECTION_BUSY' });
+        selectionInFlight = true;
+        try { return await registry.startDefaultConversation(request.payload.prompt, request.payload.mode); }
+        finally { selectionInFlight = false; }
+      }
       if (workspaceActions.includes(request.action)) {
         if (!registry || request.schemaVersion !== 9) throw Object.assign(new Error('A9_ACTION_UNAVAILABLE'), { code: 'A9_ACTION_UNAVAILABLE' });
         const values = request.payload;
@@ -164,7 +182,8 @@ function createA9ProductRequestHandler(options) {
         throw Object.assign(new Error('A9_SCOPE_REQUIRED'), { code: 'A9_SCOPE_REQUIRED' });
       }
       const runtime = restrictedRuntime || (registry && request.scope
-        ? (inboxAction ? registry.resolveInboxScope(request.scope) : registry.resolve(request.scope))
+        ? (inboxAction ? registry.resolveInboxScope(request.scope)
+          : request.action === A9_ACTIONS.WORKDIR_LINK ? registry.resolveWorkdirLinkScope(request.scope) : registry.resolve(request.scope))
         : config.getA9Runtime ? await config.getA9Runtime() : null);
       if (runtime && runtime.__a9WorkspaceRequired === true) {
         return {
@@ -180,6 +199,35 @@ function createA9ProductRequestHandler(options) {
 
       const payload = request.payload || {};
       switch (request.action) {
+        case A9_ACTIONS.WORKDIR_GET:
+        case A9_ACTIONS.WORKDIR_OPEN:
+        case A9_ACTIONS.WORKDIR_RENAME:
+        case A9_ACTIONS.WORKDIR_LINK: {
+          if (!registry || request.schemaVersion !== 9 || !request.scope) throw Object.assign(new Error('A9_SCOPE_REQUIRED'), { code: 'A9_SCOPE_REQUIRED' });
+          exactObject(payload, request.action === A9_ACTIONS.WORKDIR_RENAME ? ['name'] : [], 'A9_PAYLOAD_INVALID');
+          if (request.action === A9_ACTIONS.WORKDIR_GET) return { ok: true, workdir: runtime.getWorkdirInfo() };
+          if (request.action === A9_ACTIONS.WORKDIR_OPEN) {
+            const info = runtime.getWorkdirInfo();
+            if (!info.created) throw Object.assign(new Error('目录尚未创建。'), { code: 'A9_WORKDIR_NOT_CREATED' });
+            if (!config.openWorkdir) throw Object.assign(new Error('A9_WORKDIR_OPEN_UNAVAILABLE'), { code: 'A9_WORKDIR_OPEN_UNAVAILABLE' });
+            await config.openWorkdir(info.path);
+            return { ok: true };
+          }
+          if (selectionInFlight) throw Object.assign(new Error('A9_WORKSPACE_SELECTION_BUSY'), { code: 'A9_WORKSPACE_SELECTION_BUSY' });
+          selectionInFlight = true;
+          try {
+            return await registry.changeWorkdir(request.scope, request.action === A9_ACTIONS.WORKDIR_RENAME ? 'rename' : 'link',
+              request.action === A9_ACTIONS.WORKDIR_RENAME ? payload.name : async () => {
+                if (!config.chooseWorkspace) throw Object.assign(new Error('A9_WORKDIR_PICKER_UNAVAILABLE'), { code: 'A9_WORKDIR_PICKER_UNAVAILABLE' });
+                return config.chooseWorkspace();
+              });
+          } finally { selectionInFlight = false; }
+        }
+        case A9_ACTIONS.WORKSPACE_BROWSE:
+          if (!registry || request.schemaVersion !== 9 || !request.scope) throw Object.assign(new Error('A9_SCOPE_REQUIRED'), { code: 'A9_SCOPE_REQUIRED' });
+          exactObject(payload, ['path'], 'A9_PAYLOAD_INVALID');
+          if (typeof payload.path !== 'string' || payload.path.length > 1024) throw Object.assign(new Error('A9_PAYLOAD_INVALID'), { code: 'A9_PAYLOAD_INVALID' });
+          return await runtime.listWorkspaceDirectory(payload.path || '.');
         case A9_ACTIONS.SNAPSHOT_GET:
           exactObject(payload, [], 'A9_PAYLOAD_INVALID', ['conversationPage']);
           if (payload.conversationPage !== undefined && (request.schemaVersion < 7 || typeof payload.conversationPage !== 'boolean')) {
