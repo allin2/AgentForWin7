@@ -741,6 +741,16 @@ summary:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--focus
 .conversation-list .conversation-group-toggle[aria-expanded="true"] span:first-child::before { transform: rotate(90deg); }
 .conversation-list .conversation-group-toggle:hover { color: var(--text); }
 .conversation-empty-note { display: block !important; padding: 4px 9px; color: var(--muted); font-size: 11px; }
+/* A9-54：剩余天数、行悬停操作（键盘聚焦行内时同样显示）与行内拒绝原因。 */
+.conversation-flags.countdown { color: var(--muted); }
+.conversation-list li.conversation-item { position: relative; }
+.conversation-row-actions { position: absolute; top: 4px; right: 6px; z-index: 1; display: flex; gap: 4px; padding: 2px; border-radius: 6px; background: var(--raised); box-shadow: 0 1px 4px rgba(31, 35, 40, .12); opacity: 0; pointer-events: none; }
+.conversation-list li.conversation-item:hover > .conversation-row-actions,
+.conversation-list li.conversation-item:focus-within > .conversation-row-actions { opacity: 1; pointer-events: auto; }
+.conversation-list .conversation-row-actions button { display: inline-flex; align-items: center; min-width: 0; min-height: 24px; padding: 0 7px; border: 1px solid var(--line-strong); border-radius: 5px; background: var(--panel); color: var(--text-secondary); font-size: 11px; white-space: nowrap; }
+.conversation-list .conversation-row-actions button:hover:not(:disabled) { border-color: var(--accent); background: var(--soft); color: var(--accent-strong); }
+.conversation-list .conversation-row-actions button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.conversation-list .conversation-action-error { grid-column: 1 / -1; padding: 0 8px 2px; color: var(--red); font: 11px/16px var(--font-ui); white-space: normal; }
 /* 工作区徽标：按工作区 ID 稳定取色，浅色与暗色各一组。 */
 .ws-badge { display: inline-grid; flex: 0 0 auto; place-items: center; min-width: 22px; height: 16px; padding: 0 3px; border-radius: 4px; font: 700 11px/1 var(--font-mono); letter-spacing: 0; }
 .ws-c0 { background: #dff0ed; color: #0b5f59; } .ws-c1 { background: #e6e6fb; color: #3f3aa8; } .ws-c2 { background: #f8e8d6; color: #8a4a0b; }

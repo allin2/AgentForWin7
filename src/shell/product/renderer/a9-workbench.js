@@ -1955,10 +1955,19 @@
   }
 
   // A9-52 收件箱：所有驻留工作区的对话混排。顺序为置顶 → 活跃 → 已结束（默认折叠）。
-  // 活跃 = 有实时状态（运行/待审批/待回答/中断/失败）、后台完成未查看，或有未发送草稿。
+  // A9-54 §3.4（ADR-0321）：分组只由保存的时间戳现算。已结束 = 未置顶、无实时状态，且手动结束
+  // （settledAt 非空），或无草稿且距 lastActivityAt 满 7 天；其余未置顶对话都在活跃组。
   const LIVE_ACTIVITY = Object.freeze({ running: 'running', cancelling: 'cancelling', needs_approval: 'needs_approval',
     needs_input: 'needs_input', waiting_approval: 'needs_approval', waiting_input: 'needs_input', failed: 'failed', interrupted: 'interrupted' });
   const PIN_STORAGE_KEY = 'a9.pinnedConversations.v1';
+  const INBOX_DAY_MS = 24 * 60 * 60 * 1000;
+  const INBOX_AUTO_SETTLE_MS = 7 * INBOX_DAY_MS;
+  const INBOX_ACTION_ERRORS = Object.freeze({
+    A9_CONVERSATION_BUSY: '对话正在运行、待审批或待回答，暂不能结束。',
+    A9_CONVERSATION_ARCHIVED: '对话已归档，请先恢复对话。',
+    A9_SCOPE_STALE: '该工作区已关闭或正在关闭，请刷新后重试。',
+    A9_SCOPE_INVALID: '对话与请求目标不一致，请刷新后重试。',
+  });
 
   function inboxActivity(value) { return LIVE_ACTIVITY[value] || 'idle'; }
 
@@ -2005,9 +2014,12 @@
     const currentId = (snapshot.scope && snapshot.scope.workspaceId) || 'current';
     const current = { workspaceId: currentId, workspaceRoot: snapshot.workspaceRoot || '', displayName: pathName(snapshot.workspaceRoot) || '当前工作区' };
     const items = [];
+    // ADR-0322：结束、恢复、记录查看按行自己的工作区组成 scope；当前工作区没有 scope 时不提供这些动作。
+    const currentScopeId = snapshot.scope && snapshot.scope.workspaceId ? snapshot.scope.workspaceId : null;
     const add = (workspace, conversation, live, activeId, canSwitch, isCurrent) => {
       const bound = conversation.sessionId === activeId;
       const viewed = isCurrent && bound;
+      const scopeWorkspaceId = isCurrent ? currentScopeId : workspace.workspaceId;
       items.push({
         key: `${workspace.workspaceId}:${conversation.sessionId}`,
         workspace, isCurrent, viewed, bound,
@@ -2015,6 +2027,12 @@
         title: conversation.title || '新对话',
         updatedAt: conversation.updatedAt,
         hasDraft: conversation.hasDraft === true,
+        settledAt: conversation.settledAt || null,
+        lastVisitedAt: conversation.lastVisitedAt || null,
+        lastCompletedAt: conversation.lastCompletedAt || null,
+        lastActivityAt: conversation.lastActivityAt || null,
+        scope: scopeWorkspaceId && conversation.sessionId
+          ? { workspaceId: scopeWorkspaceId, conversationId: conversation.sessionId } : null,
         activity: bound && live ? inboxActivity(live) : inboxActivity(conversation.activity),
         switchable: !viewed && (bound ? !isCurrent : canSwitch),
       });
@@ -2035,26 +2053,94 @@
     return 4;
   }
 
-  function classifyInbox(items) {
-    if (!state.inboxSeen) state.inboxSeen = new Map();
-    if (!state.inboxUnread) state.inboxUnread = new Set();
-    if (!state.inboxBuckets) state.inboxBuckets = new Map();
+  function inboxTime(value) {
+    const time = value ? Date.parse(value) : NaN;
+    return Number.isFinite(time) ? time : null;
+  }
+
+  function classifyInbox(items, now = Date.now()) {
     const pinned = readPinnedConversations();
     for (const item of items) {
-      const previous = state.inboxSeen.get(item.key);
-      // 后台完成且没有在看：像未读邮件一样保留在活跃组，直到被打开。
-      if (!item.viewed && item.activity === 'idle' && (previous === 'running' || previous === 'cancelling')) state.inboxUnread.add(item.key);
-      if (item.viewed) state.inboxUnread.delete(item.key);
-      state.inboxSeen.set(item.key, item.activity);
-      item.unread = state.inboxUnread.has(item.key);
+      const live = item.activity !== 'idle';
+      const completedAt = inboxTime(item.lastCompletedAt);
+      const visitedAt = inboxTime(item.lastVisitedAt);
+      // “已完成”：最近一次成功完成晚于上次查看；从未查看视为最早。
+      item.unread = !live && !item.viewed && completedAt !== null && completedAt > (visitedAt === null ? -Infinity : visitedAt);
       item.pinned = pinned.has(item.sessionId);
-      let bucket = item.pinned ? 'pinned' : (item.activity !== 'idle' || item.unread || item.hasDraft) ? 'active' : 'settled';
-      // 正在查看的对话不立即折叠，离开后才归入“已结束”。
-      if (item.viewed && bucket === 'settled' && state.inboxBuckets.get(item.key) === 'active') bucket = 'active';
-      state.inboxBuckets.set(item.key, bucket);
+      const activityAt = inboxTime(item.lastActivityAt);
+      // 正在查看等同于此刻查看：不因空闲自动折叠（手动结束除外），即使“记录查看”尚未回读到快照；
+      // 离开后由保存的 lastVisitedAt 继续留在活跃组，直到手动结束或满 7 天。
+      const idleFor = item.viewed ? 0 : activityAt === null ? null : now - activityAt;
+      const autoSettle = !item.hasDraft && idleFor !== null && idleFor >= INBOX_AUTO_SETTLE_MS;
+      const bucket = item.pinned ? 'pinned' : live ? 'active' : (item.settledAt || autoSettle) ? 'settled' : 'active';
       item.bucket = bucket;
+      item.settleInDays = bucket === 'active' && !live && !item.hasDraft && !item.viewed && idleFor !== null
+        ? Math.min(7, Math.max(1, Math.ceil((INBOX_AUTO_SETTLE_MS - idleFor) / INBOX_DAY_MS))) : null;
     }
     return items;
+  }
+
+  /** 打开对话、或正在查看的对话运行完成时记录查看；失败只留诊断，不打断界面。 */
+  function syncInboxVisit(items) {
+    const viewed = items.find((item) => item.viewed);
+    if (!viewed || !viewed.scope) {
+      state.inboxVisitKey = null;
+      state.inboxVisitCompletedAt = null;
+      return;
+    }
+    const opened = state.inboxVisitKey !== viewed.key;
+    const completedAt = inboxTime(viewed.lastCompletedAt);
+    const visitedAt = inboxTime(viewed.lastVisitedAt);
+    const completedUnseen = completedAt !== null && completedAt > (visitedAt === null ? -Infinity : visitedAt)
+      && viewed.lastCompletedAt !== state.inboxVisitCompletedAt;
+    state.inboxVisitKey = viewed.key;
+    state.inboxVisitCompletedAt = viewed.lastCompletedAt;
+    if (opened || completedUnseen) void recordInboxVisit(viewed.scope);
+  }
+
+  async function recordInboxVisit(scope) {
+    const diagnostic = (code) => {
+      state.inboxVisitDiagnostic = { code: String(code || 'A9_INBOX_VISIT_FAILED').slice(0, 100), conversationId: scope.conversationId, at: new Date().toISOString() };
+      if (root.console && typeof root.console.warn === 'function') root.console.warn('A9_INBOX_VISIT_FAILED', state.inboxVisitDiagnostic.code);
+    };
+    try {
+      const target = api && api.a9 && typeof api.a9.forScope === 'function' ? api.a9.forScope(scope) : null;
+      if (!target || typeof target.visitConversation !== 'function') { diagnostic('A9_INBOX_VISIT_UNAVAILABLE'); return; }
+      const response = await target.visitConversation(scope.conversationId);
+      if (!response || response.ok !== true) diagnostic(response && response.error && response.error.code);
+    } catch (error) {
+      diagnostic(error && error.code);
+    }
+  }
+
+  function inboxActionErrorText(response, label) {
+    const code = response && response.error ? response.error.code : response && response.code;
+    if (code && INBOX_ACTION_ERRORS[code]) return INBOX_ACTION_ERRORS[code];
+    return `${label}失败${code ? `（${String(code).slice(0, 60)}）` : ''}，请刷新后重试。`;
+  }
+
+  /** ADR-0322：结束与恢复按该行自己的 scope 调用；scope.conversationId 与参数一致。 */
+  async function runInboxAction(action, item) {
+    const label = action === 'settle' ? '结束对话' : '恢复到活跃';
+    if (!item.scope || state.inboxActionBusy) return null;
+    state.inboxActionBusy = item.key;
+    state.inboxActionError = null;
+    if (state.snapshot) renderConversationDirectory(state.snapshot);
+    let response = null;
+    try {
+      const target = api && api.a9 && typeof api.a9.forScope === 'function' ? api.a9.forScope(item.scope) : null;
+      const method = action === 'settle' ? 'settleConversation' : 'reopenConversation';
+      if (!target || typeof target[method] !== 'function') response = { ok: false, error: { code: 'A9_INBOX_ACTION_UNAVAILABLE' } };
+      else response = await target[method](item.scope.conversationId);
+      if (!response || response.ok !== true) state.inboxActionError = { key: item.key, message: inboxActionErrorText(response, label) };
+    } catch (error) {
+      state.inboxActionError = { key: item.key, message: inboxActionErrorText(error, label) };
+    } finally {
+      state.inboxActionBusy = null;
+      await refreshSnapshot();
+      if (state.snapshot) renderConversationDirectory(state.snapshot);
+    }
+    return response;
   }
 
   function inboxStatus(item) {
@@ -2129,7 +2215,8 @@
       : !conversation.isCurrent && !conversation.switchable ? '该工作区任务尚未结束，停止或完成后可切换到其他对话' : '';
     const reason = archived ? '已归档，请先恢复对话' : viewed ? '当前对话' : lockReason;
     const statusText = status ? status.text : '空闲';
-    const label = `${conversation.title || '新对话'}，${workspace.displayName}，${statusText}${conversation.hasDraft ? '，有未发送草稿' : ''}${updated ? `，更新于 ${updated}` : ''}${reason ? `，${reason}` : ''}`;
+    const countdown = !archived && Number.isInteger(conversation.settleInDays) ? `${conversation.settleInDays} 天后结束` : '';
+    const label = `${conversation.title || '新对话'}，${workspace.displayName}，${statusText}${conversation.hasDraft ? '，有未发送草稿' : ''}${countdown ? `，${countdown}` : ''}${updated ? `，更新于 ${updated}` : ''}${reason ? `，${reason}` : ''}`;
     button.setAttribute('aria-label', label);
     button.title = `${conversation.title || '新对话'}\n${workspace.workspaceRoot || workspace.displayName}\n${statusText}${updated ? ` · ${updated}` : ''}${reason ? `\n${reason}` : ''}`;
     if (status) { meta.textContent = status.text; meta.className = `conversation-state ${status.kind}`; }
@@ -2150,6 +2237,10 @@
         flags.className += ' draft';
         flags.title = '有未发送草稿';
         flags.textContent = '草稿';
+      } else if (countdown) {
+        flags.className += ' countdown';
+        flags.title = `空闲满 7 天后自动移到“已结束”`;
+        flags.textContent = countdown;
       }
       button.appendChild(line);
       button.appendChild(meta);
@@ -2175,8 +2266,52 @@
       }
       restore.addEventListener('click', () => { void restoreConversation(conversation.sessionId); });
       item.appendChild(restore);
+    } else {
+      appendConversationRowActions(item, conversation);
     }
     list.appendChild(item);
+  }
+
+  /**
+   * A9-54：行悬停（或键盘聚焦行内）显示的操作。按钮不能嵌套在行按钮里，作为 <li> 内的兄弟节点。
+   * 结束只给活跃组的空闲行；恢复只给已结束组；两者都需要该行的 scope。置顶对所有分组可用。
+   */
+  function appendConversationRowActions(item, conversation) {
+    item.className = 'conversation-item';
+    const title = conversation.title || '新对话';
+    const actions = document.createElement('span');
+    actions.className = 'conversation-row-actions';
+    const busy = Boolean(state.inboxActionBusy);
+    const action = conversation.scope && conversation.bucket === 'active' && conversation.activity === 'idle' ? 'settle'
+      : conversation.scope && conversation.bucket === 'settled' ? 'reopen' : null;
+    if (action) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = `conversation-row-action ${action}`;
+      button.dataset.action = action;
+      button.textContent = action === 'settle' ? '结束对话' : '恢复到活跃';
+      button.setAttribute('aria-label', `${button.textContent}：${title}`);
+      button.disabled = busy;
+      button.addEventListener('click', () => { void runInboxAction(action, conversation); });
+      actions.appendChild(button);
+    }
+    const pin = document.createElement('button');
+    pin.type = 'button';
+    pin.className = 'conversation-row-action pin';
+    pin.dataset.action = 'pin';
+    pin.textContent = conversation.pinned ? '取消置顶' : '置顶';
+    pin.setAttribute('aria-label', `${pin.textContent}：${title}`);
+    pin.addEventListener('click', () => togglePinnedConversation(conversation.sessionId));
+    actions.appendChild(pin);
+    item.appendChild(actions);
+    const error = state.inboxActionError && state.inboxActionError.key === conversation.key ? state.inboxActionError.message : '';
+    if (error) {
+      const note = document.createElement('small');
+      note.className = 'conversation-action-error';
+      note.setAttribute('role', 'alert');
+      note.textContent = error;
+      item.appendChild(note);
+    }
   }
 
   function renderConversationDirectory(snapshot) {
@@ -2188,6 +2323,7 @@
     state.inboxFilter = filter;
     const currentId = (snapshot.scope && snapshot.scope.workspaceId) || 'current';
     const all = classifyInbox(inboxConversations(snapshot));
+    syncInboxVisit(all);
     const visible = all.filter((item) => (!filter || item.workspace.workspaceId === filter)
       && (!query || String(item.title).toLocaleLowerCase().includes(query) || String(item.workspace.displayName).toLocaleLowerCase().includes(query)));
     const byTime = (a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || ''));
@@ -4121,6 +4257,9 @@
       rows.push(['上下文预算', String(state.snapshot.contextWindow?.budgetChars || '-')]);
       if (state.snapshot.contextBudgetDiagnostics) {
         rows.push(['上下文预算诊断', `${state.snapshot.contextBudgetDiagnostics.code}: ${state.snapshot.contextBudgetDiagnostics.detail}`]);
+      }
+      if (state.inboxVisitDiagnostic) {
+        rows.push(['收件箱记录查看', `${state.inboxVisitDiagnostic.code} · ${state.inboxVisitDiagnostic.at}`]);
       }
       (state.snapshot.recoveryIgnoreDiagnostics || []).forEach((diagnostic) => {
         rows.push(['恢复区忽略规则', `${diagnostic.code}: ${diagnostic.detail}`]);

@@ -1261,6 +1261,7 @@ describe('A9 unified desktop workbench contract', () => {
     const el = (id: string) => h.document.getElementById(id) as any;
     const switchConversation = jest.fn();
     const activateWorkspace = jest.fn();
+    const visitConversation = jest.fn(async () => ({ ok: true }));
     const context: any = {
       Date, document: h.document,
       state: { searchQuery: '' },
@@ -1268,7 +1269,11 @@ describe('A9 unified desktop workbench contract', () => {
       text: (id: string, value: unknown) => { const node = el(id); if (node) node.textContent = String(value); },
       pathName: (value: string) => String(value || '').split(/[\\/]+/).filter(Boolean).pop() || '',
       switchConversation, activateWorkspace,
+      api: { a9: { forScope: () => ({ visitConversation }) } },
+      root: { localStorage: { getItem: () => null, setItem: () => {} }, console: { warn: jest.fn() } },
     };
+    // A9-54：已结束由保存的时间戳决定；s2 空闲已满 7 天，b2 同样久但有草稿。
+    const eightDaysAgo = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000).toISOString();
     vm.runInNewContext(source + ';this.renderDirectory = renderConversationDirectory;', context);
     const a = 'a'.repeat(64);
     const b = 'b'.repeat(64);
@@ -1281,14 +1286,14 @@ describe('A9 unified desktop workbench contract', () => {
       conversations: [
         // 数据库仍记为 idle；当前对话以运行时实时状态为准（缺陷 2）。
         { sessionId: 's1', title: '运行中对话', state: 'active', activity: 'idle', updatedAt: '2026-11-07T10:00:00.000Z' },
-        { sessionId: 's2', title: '空闲对话', state: 'active', activity: 'idle', updatedAt: '2026-11-07T09:00:00.000Z' },
+        { sessionId: 's2', title: '空闲对话', state: 'active', activity: 'idle', updatedAt: '2026-11-07T09:00:00.000Z', lastActivityAt: eightDaysAgo },
         { sessionId: 's3', title: '已归档对话', state: 'archived', activity: 'idle' },
       ],
       workspaces: [
         { workspaceId: a, workspaceRoot: 'C:\\work\\alpha', displayName: 'alpha', opened: true, active: true, status: 'running', activeConversationId: 's1', canSwitch: true, conversations: [] },
         { workspaceId: b, workspaceRoot: 'C:\\work\\beta', displayName: 'beta', opened: true, active: false, status: 'needs_approval', activeConversationId: 'b1', canSwitch: false,
           conversations: [{ sessionId: 'b1', title: '待审批对话', activity: 'idle', updatedAt: '2026-11-07T08:00:00.000Z', hasDraft: false },
-            { sessionId: 'b2', title: '另一对话', activity: 'idle', updatedAt: '2026-11-07T07:00:00.000Z', hasDraft: true }] },
+            { sessionId: 'b2', title: '另一对话', activity: 'idle', updatedAt: '2026-11-07T07:00:00.000Z', hasDraft: true, lastActivityAt: eightDaysAgo }] },
       ],
     };
     context.renderDirectory(snapshot);
@@ -1308,46 +1313,283 @@ describe('A9 unified desktop workbench contract', () => {
     expect(h.nodes.get('conversation-archive-count')!.textContent).toBe('1');
   });
 
-  it('marks a background completion as unread until it is opened, then settles it after leaving', () => {
+  // A9-54 §3.4 / §5 第 4 行：分组、7 天边界、“已完成”提示、按钮可用性、悬停置顶与记录查看。
+  const DAY = 24 * 60 * 60 * 1000;
+  function createInboxHarness() {
     const h = createPaneHarness();
     const source = script.slice(script.indexOf('  function conversationStatusLabel('), script.indexOf('  function hydrateDraft('));
     const el = (id: string) => h.document.getElementById(id) as any;
-    const context: any = { Date, document: h.document, state: { searchQuery: '' }, el,
+    const storage = new Map<string, string>();
+    const calls: Array<[string, any, string]> = [];
+    const responses: Record<string, any> = {};
+    const method = (name: string, scope: any) => jest.fn(async (conversationId: string) => {
+      calls.push([name, { ...scope }, conversationId]);
+      const response = responses[name];
+      if (response instanceof Error) throw response;
+      return response || { ok: true };
+    });
+    const forScope = jest.fn((scope: any) => ({
+      settleConversation: method('settle', scope),
+      reopenConversation: method('reopen', scope),
+      visitConversation: method('visit', scope),
+    }));
+    const warn = jest.fn();
+    const context: any = {
+      Date, document: h.document, state: { searchQuery: '' }, el,
       text: (id: string, value: unknown) => { const node = el(id); if (node) node.textContent = String(value); },
       pathName: (value: string) => String(value || '').split(/[\\/]+/).filter(Boolean).pop() || '',
-      switchConversation: () => {}, activateWorkspace: () => {} };
-    vm.runInNewContext(source + ';this.renderDirectory = renderConversationDirectory;', context);
+      switchConversation: jest.fn(), activateWorkspace: jest.fn(), restoreConversation: jest.fn(),
+      refreshSnapshot: jest.fn(async () => null),
+      api: { a9: { forScope } },
+      root: {
+        localStorage: {
+          getItem: (key: string) => (storage.has(key) ? storage.get(key) : null),
+          setItem: (key: string, value: string) => { storage.set(key, String(value)); },
+        },
+        console: { warn },
+      },
+    };
+    vm.runInNewContext(`${source};this.renderDirectory = renderConversationDirectory;this.classify = classifyInbox;`, context);
+    const list = () => h.nodes.get('conversation-list')!;
+    const render = (snapshot: any) => { context.state.snapshot = snapshot; context.renderDirectory(snapshot); };
+    const groups = () => {
+      const out: Record<string, string[]> = {};
+      let current = '';
+      list().children.forEach((li: any) => {
+        if (li.classList.contains('conversation-group-head')) { current = li.textContent.replace(/\d+$/, ''); out[current] = []; }
+        else if (li.children[0] && li.children[0].dataset.conversationId) out[current].push(li.children[0].dataset.conversationId);
+      });
+      return out;
+    };
+    const row = (id: string) => list().children.find((li: any) => li.children[0] && li.children[0].dataset.conversationId === id) as any;
+    const actions = (id: string) => {
+      const container = row(id).children.find((child: any) => child.className === 'conversation-row-actions');
+      return container ? container.children : [];
+    };
+    const action = (id: string, name: string) => actions(id).find((button: any) => button.dataset.action === name);
+    const rowError = (id: string) => row(id).children.find((child: any) => child.className === 'conversation-action-error');
+    const flush = async () => { for (let i = 0; i < 6; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
+    return { h, context, storage, calls, responses, forScope, warn, render, groups, row, actions, action, rowError, flush };
+  }
+
+  function inboxSnapshot() {
     const a = 'a'.repeat(64);
     const b = 'b'.repeat(64);
-    const view = (status: string, viewing: 'a' | 'b') => ({
-      workspaceRoot: viewing === 'a' ? 'C:\\a' : 'C:\\b',
-      scope: { workspaceId: viewing === 'a' ? a : b, conversationId: viewing === 'a' ? 'a1' : 'b1' },
-      activeConversationId: viewing === 'a' ? 'a1' : 'b1', agentStatus: viewing === 'a' ? 'idle' : status,
+    const now = Date.now();
+    const iso = (ms: number) => new Date(now - ms).toISOString();
+    const snapshot: any = {
+      workspaceRoot: 'C:\\work\\alpha',
+      scope: { workspaceId: a, conversationId: 'a1' },
+      activeConversationId: 'a1', agentStatus: 'running',
       conversationControls: { canSwitch: true, maxActive: 16 },
-      conversations: [viewing === 'a'
-        ? { sessionId: 'a1', title: 'A 对话', state: 'active', activity: 'idle', updatedAt: '2026-11-07T10:00:00.000Z' }
-        : { sessionId: 'b1', title: 'B 对话', state: 'active', activity: 'idle', updatedAt: '2026-11-07T10:00:00.000Z' }],
-      workspaces: [
-        { workspaceId: a, workspaceRoot: 'C:\\a', displayName: 'a', opened: true, status: 'idle', activeConversationId: 'a1', canSwitch: true,
-          conversations: [{ sessionId: 'a1', title: 'A 对话', activity: 'idle', updatedAt: '2026-11-07T10:00:00.000Z' }] },
-        { workspaceId: b, workspaceRoot: 'C:\\b', displayName: 'b', opened: true, status, activeConversationId: 'b1', canSwitch: true,
-          conversations: [{ sessionId: 'b1', title: 'B 对话', activity: 'idle', updatedAt: '2026-11-07T10:00:00.000Z' }] },
+      conversations: [
+        { sessionId: 'a1', title: '运行中', state: 'active', activity: 'idle', updatedAt: iso(0), lastActivityAt: iso(0) },
+        { sessionId: 'a2', title: '空闲', state: 'active', activity: 'idle', updatedAt: iso(DAY), lastActivityAt: iso(4 * DAY + 1000) },
+        { sessionId: 'a3', title: '已结束', state: 'active', activity: 'idle', updatedAt: iso(DAY), lastActivityAt: iso(DAY), settledAt: iso(DAY) },
       ],
+      workspaces: [
+        { workspaceId: a, workspaceRoot: 'C:\\work\\alpha', displayName: 'alpha', opened: true, status: 'running', activeConversationId: 'a1', canSwitch: true, conversations: [] },
+        { workspaceId: b, workspaceRoot: 'C:\\work\\beta', displayName: 'beta', opened: true, status: 'needs_input', activeConversationId: 'b1', canSwitch: false,
+          conversations: [
+            { sessionId: 'b1', title: '待回答', activity: 'idle', updatedAt: iso(0), lastActivityAt: iso(0) },
+            { sessionId: 'b2', title: '后台空闲', activity: 'idle', updatedAt: iso(DAY), lastActivityAt: iso(DAY), lastCompletedAt: iso(DAY) },
+            { sessionId: 'b3', title: '后台已结束', activity: 'idle', updatedAt: iso(2 * DAY), lastActivityAt: iso(9 * DAY) },
+          ] },
+      ],
+    };
+    return { a, b, snapshot };
+  }
+
+  it('A9-54 groups by saved timestamps: pinned first, live and drafts never auto-settle, 7-day boundary is inclusive', () => {
+    const { context, storage } = createInboxHarness();
+    storage.set('a9.pinnedConversations.v1', JSON.stringify(['pinned-settled', 'pinned-old']));
+    const now = Date.parse('2026-11-09T12:00:00.000Z');
+    const ago = (ms: number) => new Date(now - ms).toISOString();
+    const item = (sessionId: string, fields: any) => ({ key: `w:${sessionId}`, sessionId, activity: 'idle', hasDraft: false,
+      settledAt: null, lastActivityAt: ago(DAY), viewed: false, ...fields });
+    const items = [
+      item('pinned-settled', { settledAt: ago(DAY) }),
+      item('pinned-old', { lastActivityAt: ago(30 * DAY) }),
+      ...['running', 'needs_approval', 'needs_input', 'failed', 'interrupted']
+        .map((activity) => item(`live-${activity}`, { activity, settledAt: ago(DAY), lastActivityAt: ago(30 * DAY) })),
+      item('draft-old', { hasDraft: true, lastActivityAt: ago(30 * DAY) }),
+      item('draft-settled', { hasDraft: true, settledAt: ago(DAY) }),
+      item('manual', { settledAt: ago(1000), lastActivityAt: ago(1000) }),
+      item('almost', { lastActivityAt: ago(7 * DAY - 1) }),
+      item('exact', { lastActivityAt: ago(7 * DAY) }),
+      item('unknown', { lastActivityAt: null }),
+      item('fresh', { lastActivityAt: ago(4 * DAY + 1) }),
+    ];
+    const buckets = Object.fromEntries(context.classify(items, now).map((x: any) => [x.sessionId, x.bucket]));
+    expect(buckets).toEqual({
+      'pinned-settled': 'pinned', 'pinned-old': 'pinned',
+      'live-running': 'active', 'live-needs_approval': 'active', 'live-needs_input': 'active', 'live-failed': 'active', 'live-interrupted': 'active',
+      'draft-old': 'active', 'draft-settled': 'settled', manual: 'settled',
+      almost: 'active', exact: 'settled', unknown: 'active', fresh: 'active',
     });
-    const labels = () => h.nodes.get('conversation-list')!.children
-      .filter((c) => !c.classList.contains('conversation-group-head')).map((li) => String(li.children[0].getAttribute('aria-label')).split('，').slice(0, 3).join('，'));
-    const heads = () => h.nodes.get('conversation-list')!.children
-      .filter((c) => c.classList.contains('conversation-group-head')).map((head) => head.textContent);
-    context.renderDirectory(view('running', 'a'));
-    expect(labels()).toEqual(['B 对话，b，运行中']);
-    context.renderDirectory(view('completed', 'a'));
-    expect(labels()).toEqual(['B 对话，b，已完成']);
-    // 打开后仍留在活跃组，避免点开即跳走。
-    context.renderDirectory(view('completed', 'b'));
-    expect(heads()).toEqual(['活跃1', '已结束1']);
-    expect(labels()).toEqual(['B 对话，b，空闲']);
-    context.renderDirectory(view('completed', 'a'));
-    expect(heads()).toEqual(['活跃0', '已结束2']);
+    const days = Object.fromEntries(items.map((x: any) => [x.sessionId, x.settleInDays]));
+    expect(days.almost).toBe(1);
+    expect(days.fresh).toBe(3);
+    expect(days['draft-old']).toBeNull();
+    expect(days['live-running']).toBeNull();
+    expect(days.exact).toBeNull();
+    // state.inboxUnread 与基于内存的推断已删除。
+    expect(script).not.toContain('inboxUnread');
+    expect(script).not.toContain('inboxSeen');
+  });
+
+  it('A9-54 shows “已完成” only when lastCompletedAt is later than lastVisitedAt (null = earliest) and not while viewing', () => {
+    const { context } = createInboxHarness();
+    const now = Date.parse('2026-11-09T12:00:00.000Z');
+    const item = (sessionId: string, fields: any) => ({ key: `w:${sessionId}`, sessionId, activity: 'idle', hasDraft: false,
+      settledAt: null, lastActivityAt: new Date(now).toISOString(), viewed: false, lastVisitedAt: null, lastCompletedAt: null, ...fields });
+    const t1 = '2026-11-09T10:00:00.000Z';
+    const t2 = '2026-11-09T11:00:00.000Z';
+    const items = context.classify([
+      item('never-visited', { lastCompletedAt: t1 }),
+      item('newer', { lastCompletedAt: t2, lastVisitedAt: t1 }),
+      item('older', { lastCompletedAt: t1, lastVisitedAt: t2 }),
+      item('equal', { lastCompletedAt: t1, lastVisitedAt: t1 }),
+      item('never-completed', {}),
+      item('viewing', { lastCompletedAt: t2, lastVisitedAt: t1, viewed: true }),
+      item('running', { lastCompletedAt: t2, lastVisitedAt: t1, activity: 'running' }),
+    ], now);
+    expect(Object.fromEntries(items.map((x: any) => [x.sessionId, x.unread]))).toEqual({
+      'never-visited': true, newer: true, older: false, equal: false, 'never-completed': false, viewing: false, running: false,
+    });
+  });
+
+  it('A9-54 row actions: no 结束对话 on live rows, background rows use their own scope, rejection shows a Chinese reason', async () => {
+    const t = createInboxHarness();
+    const { a, b, snapshot } = inboxSnapshot();
+    t.context.state.inboxSettledOpen = true;
+    t.render(snapshot);
+    expect(t.groups()).toEqual({ 活跃: ['b1', 'a1', 'b2', 'a2'], 已结束: ['a3', 'b3'] });
+    // 运行中、待回答：只有置顶，没有“结束对话”。
+    for (const id of ['a1', 'b1']) expect(t.actions(id).map((x: any) => x.textContent)).toEqual(['置顶']);
+    expect(t.actions('a2').map((x: any) => x.textContent)).toEqual(['结束对话', '置顶']);
+    expect(t.actions('b3').map((x: any) => x.textContent)).toEqual(['恢复到活跃', '置顶']);
+    expect(t.action('a2', 'settle').getAttribute('aria-label')).toBe('结束对话：空闲');
+    // 活跃组空闲行显示剩余天数；后台完成未查看显示“已完成”。
+    expect(t.row('a2').children[0].textContent).toContain('3 天后结束');
+    expect(t.row('a2').children[0].getAttribute('aria-label')).toContain('3 天后结束');
+    expect(t.row('b2').children[0].getAttribute('aria-label')).toContain('，已完成');
+    // 操作按钮是 <li> 内行按钮的兄弟节点，不嵌套在行按钮里。
+    expect(t.row('a2').children[0].children.some((child: any) => child.className === 'conversation-row-actions')).toBe(false);
+
+    t.action('b2', 'settle').fire('click');
+    await t.flush();
+    t.action('b3', 'reopen').fire('click');
+    await t.flush();
+    t.action('a3', 'reopen').fire('click');
+    await t.flush();
+    const actionCalls = t.calls.filter(([name]) => name !== 'visit');
+    expect(actionCalls).toEqual([
+      ['settle', { workspaceId: b, conversationId: 'b2' }, 'b2'],
+      ['reopen', { workspaceId: b, conversationId: 'b3' }, 'b3'],
+      ['reopen', { workspaceId: a, conversationId: 'a3' }, 'a3'],
+    ]);
+    actionCalls.forEach(([, scope, conversationId]) => expect(scope.conversationId).toBe(conversationId));
+    expect(t.context.refreshSnapshot).toHaveBeenCalledTimes(3);
+
+    t.responses.settle = { ok: false, error: { code: 'A9_CONVERSATION_BUSY' } };
+    t.action('a2', 'settle').fire('click');
+    await t.flush();
+    expect(t.rowError('a2').textContent).toBe('对话正在运行、待审批或待回答，暂不能结束。');
+    expect(t.rowError('a2').getAttribute('role')).toBe('alert');
+    t.responses.reopen = new Error('transport closed');
+    t.action('b3', 'reopen').fire('click');
+    await t.flush();
+    expect(t.rowError('a2')).toBeUndefined();
+    expect(t.rowError('b3').textContent).toBe('恢复到活跃失败，请刷新后重试。');
+
+    // 没有 snapshot.scope：当前工作区的行不显示结束、恢复，置顶仍在；后台工作区仍有自己的 scope。
+    const bare = createInboxHarness();
+    bare.context.state.inboxSettledOpen = true;
+    bare.render({ ...snapshot, scope: undefined, workspaces: [snapshot.workspaces[1]] });
+    expect(bare.actions('a2').map((x: any) => x.textContent)).toEqual(['置顶']);
+    expect(bare.actions('a3').map((x: any) => x.textContent)).toEqual(['置顶']);
+    expect(bare.actions('b2').map((x: any) => x.textContent)).toEqual(['结束对话', '置顶']);
+    expect(bare.calls.filter(([name]) => name === 'visit')).toEqual([]);
+  });
+
+  it('A9-54 hover pin writes a9.pinnedConversations.v1 and moves the row to the pinned group', () => {
+    const t = createInboxHarness();
+    const { snapshot } = inboxSnapshot();
+    t.render(snapshot);
+    t.action('b2', 'pin').fire('click');
+    expect(JSON.parse(t.storage.get('a9.pinnedConversations.v1')!)).toEqual(['b2']);
+    expect(t.groups().置顶).toEqual(['b2']);
+    expect(t.groups().活跃).not.toContain('b2');
+    expect(t.actions('b2').map((x: any) => x.textContent)).toEqual(['取消置顶']);
+    t.action('b2', 'pin').fire('click');
+    expect(JSON.parse(t.storage.get('a9.pinnedConversations.v1')!)).toEqual([]);
+    expect(t.groups().活跃).toContain('b2');
+    // “…”菜单里的置顶入口保留，写同一个键。
+    expect(script).toContain("el('conversation-pin').addEventListener('click', () => { setConversationMenu(false); togglePinnedConversation(state.activeConversationId); });");
+  });
+
+  it('A9-54 records a visit when a conversation is opened and when the viewed run completes; failures only leave diagnostics', async () => {
+    const t = createInboxHarness();
+    const { a, snapshot } = inboxSnapshot();
+    const visits = () => t.calls.filter(([name]) => name === 'visit');
+    t.render(snapshot);
+    await t.flush();
+    expect(visits()).toEqual([['visit', { workspaceId: a, conversationId: 'a1' }, 'a1']]);
+    t.render(snapshot);
+    await t.flush();
+    expect(visits()).toHaveLength(1);
+    // 正在查看的对话运行完成：lastCompletedAt 晚于 lastVisitedAt。
+    const finished = { ...snapshot, agentStatus: 'idle', conversations: snapshot.conversations.map((item: any) => (item.sessionId === 'a1'
+      ? { ...item, lastCompletedAt: new Date().toISOString(), lastVisitedAt: new Date(Date.now() - DAY).toISOString() } : item)) };
+    t.render(finished);
+    await t.flush();
+    expect(visits()).toHaveLength(2);
+    // 正在查看且已完成：不显示“已完成”，也不折叠。
+    expect(t.row('a1').children[0].getAttribute('aria-label')).not.toContain('已完成');
+    expect(t.groups().活跃).toContain('a1');
+    t.render(finished);
+    await t.flush();
+    expect(visits()).toHaveLength(2);
+    // 打开另一对话记录一次查看；失败只留诊断，不显示错误、不抛出。
+    t.responses.visit = { ok: false, error: { code: 'A9_CONVERSATION_ARCHIVED' } };
+    t.render({ ...finished, activeConversationId: 'a2', scope: { workspaceId: a, conversationId: 'a2' } });
+    await t.flush();
+    expect(visits()[2]).toEqual(['visit', { workspaceId: a, conversationId: 'a2' }, 'a2']);
+    expect(t.context.state.inboxVisitDiagnostic).toEqual(expect.objectContaining({ code: 'A9_CONVERSATION_ARCHIVED', conversationId: 'a2' }));
+    expect(t.warn).toHaveBeenCalledWith('A9_INBOX_VISIT_FAILED', 'A9_CONVERSATION_ARCHIVED');
+    expect(t.context.state.inboxActionError || null).toBeNull();
+  });
+
+  it('A9-54 keeps the viewed conversation active while idle and after leaving, until settled or 7 days pass', () => {
+    const t = createInboxHarness();
+    const { a, snapshot } = inboxSnapshot();
+    const now = Date.now();
+    const visitedNow = { ...snapshot, agentStatus: 'idle', conversations: snapshot.conversations.map((item: any) => (item.sessionId === 'a1'
+      ? { ...item, lastVisitedAt: new Date(now).toISOString(), lastActivityAt: new Date(now).toISOString() } : item)) };
+    t.render(visitedNow);
+    expect(t.groups().活跃).toContain('a1');
+    // 离开后由保存的 lastVisitedAt 继续留在活跃组。
+    t.render({ ...visitedNow, activeConversationId: 'a2', scope: { workspaceId: a, conversationId: 'a2' } });
+    expect(t.groups().活跃).toContain('a1');
+    // 首次渲染即正在查看、快照还是 8 天前的旧时间（记录查看尚未回读）：不折叠。
+    const stale = { ...visitedNow, activeConversationId: 'a2', scope: { workspaceId: a, conversationId: 'a2' },
+      conversations: visitedNow.conversations.map((item: any) => (item.sessionId === 'a2'
+        ? { ...item, lastActivityAt: new Date(now - 8 * DAY).toISOString() } : item)) };
+    const fresh = createInboxHarness();
+    fresh.render(stale);
+    expect(fresh.groups().活跃).toContain('a2');
+    t.render(stale);
+    expect(t.groups().活跃).toContain('a2');
+    // 离开后快照仍是 8 天前（记录查看失败的情形）：按保存的时间戳归入已结束。
+    fresh.context.state.inboxSettledOpen = true;
+    fresh.render({ ...stale, activeConversationId: 'a1', scope: { workspaceId: a, conversationId: 'a1' } });
+    expect(fresh.groups().已结束).toContain('a2');
+    // 手动结束立即生效。
+    t.context.state.inboxSettledOpen = true;
+    t.render({ ...stale, conversations: stale.conversations.map((item: any) => (item.sessionId === 'a2'
+      ? { ...item, settledAt: new Date(now).toISOString() } : item)) });
+    expect(t.groups().已结束).toContain('a2');
   });
 });
 
