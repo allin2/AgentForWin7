@@ -188,6 +188,19 @@ function createA9WorkspaceRegistry(options) {
     return entry.runtime;
   }
 
+  // ADR-0322: inbox timestamps may target any conversation in a resident workspace.
+  function resolveInboxScope(scope) {
+    const entry = entries.get(scope && scope.workspaceId);
+    if (!entry || closing.has(entry.workspaceId) || closingAll) {
+      throw failure('A9_SCOPE_STALE', '工作区未驻留或正在关闭，请刷新后重试。');
+    }
+    let current;
+    try { current = admit(entry.workspaceRoot); }
+    catch (_error) { throw failure('A9_SCOPE_STALE', '工作区目录身份复核未通过，请刷新后重试。'); }
+    if (current.workspaceId !== entry.workspaceId) throw failure('A9_SCOPE_STALE', '工作区目录身份已变化。');
+    return entry.runtime;
+  }
+
   async function configureProvider(runtime, values) {
     assertExecutionAllowed();
     if (Array.from(entries.values()).some(entry => entry.runtime.canLeaveWorkspace && !entry.runtime.canLeaveWorkspace().allowed)) {
@@ -235,7 +248,7 @@ function createA9WorkspaceRegistry(options) {
     } finally { closingAll = false; }
   }
 
-  return { admit, open, activate, resolve, directory, configureProvider, close, shutdown,
+  return { admit, open, activate, resolve, resolveInboxScope, directory, configureProvider, close, shutdown,
     getActive: () => entries.get(activeId) || null,
     getById: id => entries.get(id) || null,
     get size() { return entries.size; },

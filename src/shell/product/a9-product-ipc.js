@@ -93,12 +93,12 @@ function createA9ProductRequestHandler(options) {
         throw Object.assign(new Error(`A9_ACTION_UNAVAILABLE:${request.action}`), { code: 'A9_ACTION_UNAVAILABLE' });
       }
       const registry = config.workspaceRegistry;
-      if ([A9_ACTIONS.CONVERSATION_SETTLE, A9_ACTIONS.CONVERSATION_REOPEN, A9_ACTIONS.CONVERSATION_VISIT].includes(request.action)
-        && (request.schemaVersion !== 9 || !request.scope)) {
+      const inboxAction = [A9_ACTIONS.CONVERSATION_SETTLE, A9_ACTIONS.CONVERSATION_REOPEN, A9_ACTIONS.CONVERSATION_VISIT].includes(request.action);
+      if (inboxAction && (request.schemaVersion !== 9 || !request.scope)) {
         throw Object.assign(new Error('A9_SCOPE_REQUIRED'), { code: 'A9_SCOPE_REQUIRED' });
       }
       const workspaceActions = [A9_ACTIONS.WORKSPACE_LIST, A9_ACTIONS.WORKSPACE_ACTIVATE, A9_ACTIONS.WORKSPACE_CLOSE];
-      const restrictedRuntime = restrictedScopeRuntime(registry, request);
+      const restrictedRuntime = inboxAction ? null : restrictedScopeRuntime(registry, request);
       if (request.scope !== undefined && !restrictedRuntime) {
         exactObject(request.scope, ['workspaceId', 'conversationId'], 'A9_SCOPE_INVALID');
         if (request.schemaVersion !== 9 || !/^[a-f0-9]{64}$/.test(request.scope.workspaceId)
@@ -163,7 +163,8 @@ function createA9ProductRequestHandler(options) {
       if (registry && request.schemaVersion === 9 && request.action !== A9_ACTIONS.SNAPSHOT_GET && !request.scope) {
         throw Object.assign(new Error('A9_SCOPE_REQUIRED'), { code: 'A9_SCOPE_REQUIRED' });
       }
-      const runtime = restrictedRuntime || (registry && request.scope ? registry.resolve(request.scope)
+      const runtime = restrictedRuntime || (registry && request.scope
+        ? (inboxAction ? registry.resolveInboxScope(request.scope) : registry.resolve(request.scope))
         : config.getA9Runtime ? await config.getA9Runtime() : null);
       if (runtime && runtime.__a9WorkspaceRequired === true) {
         return {
@@ -301,8 +302,14 @@ function createA9ProductRequestHandler(options) {
           if (typeof payload.conversationId !== 'string' || !payload.conversationId.trim() || payload.conversationId.length > 256) {
             throw Object.assign(new Error('A9_PAYLOAD_INVALID'), { code: 'A9_PAYLOAD_INVALID' });
           }
+          if (request.scope.conversationId !== payload.conversationId) {
+            throw Object.assign(new Error('A9_SCOPE_INVALID'), { code: 'A9_SCOPE_INVALID' });
+          }
           const method = { [A9_ACTIONS.CONVERSATION_SETTLE]: 'settleConversation',
             [A9_ACTIONS.CONVERSATION_REOPEN]: 'reopenConversation', [A9_ACTIONS.CONVERSATION_VISIT]: 'visitConversation' }[request.action];
+          if (typeof runtime[method] !== 'function') {
+            throw Object.assign(new Error('A9_RUNTIME_UNAVAILABLE'), { code: 'A9_RUNTIME_UNAVAILABLE' });
+          }
           return await runtime[method](payload.conversationId);
         }
         case A9_ACTIONS.QUEUE_UPDATE: {

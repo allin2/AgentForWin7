@@ -5,7 +5,7 @@ import * as path from 'path';
 import * as vm from 'vm';
 import Database from 'better-sqlite3';
 const { createA9AgentRuntime } = require('../../product/a9-agent-runtime');
-const { createA9WorkspaceRegistry } = require('../../product/a9-workspace-registry');
+const { createA9WorkspaceRegistry, workspaceId } = require('../../product/a9-workspace-registry');
 const { createA9ProductRequestHandler } = require('../../product/a9-product-ipc');
 const old = '2000-01-01T00:00:00.000Z';
 const done = { id: 'done', content: 'done', finishReason: 'stop' };
@@ -81,20 +81,91 @@ describe('A9-54 real SQLite, runtime, scoped IPC and preload', () => {
       .toMatchObject({ settledAt: null, lastVisitedAt: null, lastCompletedAt: null, lastActivityAt: current.createdAt });
   });
 
-  it.each(['settle', 'reopen', 'visit'])('rejects archived, foreign, stale and malformed %s targets', async action => {
+  it('updates a non-current conversation in background B without changing timestamps or either selection', async () => {
+    const foreground = scope();
+    const entry = registry.open(b); const rb = entry.runtime;
+    const id = rb.getSnapshot().activeConversationId;
+    expect((await rb.createConversation()).ok).toBe(true);
+    const current = rb.getSnapshot().activeConversationId;
+    expect(current).not.toBe(id);
+    db.prepare('UPDATE a9_sessions SET updated_at = ? WHERE session_id = ?').run(old, id);
+    const timestamps = () => rb.getSnapshot().conversations.map((item: any) => ({ sessionId: item.sessionId, updatedAt: item.updatedAt }));
+    const before = timestamps();
+    const target = { workspaceId: entry.workspaceId, conversationId: id };
+    const targetRow = () => rb.getSnapshot().conversations.find((item: any) => item.sessionId === id);
+    for (const action of ['settle', 'visit', 'reopen']) {
+      expect(await call(action, { conversationId: id }, target)).toEqual({ ok: true, conversationId: id });
+      if (action === 'settle') expect(targetRow().settledAt).toEqual(expect.any(String));
+      if (action === 'visit') expect(targetRow().lastVisitedAt).toEqual(expect.any(String));
+      if (action === 'reopen') expect(targetRow().settledAt).toBeNull();
+      expect(timestamps()).toEqual(before);
+      expect(scope()).toEqual(foreground);
+      expect(rb.getSnapshot().activeConversationId).toBe(current);
+    }
+    expect((await call('query', { conversationId: current }, { ...target, conversationId: current })).error.code).toBe('A9_SCOPE_STALE');
+  });
+
+  it.each(['settle', 'reopen', 'visit'])('rejects non-resident and closed workspace %s targets without opening them', async action => {
+    const foreground = scope();
+    const target = { workspaceId: workspaceId(fs.realpathSync(b)), conversationId: foreground.conversationId };
+    expect((await call(action, { conversationId: target.conversationId }, target)).error.code).toBe('A9_SCOPE_STALE');
+    expect(registry.size).toBe(1);
+    const entry = registry.open(b);
+    target.conversationId = entry.runtime.getSnapshot().activeConversationId;
+    await registry.close(entry.workspaceId);
+    expect((await call(action, { conversationId: target.conversationId }, target)).error.code).toBe('A9_SCOPE_STALE');
+    expect(registry.size).toBe(1);
+    expect(scope()).toEqual(foreground);
+  });
+
+  it.each(['workspace', 'application'])('rejects inbox targets during %s shutdown', async kind => {
+    const entry = registry.open(b);
+    const target = { workspaceId: entry.workspaceId, conversationId: entry.runtime.getSnapshot().activeConversationId };
+    const shutdown = entry.runtime.shutdown;
+    let release!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    entry.runtime.shutdown = async (...args: any[]) => { await held; return shutdown(...args); };
+    const closing = kind === 'workspace' ? registry.close(entry.workspaceId) : registry.shutdown();
+    try {
+      for (const action of ['settle', 'reopen', 'visit']) {
+        expect((await call(action, { conversationId: target.conversationId }, target)).error.code).toBe('A9_SCOPE_STALE');
+      }
+    } finally { release(); await closing; entry.runtime.shutdown = shutdown; }
+  });
+
+  it('revalidates background workspace Git identity before updating inbox timestamps', async () => {
+    const entry = registry.open(b);
+    const target = { workspaceId: entry.workspaceId, conversationId: entry.runtime.getSnapshot().activeConversationId };
+    fs.writeFileSync(path.join(b, '.git', 'commondir'), path.join(a, '.git'), 'utf8');
+    for (const action of ['settle', 'reopen', 'visit']) {
+      expect((await call(action, { conversationId: target.conversationId }, target)).error.code).toBe('A9_SCOPE_STALE');
+    }
+  });
+
+  it.each(['settle', 'reopen', 'visit'])('returns runtime unavailable when a resident runtime lacks the %s method', async action => {
+    const entry = registry.open(b); const ready = entry.runtime;
+    const target = { workspaceId: entry.workspaceId, conversationId: ready.getSnapshot().activeConversationId };
+    entry.runtime = { status: 'diagnostics', getSnapshot: () => ({ status: 'diagnostics' }) };
+    try {
+      expect((await call(action, { conversationId: target.conversationId }, target)).error.code).toBe('A9_RUNTIME_UNAVAILABLE');
+    } finally { entry.runtime = ready; }
+  });
+
+  it.each(['settle', 'reopen', 'visit'])('rejects archived, foreign, mismatched and malformed %s targets', async action => {
     const original = scope(); const id = original.conversationId;
-    const foreign = registry.activate(b).runtime.getSnapshot().activeConversationId;
-    expect((await call(action, { conversationId: id }, original)).error.code).toBe('A9_SCOPE_STALE');
+    registry.activate(b);
+    const background = scope();
+    expect((await call(action, { conversationId: id }, original)).ok).toBe(true);
     registry.activate(a);
-    expect((await call(action, { conversationId: foreign })).error.code).toBe('A9_CONVERSATION_WORKSPACE_MISMATCH');
+    expect((await call(action, { conversationId: id }, { ...background, conversationId: id })).error.code).toBe('A9_CONVERSATION_WORKSPACE_MISMATCH');
     for (const payload of [{}, { conversationId: 3 }, { conversationId: '' }, { conversationId: 'x'.repeat(257) }, { conversationId: id, settledAt: old }]) {
       expect((await call(action, payload)).error.code).toBe('A9_PAYLOAD_INVALID');
     }
-    expect((await call(action, { conversationId: id }, { ...original, conversationId: 'stale' })).error.code).toBe('A9_SCOPE_STALE');
+    expect((await call(action, { conversationId: id }, { ...original, conversationId: 'stale' })).error.code).toBe('A9_SCOPE_INVALID');
     expect((await call(action, { conversationId: id }, original, 8)).error.code).toBe('A9_SCOPE_REQUIRED');
     expect((await handler({}, { schemaVersion: 9, action: `a9.conversation.${action}`, payload: { conversationId: id } })).error.code).toBe('A9_SCOPE_REQUIRED');
     runtime.archiveConversation(id);
-    expect((await call(action, { conversationId: id })).error.code).toBe('A9_CONVERSATION_ARCHIVED');
+    expect((await call(action, { conversationId: id }, original)).error.code).toBe('A9_CONVERSATION_ARCHIVED');
   });
 
   it('clears settle on start, rejects settling while running and preserves completion after restart', async () => {
@@ -146,6 +217,6 @@ describe('A9-54 real SQLite, runtime, scoped IPC and preload', () => {
     expect((await scoped.reopenConversation(target.conversationId)).ok).toBe(true);
     expect(row().settledAt).toBeNull();
     registry.activate(b);
-    expect((await scoped.visitConversation(target.conversationId)).error.code).toBe('A9_SCOPE_STALE');
+    expect((await scoped.visitConversation(target.conversationId)).ok).toBe(true);
   });
 });
