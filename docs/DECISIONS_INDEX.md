@@ -322,3 +322,6 @@
 | ADR-0318 | A9-51 alpha.6 准确候选限定接受与同字节发布 | Accepted |
 | ADR-0319 | A9-52 多工作区 Runtime 与目标绑定对话入口 | Accepted |
 | ADR-0320 | A9-53 alpha.7 发布身份与限定接受路径 | Accepted |
+| ADR-0321 | A9-54 收件箱“已结束”状态的保存格式与接口 | Accepted |
+| ADR-0322 | A9-54 收件箱动作可指向驻留的后台工作区 | Accepted |
+| ADR-0323 | A9-55 不选目录的对话按需创建默认工作目录 | Accepted |

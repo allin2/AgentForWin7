@@ -15,6 +15,8 @@
 
 ## 当前交付、进行中的工作与授权
 
+- [A9-55](tasks/A9_55_DEFAULT_WORKDIR.md#93-开发机交付与本地整合2026-11-09-utc)：`A9_55_DEVELOPER_VERIFIED`。最终尖端 `933c0d50…` 的 Opus 复审 P0/P1 0、Linux 审核机 Shell 1545 PASS / 12 跳过、Mac G1 九项 PASS；Mac Electron 22 真实产品交互十项 PASS。本地 main 已以 `35997fe6…` 整合，保留 A9-54 和临时目录修复，29 个原未提交文件内容未变。后继开发构建与公开推送待记录，Win7 为 NOT_PERFORMED；分阶段计划及系统 Documents 根外写入边界见任务书 §9.2。两轮 P1 和原失败保留。
+
 - [A9-53](tasks/A9_53_ALPHA7_MULTIWORKSPACE_RELEASE.md#7-同字节公开与回下载核验2026-11-08-utc)：COMPLETE，`A9_53_WIN7_60_PASS_WITH_KNOWN_LIMITS`。负责人按 ADR-0320 甲限定接受并授权发布 alpha.7 / WIN7-60：源码 `22b575cc…`、ZIP `5b8ae87f…`、manifest `e39b88f0…`。同 ZIP Win7 DEV_CHANNEL 证据：多工作区 run `7949d383…` PASS（候选外驱动 `0a1f81c4…`），alpha.6 队列与 A9-49 可靠性回归 run `a25a26db…` PASS；前三次失败与根因保留。UTC `2026-11-08T11:45:00Z` 公开内部试用预发布，[下载与说明](https://github.com/allin2/AgentForWin7/releases/tag/v0.3.0-alpha.7-win7-60)；4 个附件草稿与公开后各回下载一次，大小/SHA 与本地原件及 GitHub digest 一致。公开 CI run `42476340351` success。Win7 开发根 21.27 GB，高于默认 20 GB。已知限制 5 项见任务书 §6；门 A/B 未执行。准确接受与发布证据在本机 `outputs/alpha7-r1/publish/`。
 
 - [A9-52](tasks/A9_52_MULTIWORKSPACE_CONVERSATIONS.md#5-收件箱式导航修订2026-11-08-utc开发机)：`A9_52_DEVELOPER_VERIFIED`。多工作区并行、目标绑定 IPC 与收件箱式导航已本地提交为 `7db11cd…`（代码与测试 20 个文件）。Mac 开发机 Shell 67/67 套件、1479 PASS / 12 跳过；真实 Electron 22 产品首轮 9 组、重启 1 组通过，覆盖收件箱切换、筛选菜单关闭后台工作区和命令面板重开。结果在 `outputs/a9-52-multiworkspace/INBOX_RESULT.json`。Win7/Win10、打包运行、Windows DPAPI 与 D-013 并发均 NOT_PERFORMED；未推送。
