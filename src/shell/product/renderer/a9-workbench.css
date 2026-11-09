@@ -806,3 +806,10 @@ summary:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--focus
 .project-picker-close { margin-left: auto; padding: 0; border: 0; background: transparent; color: inherit; font: inherit; cursor: pointer; }
 #conversation-new-dialog .field-error { margin: 0 16px 8px; }
 #workspace-background-status { overflow-wrap: anywhere; }
+
+/* A9-55：目录菜单沿用标题栏控件与对话框。 */
+.workdir-control { position: relative; min-width: 0; }
+#workdir-label { max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workdir-menu { position: absolute; right: 0; top: 100%; z-index: 30; width: 280px; max-width: 80vw; padding: 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg-canvas); box-shadow: 0 8px 24px #0002; }
+.workdir-menu button { display: block; width: 100%; text-align: left; }
+.workdir-menu p { margin: 4px 0; overflow-wrap: anywhere; }

@@ -1632,6 +1632,232 @@ describe('A9 unified desktop workbench contract', () => {
       ? { ...item, settledAt: new Date(now).toISOString() } : item)) });
     expect(t.groups().已结束).toContain('a2');
   });
+  // A9-55：用真实管理/首条消息函数驱动 DOM；IPC 与无关的全台刷新由夹具提供。
+  function createWorkdirHarness() {
+    const h = createPaneHarness();
+    const el = (id: string): any => h.document.getElementById(id);
+    const state: any = { snapshot: { scope: { workspaceId: 'old', conversationId: 'c' }, activeConversationId: 'c',
+      workdir: { path: 'C:\\我的文档\\任务_1109', origin: 'auto', created: true } },
+      activeConversationId: 'c', snapshotGeneration: 0, snapshotPollingPauses: 0, workspaceDirectory: [], explorerRequest: 0, workdirBusy: false, workspaceOperation: false };
+    const methods = { renameWorkdir: jest.fn(), linkWorkdir: jest.fn(), openWorkdir: jest.fn() };
+    const forScope = jest.fn(() => methods);
+    const startDefaultConversation = jest.fn();
+    const errors: string[] = [];
+    const refreshSnapshot = jest.fn(async () => null);
+    const context: any = { state, document: h.document, el, api: { a9: { forScope, startDefaultConversation } },
+      root: {}, refreshSnapshot, loadConversationEvents: jest.fn(async () => {}),
+      saveDraftNow: jest.fn(async () => ({ ok: true })), syncSnapshotPolling: jest.fn(),
+      syncComposer: jest.fn(), resizeComposer: jest.fn(), stopLiveTracking: jest.fn(), resetConversationEvents: jest.fn(),
+      renderComposerWorkspace: jest.fn(), renderConversationDirectory: jest.fn(), setTaskState: jest.fn(),
+      canSubmit: () => !state.workspaceOperation && Boolean(el('task-prompt').value.trim()),
+      pathName: (value: string) => String(value || '').split(/[\\/]+/).filter(Boolean).pop() || '',
+      text: (id: string, value: string) => { el(id).textContent = value; },
+      setFieldError: (id: string, value: string) => { el(id).textContent = value; el(id).hidden = !value; },
+      openDialog: (node: any) => { node.hidden = false; }, closeDialog: (node: any) => { node.hidden = true; },
+      clearGlobalError: () => { errors.length = 0; }, showGlobalError: (message: string) => errors.push(message),
+    };
+    const source = script.slice(script.indexOf('  function workdirError('), script.indexOf('  function copyOutput('));
+    vm.runInNewContext(source + ';this.workdir = { renderWorkdir, prepareDefaultConversation, submitDefaultPrompt, runWorkdirAction, openWorkdirRename, appendWorkdirBoundaryAction };', context);
+    return { h, el, state, methods, forScope, startDefaultConversation, refreshSnapshot, context, errors, ...context.workdir };
+  }
+
+  it('A9-55 offers no-directory before all workspace sections and selecting it only prepares the composer', async () => {
+    const t = createWorkdirHarness();
+    const list = t.el('conversation-workspace-list');
+    const descendants = (node: any): any[] => node.children.flatMap((child: any) => [child, ...descendants(child)]);
+    list.querySelectorAll = () => descendants(list).filter((node: any) => node.classList.contains('project-picker-item'));
+    t.context.workspaceBadgeNode = () => t.h.document.createElement('span');
+    t.context.workspaceSummary = () => ({});
+    t.context.chooseWorkspaceFromPicker = t.context.workdir.prepareDefaultConversation;
+    const source = script.slice(script.indexOf('  function pickerOption('), script.indexOf('  function createConversation('));
+    vm.runInNewContext(source + ';this.renderPicker = renderProjectPicker;', t.context);
+    t.state.workspaceDirectory = [{ workspaceId: 'old', displayName: '现有目录', workspaceRoot: 'C:\\old', opened: true }];
+    t.context.renderPicker();
+    const options = list.querySelectorAll();
+    expect(options[0].dataset.value).toBe('__default__');
+    expect(list.children[0].textContent).toContain('不选目录，直接开始');
+    expect(list.children[1].textContent).toBe('已打开的工作区');
+    expect(options[1].textContent).toContain('现有目录');
+    expect(script).toContain("if (value === '__default__') return prepareDefaultConversation();");
+    await t.prepareDefaultConversation();
+    expect(t.state.defaultConversationPending).toBe(true);
+    expect(t.state.snapshot).toBeNull();
+    expect(t.startDefaultConversation).not.toHaveBeenCalled();
+    expect(t.el('task-prompt').value).toBe('');
+    expect(t.el('a9-empty-state').hidden).toBe(true);
+    expect(t.el('a9-mode-open').hidden).toBe(true);
+    expect(t.el('conversation-new-dialog').hidden).toBe(true);
+  });
+
+  it.each([
+    { ok: true, accepted: true },
+    { ok: false, error: { code: 'A9_MODE_SELECTION_REQUIRED' } },
+  ])('A9-55 first message calls startDefaultConversation once and binds returned scope: %j', async (result) => {
+    const t = createWorkdirHarness();
+    t.state.defaultConversationPending = true;
+    t.el('task-prompt').value = '分析日志';
+    const scope = { workspaceId: 'new', conversationId: 'new-c' };
+    const workdir = { path: 'C:\\我的文档\\日志_1109', origin: 'auto', created: false };
+    t.startDefaultConversation.mockResolvedValue({ ...result, scope, workdir });
+    t.refreshSnapshot.mockImplementation(async () => {
+      expect(t.state.snapshot.scope).toEqual(scope);
+      expect(t.state.activeConversationId).toBe('new-c');
+      return null;
+    });
+    const submit = script.slice(script.indexOf('  async function submitPrompt('), script.indexOf('  /**\n   * 任务结束后把焦点交还输入框'));
+    vm.runInNewContext(submit + ';this.send = submitPrompt;', t.context);
+    await t.context.send();
+    expect(t.startDefaultConversation).toHaveBeenCalledTimes(1);
+    expect(t.startDefaultConversation).toHaveBeenCalledWith('分析日志'); // 不自动传 Full Access
+    expect(t.state.defaultConversationPending).toBe(false);
+    expect(t.state.snapshot.workdir).toEqual(workdir);
+    expect(t.refreshSnapshot).toHaveBeenCalledTimes(1);
+    expect(t.el('task-prompt').value).toBe(result.ok ? '' : '分析日志');
+    if (!result.ok) expect(t.errors[0]).toContain('选择此对话的权限模式');
+    expect(t.state.snapshotPollingPauses).toBe(0);
+  });
+
+  it('A9-55 pending composer can draft without a workspace, cannot submit empty/busy input and never saves to an old scope', async () => {
+    const t = createWorkdirHarness();
+    t.state.defaultConversationPending = true;
+    t.state.activeConversationId = null;
+    t.state.snapshot = null;
+    const functions = script.slice(script.indexOf('  function canSubmit('), script.indexOf('  function activeManagedProcesses('))
+      + script.slice(script.indexOf('  function syncComposer('), script.indexOf('  function resizeComposer('))
+      + script.slice(script.indexOf('  async function saveDraftNow('), script.indexOf('  async function runConversationOperation('));
+    vm.runInNewContext(functions + ';this.sync = syncComposer;this.sendable = canSubmit;this.save = saveDraftNow;this.schedule = scheduleDraftSave;', t.context);
+    t.context.sync();
+    expect(t.el('task-prompt').disabled).toBe(false);
+    expect(t.context.sendable()).toBe(false);
+    t.el('task-prompt').value = '未发送消息';
+    t.context.sync();
+    expect(t.context.sendable()).toBe(true);
+    expect(t.el('run-task').disabled).toBe(false);
+    expect(t.el('queue-task').hidden).toBe(true);
+    await expect(t.context.save()).resolves.toBeNull();
+    t.context.schedule(); // 无 root.setTimeout 桩：待发送消息不写旧对话，也不调 IPC。
+    t.state.workspaceOperation = true;
+    t.context.sync();
+    expect(t.context.sendable()).toBe(false);
+    expect(t.el('task-prompt').disabled).toBe(true);
+  });
+
+  it('A9-55 binds a rejected first message even when only scope is returned, and blocks duplicate starts', async () => {
+    const t = createWorkdirHarness();
+    t.state.defaultConversationPending = true;
+    t.el('task-prompt').value = '首条消息';
+    let finish: (value: any) => void = () => {};
+    t.startDefaultConversation.mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+    const pending = t.submitDefaultPrompt();
+    await t.submitDefaultPrompt();
+    expect(t.startDefaultConversation).toHaveBeenCalledTimes(1);
+    const scope = { workspaceId: 'new', conversationId: 'new-c' };
+    finish({ ok: false, scope, error: { code: 'A9_MODE_SELECTION_REQUIRED' } });
+    await pending;
+    expect(t.state.snapshot.scope).toEqual(scope);
+    expect(t.el('task-prompt').value).toBe('首条消息');
+  });
+
+  it.each([
+    [false, false, 'auto', '未创建', true, true],
+    [true, false, 'auto', '任务_1109', false, false],
+    [false, true, 'auto', '目录身份已变化', true, true],
+    [true, false, 'linked', '任务_1109', false, true],
+  ])('A9-55 directory state created=%s identityChanged=%s origin=%s', (created, identityChanged, origin, label, openDisabled, renameDisabled) => {
+    const t = createWorkdirHarness();
+    t.state.snapshot.workdir = { ...t.state.snapshot.workdir, created, identityChanged, origin };
+    t.renderWorkdir(t.state.snapshot);
+    expect(t.el('workdir-label').textContent).toBe(label);
+    expect(t.el('workdir-open').disabled).toBe(openDisabled);
+    expect(t.el('workdir-rename').disabled).toBe(renameDisabled);
+    expect(t.el('workdir-link').disabled).toBe(false);
+    expect(t.el('workdir-warning').hidden).toBe(!identityChanged);
+    expect(t.el('workdir-path').textContent).toBe(t.state.snapshot.workdir.path);
+  });
+
+  it.each(['rename', 'link'])('A9-55 %s success replaces scope before refresh and invalidates the explorer', async (action) => {
+    const t = createWorkdirHarness();
+    t.state.workdirRenameScope = t.state.snapshot.scope;
+    t.el('workdir-rename-input').value = '新目录';
+    const scope = { workspaceId: 'renamed', conversationId: 'c' };
+    const workdir = { path: 'C:\\我的文档\\新目录', origin: action === 'link' ? 'linked' : 'auto', created: true };
+    t.methods.renameWorkdir.mockResolvedValue({ ok: true, scope, workdir });
+    t.methods.linkWorkdir.mockResolvedValue({ ok: true, scope, workdir });
+    t.refreshSnapshot.mockImplementation(async () => { expect(t.state.snapshot.scope).toEqual(scope); return null; });
+    await t.runWorkdirAction(action);
+    expect(t.forScope).toHaveBeenCalledWith({ workspaceId: 'old', conversationId: 'c' });
+    expect(t.state.snapshot.workdir).toEqual(workdir);
+    expect(t.state.explorerRequest).toBe(1);
+    expect(t.refreshSnapshot).toHaveBeenCalledTimes(1);
+    if (action === 'rename') expect(t.methods.renameWorkdir).toHaveBeenCalledWith('新目录');
+    else expect(t.methods.linkWorkdir).toHaveBeenCalledWith();
+  });
+
+  it('A9-55 linking cancellation keeps scope and shows no error; rename refusal shows a Chinese reason', async () => {
+    const t = createWorkdirHarness();
+    const scope = t.state.snapshot.scope;
+    t.methods.linkWorkdir.mockResolvedValue({ ok: false, cancelled: true });
+    await t.runWorkdirAction('link');
+    expect(t.errors).toEqual([]);
+    expect(t.state.snapshot.scope).toBe(scope);
+    expect(t.refreshSnapshot).not.toHaveBeenCalled();
+    t.state.workdirRenameScope = scope;
+    for (const [code, reason] of [['A9_WORKDIR_NAME_CONFLICT', '已存在'], ['A9_WORKDIR_NAME_INVALID', '无效'],
+      ['A9_CONVERSATION_BUSY', '正在运行'], ['A9_WORKDIR_NOT_AUTO', '关联目录不能重命名']]) {
+      t.methods.renameWorkdir.mockResolvedValue({ ok: false, error: { code } });
+      await t.runWorkdirAction('rename');
+      expect(t.el('workdir-rename-error').textContent).toContain(reason);
+      expect(t.el('workdir-rename-error').hidden).toBe(false);
+    }
+  });
+
+  it('A9-55 boundary denial offers a scoped link action only for auto directories, never file content', async () => {
+    const t = createWorkdirHarness();
+    const container = t.h.document.createElement('li');
+    t.methods.linkWorkdir.mockResolvedValue({ ok: false, cancelled: true });
+    t.appendWorkdirBoundaryAction(container, { result: JSON.stringify({ error: { code: 'WORKSPACE_BOUNDARY_VIOLATION' } }) });
+    expect(container.children[0].textContent).toBe('关联已有目录…');
+    container.children[0].fire('click');
+    for (let i = 0; i < 6; i += 1) await Promise.resolve();
+    expect(t.methods.linkWorkdir).toHaveBeenCalledTimes(1);
+    for (const origin of ['linked', undefined]) {
+      t.state.snapshot.workdir = origin ? { origin } : null;
+      const other = t.h.document.createElement('li');
+      t.appendWorkdirBoundaryAction(other, { error: 'WORKSPACE_BOUNDARY_VIOLATION' });
+      expect(other.children).toHaveLength(0);
+    }
+    t.state.snapshot.workdir = { origin: 'auto' };
+    const content = t.h.document.createElement('li');
+    t.appendWorkdirBoundaryAction(content, { result: JSON.stringify({ content: 'WORKSPACE_BOUNDARY_VIOLATION' }) });
+    expect(content.children).toHaveLength(0);
+  });
+
+  it('A9-55 sidebar shows 默认 and directory name for both viewed and background auto workspaces', () => {
+    const t = createInboxHarness();
+    const { snapshot } = inboxSnapshot();
+    snapshot.workdir = { origin: 'auto', path: 'C:\\任务_1109' };
+    snapshot.workspaces[1].workdir = { origin: 'auto', path: 'C:\\后台_1109' };
+    t.render(snapshot);
+    expect(t.row('a1').children[0].textContent).toContain('默认任务_1109');
+    expect(t.row('b1').children[0].textContent).toContain('默认后台_1109');
+    snapshot.workdir = { origin: 'linked', path: 'C:\\任务_1109' };
+    t.render(snapshot);
+    expect(t.row('a1').children[0].textContent).not.toContain('默认');
+  });
+
+  it('A9-55 file browsing uses the scoped preload while a default directory has not been created', async () => {
+    const t = createWorkdirHarness();
+    t.state.snapshot.workdir.created = false;
+    const listWorkspaceDirectory = jest.fn(async () => ({ ok: true, result: { entries: [], truncated: false } }));
+    t.context.a9 = { listWorkspaceDirectory };
+    const source = script.slice(script.indexOf('  async function refreshWorkspace('), script.indexOf('  async function openWorkspaceFile('));
+    vm.runInNewContext(source + ';this.browse = refreshWorkspace;', t.context);
+    await t.context.browse('');
+    expect(listWorkspaceDirectory).toHaveBeenCalledWith('');
+    expect(t.el('workspace-tree').children).toHaveLength(0);
+    expect(t.errors).toEqual([]);
+  });
+
 });
 
 
@@ -1643,7 +1869,7 @@ describe('A9-30 streamed activity cards', () => {
     const block: any = { pendingItems: new Map([['call', item]]) };
     const context: any = { document, TOOL_OUTPUT_LIMIT: 8192, Number, String, Date, state: {},
       clampText: (s: string, n: number) => s.slice(0, n),
-      toolDetailText: (d: any) => d.shell.stdout,
+      toolDetailText: (d: any) => d.shell.stdout, appendWorkdirBoundaryAction: jest.fn(),
       settleItem: jest.fn(), toolEndStatus: () => ['success', '已完成'],
     };
     const source = script.slice(script.indexOf('  function attachActivityDetail('), script.indexOf('  function buildPlanCard('));
