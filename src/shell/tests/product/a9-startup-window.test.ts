@@ -9,12 +9,13 @@ afterEach(() => {
   for (const workspace of temporaryWorkspaces.splice(0)) fs.rmSync(workspace, { recursive: true, force: true });
 });
 
-function loadMainHarness(options: { failHost?: boolean; deferPaint?: boolean; restore?: Promise<void>; platform?: NodeJS.Platform; appAlreadyReady?: boolean } = {}) {
+function loadMainHarness(options: { failHost?: boolean; deferPaint?: boolean; restore?: Promise<void>; platform?: NodeJS.Platform; appAlreadyReady?: boolean; ordinaryWorkspace?: boolean } = {}) {
   const productMain = path.join(__dirname, '..', '..', 'product', 'main.js');
   const source = fs.readFileSync(productMain, 'utf8');
   const calls: string[] = [];
-  const workspacePath = options.restore ? fs.mkdtempSync(path.join(os.tmpdir(), 'w7ca-startup-')) : '/workspace';
-  if (options.restore) temporaryWorkspaces.push(workspacePath);
+  const workspacePath = options.restore || options.ordinaryWorkspace ? fs.mkdtempSync(path.join(os.tmpdir(), 'w7ca-startup-')) : '/workspace';
+  if (options.restore || options.ordinaryWorkspace) temporaryWorkspaces.push(workspacePath);
+  let a9Config: any;
   const ipc: Record<string, any> = {};
   const app = new EventEmitter() as any;
   app.disableHardwareAcceleration = () => calls.push('app.disableHardwareAcceleration');
@@ -41,10 +42,13 @@ function loadMainHarness(options: { failHost?: boolean; deferPaint?: boolean; re
     if (request.endsWith('/policy')) return { createWindowOptions: () => ({}), isTrustedLocalUrl: () => true };
     if (request.endsWith('/desktop-ipc')) return { createDesktopRequestHandler: () => async (event: any) => { if (event.sender !== window.webContents) throw new Error('RENDERER_CAPABILITY_DENIED'); calls.push('desktop.handler'); return { ok: true }; } };
     if (request.endsWith('/a8-product-ipc')) return { createA8ProductRequestHandler: () => async () => ({ ok: true }) };
-    if (request.endsWith('/a9-product-ipc')) return { createA9ProductRequestHandler: () => async () => ({ ok: true }) };
+    if (request.endsWith('/a9-product-ipc')) return { createA9ProductRequestHandler: (config: any) => { a9Config = config; return async () => ({ ok: true }); } };
     if (request.endsWith('/a9-workspace-registry')) return require('../../product/a9-workspace-registry');
     if (request.endsWith('/a9-agent-runtime')) return {
-      createA9AgentRuntime: () => ({}),
+      createA9AgentRuntime: () => ({
+        getWorkdirInfo: () => { throw Object.assign(new Error('ordinary workspace'), { code: 'A9_WORKDIR_NOT_AUTO' }); },
+        getSnapshot: () => ({ status: 'ready', activeConversationId: 'ordinary', conversationControls: { canSwitch: true } }),
+      }),
       openA9RuntimePersistence: () => ({ status: 'ready', manager: { getWorkspaceWorkdir: () => null } }),
     };
     if (request.endsWith('/a9-package-runtime')) return { loadA9PackageRuntime: () => null };
@@ -63,7 +67,7 @@ function loadMainHarness(options: { failHost?: boolean; deferPaint?: boolean; re
   Object.defineProperty(processMock, 'platform', { value: options.platform || process.platform });
   const context: any = { require: (request: string) => request === 'electron' ? electron : request.startsWith('.') ? local(path.resolve(path.dirname(productMain), request)) : request === 'fs' ? fsMock : require(request), __dirname: path.dirname(productMain), __filename: productMain, process: processMock, console, Buffer, setImmediate, clearTimeout, setTimeout, Promise, Date, Object, String, Number, Array, JSON, Error };
   vm.runInNewContext(source, context, { filename: productMain });
-  return { app, window, ipc, calls };
+  return { app, window, ipc, calls, a9Config, workspacePath };
 }
 
 describe('A9-17 real main entry startup ordering', () => {
@@ -144,6 +148,22 @@ describe('A9-17 real main entry startup ordering', () => {
     await result;
     expect(h.calls).toContain('host.dispose');
     expect(h.calls).not.toContain('desktop.handler');
+  });
+
+  test('ordinary workspace activation keeps the main desktop-host selection path', async () => {
+    const h = loadMainHarness({ ordinaryWorkspace: true });
+    await new Promise(resolve => setImmediate(resolve));
+    await new Promise(resolve => setImmediate(resolve));
+    await expect(h.a9Config.selectWorkspace(h.workspacePath)).resolves.toMatchObject({ workspacePath: h.workspacePath });
+    expect(h.calls).toContain('restore.end');
+  });
+
+  test('ordinary workspace startup restoration does not call default-directory management', async () => {
+    const h = loadMainHarness({ restore: Promise.resolve() });
+    await new Promise(resolve => setImmediate(resolve));
+    await new Promise(resolve => setImmediate(resolve));
+    expect(h.calls).toContain('restore.start');
+    expect(h.calls).toContain('restore.end');
   });
 
   test('invalid sender is rejected without waiting for startup', async () => {

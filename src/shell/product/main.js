@@ -1029,7 +1029,7 @@ ipcMain.handle('product:a9-request', withStartupBarrier(createA9ProductRequestHa
   },
   selectWorkspace: async workspacePath => {
     const runtime = a9Workspaces.open(workspacePath).runtime;
-    if (runtime.getWorkdirInfo && runtime.getWorkdirInfo().origin === 'auto') return;
+    if (runtime.getSnapshot({ conversationPage: true }).workdir?.origin === 'auto') return;
     return desktopHost.selectWorkspace(workspacePath);
   },
   chooseWorkspace: async () => {
@@ -1115,7 +1115,7 @@ async function restoreActiveWorkspace() {
   }
   try {
     const entry = a9Workspaces.open(record.workspacePath);
-    if (entry.runtime.getWorkdirInfo && entry.runtime.getWorkdirInfo().origin === 'auto') {
+    if (entry.runtime.getSnapshot({ conversationPage: true }).workdir?.origin === 'auto') {
       a9Workspaces.activate(entry.workspaceRoot);
       runtimeState.activeWorkspaceRestore = { status: 'restored', workspacePath: entry.workspaceRoot };
       return;
