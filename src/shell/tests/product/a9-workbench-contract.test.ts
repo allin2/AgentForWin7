@@ -1270,7 +1270,7 @@ describe('A9 unified desktop workbench contract', () => {
       pathName: (value: string) => String(value || '').split(/[\\/]+/).filter(Boolean).pop() || '',
       switchConversation, activateWorkspace,
       api: { a9: { forScope: () => ({ visitConversation }) } },
-      root: { localStorage: { getItem: () => null, setItem: () => {} }, console: { warn: jest.fn() } },
+      root: { localStorage: { getItem: () => null, setItem: () => {} }, console: { warn: jest.fn() }, ...inboxTimers() },
     };
     // A9-54：已结束由保存的时间戳决定；s2 空闲已满 7 天，b2 同样久但有草稿。
     const eightDaysAgo = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000).toISOString();
@@ -1315,6 +1315,17 @@ describe('A9 unified desktop workbench contract', () => {
 
   // A9-54 §3.4 / §5 第 4 行：分组、7 天边界、“已完成”提示、按钮可用性、悬停置顶与记录查看。
   const DAY = 24 * 60 * 60 * 1000;
+  // 收件箱自动结束重绘定时器：调用时取全局（假时钟生效时即为假定时器）；真实定时器不阻止 Jest 退出。
+  function inboxTimers() {
+    return {
+      setTimeout: (fn: () => void, ms: number) => {
+        const timer: any = setTimeout(fn, ms);
+        if (timer && typeof timer.unref === 'function') timer.unref();
+        return timer;
+      },
+      clearTimeout: (timer: any) => clearTimeout(timer),
+    };
+  }
   function createInboxHarness() {
     const h = createPaneHarness();
     const source = script.slice(script.indexOf('  function conversationStatusLabel('), script.indexOf('  function hydrateDraft('));
@@ -1347,6 +1358,7 @@ describe('A9 unified desktop workbench contract', () => {
           setItem: (key: string, value: string) => { storage.set(key, String(value)); },
         },
         console: { warn },
+        ...inboxTimers(),
       },
     };
     vm.runInNewContext(`${source};this.renderDirectory = renderConversationDirectory;this.classify = classifyInbox;`, context);
@@ -1436,6 +1448,35 @@ describe('A9 unified desktop workbench contract', () => {
     // state.inboxUnread 与基于内存的推断已删除。
     expect(script).not.toContain('inboxUnread');
     expect(script).not.toContain('inboxSeen');
+  });
+
+  it('A9-54 an idle row crosses the 7-day boundary with polling stopped and moves to 已结束 without any other action', () => {
+    jest.useFakeTimers({ now: Date.parse('2026-11-09T12:00:00.000Z') });
+    try {
+      const t = createInboxHarness();
+      const a = 'a'.repeat(64);
+      const now = Date.now();
+      const iso = (ms: number) => new Date(now - ms).toISOString();
+      t.context.state.inboxSettledOpen = true;
+      t.render({
+        workspaceRoot: 'C:\\work\\alpha', scope: { workspaceId: a, conversationId: 'a1' },
+        activeConversationId: 'a1', agentStatus: 'idle', conversationControls: { canSwitch: true, maxActive: 16 },
+        conversations: [
+          { sessionId: 'a1', title: '正在查看', state: 'active', activity: 'idle', updatedAt: iso(0), lastActivityAt: iso(30 * DAY) },
+          { sessionId: 'a2', title: '将到期', state: 'active', activity: 'idle', updatedAt: iso(DAY), lastActivityAt: iso(7 * DAY - 1) },
+          { sessionId: 'a3', title: '有草稿', state: 'active', activity: 'idle', updatedAt: iso(DAY), lastActivityAt: iso(30 * DAY), hasDraft: true },
+        ],
+        workspaces: [],
+      });
+      expect(t.groups()).toEqual({ 活跃: ['a1', 'a2', 'a3'] });
+      expect(jest.getTimerCount()).toBe(1);
+      jest.advanceTimersByTime(1);
+      expect(t.groups()).toEqual({ 活跃: ['a1', 'a3'], 已结束: ['a2'] });
+      // 剩余行都不会自动结束：不再设定时器。
+      expect(jest.getTimerCount()).toBe(0);
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   it('A9-54 shows “已完成” only when lastCompletedAt is later than lastVisitedAt (null = earliest) and not while viewing', () => {

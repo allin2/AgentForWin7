@@ -66,6 +66,7 @@
     findIndex: -1,
     findObserver: null,
     findTimer: null,
+    inboxSettleTimer: null,
     gitRequest: 0,
     explorerRequest: 0,
     viewer: null,
@@ -2080,6 +2081,32 @@
     return items;
   }
 
+  // 浏览器定时器的安全上限；更远的边界分段等待，每段到期重绘后重新计算。
+  const INBOX_TIMER_MAX_MS = 2147483647;
+
+  /**
+   * 轮询停止时没有其他东西触发重绘：在活跃组中最早跨过 7 天边界的空闲行到期时重绘列表。
+   * 全局只保留一个定时器；没有候选时不设。
+   */
+  function scheduleInboxSettleRedraw(items, now) {
+    root.clearTimeout(state.inboxSettleTimer);
+    state.inboxSettleTimer = null;
+    let due = null;
+    for (const item of items) {
+      if (item.bucket !== 'active' || item.pinned || item.activity !== 'idle' || item.hasDraft || item.viewed) continue;
+      const activityAt = inboxTime(item.lastActivityAt);
+      if (activityAt === null) continue;
+      const boundary = activityAt + INBOX_AUTO_SETTLE_MS;
+      if (due === null || boundary < due) due = boundary;
+    }
+    if (due === null) return;
+    const delay = Math.min(INBOX_TIMER_MAX_MS, Math.max(0, due - now));
+    state.inboxSettleTimer = root.setTimeout(() => {
+      state.inboxSettleTimer = null;
+      if (state.snapshot) renderConversationDirectory(state.snapshot);
+    }, delay);
+  }
+
   /** 打开对话、或正在查看的对话运行完成时记录查看；失败只留诊断，不打断界面。 */
   function syncInboxVisit(items) {
     const viewed = items.find((item) => item.viewed);
@@ -2322,8 +2349,10 @@
       ? state.inboxFilter : null;
     state.inboxFilter = filter;
     const currentId = (snapshot.scope && snapshot.scope.workspaceId) || 'current';
-    const all = classifyInbox(inboxConversations(snapshot));
+    const now = Date.now();
+    const all = classifyInbox(inboxConversations(snapshot), now);
     syncInboxVisit(all);
+    scheduleInboxSettleRedraw(all, now);
     const visible = all.filter((item) => (!filter || item.workspace.workspaceId === filter)
       && (!query || String(item.title).toLocaleLowerCase().includes(query) || String(item.workspace.displayName).toLocaleLowerCase().includes(query)));
     const byTime = (a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || ''));
@@ -4310,6 +4339,8 @@
       stopLiveTracking();
       if (state.findObserver) state.findObserver.disconnect();
       root.clearTimeout(state.findTimer);
+      root.clearTimeout(state.inboxSettleTimer);
+      state.inboxSettleTimer = null;
       cancelPendingUndo();
     });
     el('workspace-select').addEventListener('click', () => { void chooseWorkspace(); });

@@ -3016,6 +3016,7 @@ describe('A9-33 batch-2 smoke pieces', () => {
         appendConversationGroup: () => undefined, appendConversationRow: () => undefined,
         // A9-52 inbox helpers are outside this slice; this test only exercises the new-conversation control.
         inboxConversations: () => [], classifyInbox: (items: any[]) => items, inboxRank: () => 0,
+        syncInboxVisit: () => undefined, scheduleInboxSettleRedraw: () => undefined,
         pathName: String, readPinnedConversations: () => new Set() };
       vm.runInNewContext(`${slice(rendererSource, 'function renderConversationDirectory(snapshot)', '  function hydrateDraft(snapshot)')}\nthis.render = renderConversationDirectory;`, box);
       const render = (stale = false) => box.render({ conversations: [{ sessionId: activeId, state: 'active' }], activeConversationId: activeId,
