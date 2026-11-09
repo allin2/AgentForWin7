@@ -2380,6 +2380,7 @@ function createA9AgentRuntime(options) {
       if (!options.preserveDraft) saveDraft('');
       activeLifecycle = { taskId: createdTaskId, turnId: null, runId: null, requestPrompt: persistedRequestPrompt };
       const activeLoop = ensureRuntime();
+      if (options.onAccepted) options.onAccepted({ ok: true, accepted: true });
       const result = await activeLoop.runTurn(requestPrompt, { signal: ownedController.signal });
       if (result.auditIncomplete) return presentAuditFailure(result);
       // turn_started 已写入 active turn/run；这里补齐句柄（幂等）。
@@ -2774,11 +2775,17 @@ function createA9AgentRuntime(options) {
       ? pendingQuestionSnapshot(currentPendingQuestion)
       : persistence.getPendingQuestion(canonicalWorkspace, a9SessionId);
     const checkpointPage = persistence.listRecentCheckpoints(a9SessionId, 50);
+    let workdir;
+    try { workdir = getWorkdirInfo(); }
+    catch (error) {
+      if (error.code !== 'A9_WORKDIR_IDENTITY_CHANGED') throw error;
+      workdir = { ...getWorkdirInfo({ verifyIdentity: false }), created: false, identityChanged: true };
+    }
     return {
       schemaVersion: A9_PROTOCOL_VERSION,
       status: 'ready',
       workspaceRoot,
-      workdir: getWorkdirInfo(),
+      workdir,
       lock: { held: lockHeld && !workspaceLockReleased, holder: lock.holder },
       mode: permissionMode === undefined ? 'needs_selection' : permissionMode,
       modeRecommended: 'full_access',
@@ -3159,9 +3166,15 @@ function createA9AgentRuntime(options) {
     configureProvider,
     probeProvider,
     configureShell,
-    submitTurn: prompt => queueScheduled
-      ? Promise.resolve({ ok: false, error: { code: 'A9_QUEUE_DISPATCH_PENDING' } })
-      : finishQueueOperation(submitTurn(prompt)),
+    submitTurn: (prompt, options = {}) => {
+      if (queueScheduled) return Promise.resolve({ ok: false, error: { code: 'A9_QUEUE_DISPATCH_PENDING' } });
+      // Main-only first-message admission. Ordinary turn.submit still waits for
+      // the result; both paths use the same execution, audit and queue lifecycle.
+      if (options.acceptOnly === true) return new Promise(resolve => {
+        finishQueueOperation(submitTurn(prompt, { onAccepted: resolve })).then(resolve);
+      });
+      return finishQueueOperation(submitTurn(prompt));
+    },
     updateQueue,
     continueTask,
     dismissRecovered,
@@ -3321,6 +3334,10 @@ function createSqliteUnavailableRuntime(reason) {
     reopenConversation() { return { ok: false, error: { code: 'ELECTRON_SQLITE_UNAVAILABLE' } }; },
     visitConversation() { return { ok: false, error: { code: 'ELECTRON_SQLITE_UNAVAILABLE' } }; },
     canLeaveWorkspace() { return { allowed: true, reason: null }; },
+    getWorkdirInfo() { return {}; },
+    getWorkdirConversationId() { return null; },
+    ensureWorkdir() { throw Object.assign(new Error('ELECTRON_SQLITE_UNAVAILABLE'), { code: 'ELECTRON_SQLITE_UNAVAILABLE' }); },
+    listWorkspaceDirectory() { return { ok: false, error: { code: 'ELECTRON_SQLITE_UNAVAILABLE' } }; },
     setMode() { throw new Error('ELECTRON_SQLITE_UNAVAILABLE'); },
     getSnapshot() { return { schemaVersion: 1, status: 'electron_sqlite_unavailable', diagnostics: { code: 'ELECTRON_SQLITE_UNAVAILABLE', detail: safeReason } }; },
     listCheckpoints() { return { ok: false, error: { code: 'ELECTRON_SQLITE_UNAVAILABLE' } }; },
@@ -3370,6 +3387,10 @@ function createDiagnosticsRuntime(outcome) {
     reopenConversation() { return { ok: false, error: { code: 'A9_DIAGNOSTICS_MODE' } }; },
     visitConversation() { return { ok: false, error: { code: 'A9_DIAGNOSTICS_MODE' } }; },
     canLeaveWorkspace() { return { allowed: true, reason: null }; },
+    getWorkdirInfo() { return {}; },
+    getWorkdirConversationId() { return null; },
+    ensureWorkdir() { throw Object.assign(new Error('A9_DIAGNOSTICS_MODE'), { code: 'A9_DIAGNOSTICS_MODE' }); },
+    listWorkspaceDirectory() { return { ok: false, error: { code: 'A9_DIAGNOSTICS_MODE' } }; },
     setMode() { throw new Error('A9_DIAGNOSTICS_MODE'); },
     getSnapshot() { return { schemaVersion: A9_PROTOCOL_VERSION, status: diagnosticStatus, diagnostics: safeDiagnostics }; },
     listCheckpoints() { return { ok: false, error: { code: 'A9_DIAGNOSTICS_MODE' } }; },

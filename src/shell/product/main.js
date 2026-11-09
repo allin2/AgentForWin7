@@ -990,9 +990,6 @@ function workspaceRuntimeOptions() {
       ? { a8DatabasePath: path.join(app.getPath('userData'), 'state', 'agent-events-v2.db') }
       : {}),
     ownerId: `main-${process.pid}`,
-    // Windows package path: Electron safeStorage is the DPAPI boundary. Without
-    // this host injection Provider secrets silently degrade to process memory.
-    safeStorage,
     nativeImage,
     selectShellExecutable: async (kind) => {
       const result = await dialog.showOpenDialog(mainWindow, {
@@ -1012,7 +1009,15 @@ function workspaceRuntimeOptions() {
   };
 }
 function createWorkspaceRuntime(desiredWorkspace, hostOptions) {
-  return createA9AgentRuntime({ ...workspaceRuntimeOptions(), ...hostOptions, workspaceRoot: desiredWorkspace });
+  const runtimeOptions = workspaceRuntimeOptions();
+  return createA9AgentRuntime({
+    ...runtimeOptions,
+    ...hostOptions,
+    workspaceRoot: desiredWorkspace,
+    // Electron safeStorage is the DPAPI boundary for Provider secrets and drafts.
+    safeStorage,
+    electronSqliteRoot: runtimeOptions.electronSqliteRoot,
+  });
 }
 ipcMain.handle('product:a9-request', withStartupBarrier(createA9ProductRequestHandler({
   getA9Runtime: getOrCreateA9Runtime,

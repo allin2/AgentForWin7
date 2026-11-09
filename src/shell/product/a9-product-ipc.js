@@ -121,8 +121,16 @@ function createA9ProductRequestHandler(options) {
         }
         if (selectionInFlight) throw Object.assign(new Error('A9_WORKSPACE_SELECTION_BUSY'), { code: 'A9_WORKSPACE_SELECTION_BUSY' });
         selectionInFlight = true;
-        try { return await registry.startDefaultConversation(request.payload.prompt, request.payload.mode); }
+        let prepared;
+        try { prepared = registry.startDefaultConversation(request.payload.prompt, request.payload.mode); }
         finally { selectionInFlight = false; }
+        const { runtime, scope, workdir } = prepared;
+        try {
+          const result = await runtime.submitTurn(request.payload.prompt, { acceptOnly: true });
+          return { ...result, scope, workdir };
+        } catch (error) {
+          return { ok: false, error: serializeError(error), scope, workdir };
+        }
       }
       if (workspaceActions.includes(request.action)) {
         if (!registry || request.schemaVersion !== 9) throw Object.assign(new Error('A9_ACTION_UNAVAILABLE'), { code: 'A9_ACTION_UNAVAILABLE' });

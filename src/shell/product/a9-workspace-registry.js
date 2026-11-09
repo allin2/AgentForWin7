@@ -185,7 +185,7 @@ function createA9WorkspaceRegistry(options) {
     return entry;
   }
 
-  async function startDefaultConversation(prompt, mode) {
+  function startDefaultConversation(prompt, mode) {
     assertExecutionAllowed();
     if (creatingDefault) throw failure('A9_WORKSPACE_SELECTION_BUSY', '正在创建默认目录对话。');
     creatingDefault = true;
@@ -200,8 +200,7 @@ function createA9WorkspaceRegistry(options) {
       selectionClosed = false;
       const conversationId = entry.runtime.getSnapshot({ conversationPage: true }).activeConversationId;
       if (mode !== undefined) entry.runtime.setMode(mode);
-      const result = await entry.runtime.submitTurn(prompt);
-      return { ...result, scope: { workspaceId: entry.workspaceId, conversationId }, workdir: entry.runtime.getWorkdirInfo() };
+      return { runtime: entry.runtime, scope: { workspaceId: entry.workspaceId, conversationId }, workdir: entry.runtime.getWorkdirInfo() };
     } finally { creatingDefault = false; }
   }
 
@@ -300,6 +299,7 @@ function createA9WorkspaceRegistry(options) {
       const entry = entries.get(id);
       const snapshot = entry && entry.runtime.getSnapshot({ conversationPage: true });
       return { workspaceId: id, workspaceRoot: workspace, displayName: path.basename(workspace),
+        ...(snapshot && snapshot.workdir ? { workdir: snapshot.workdir } : {}),
         opened: Boolean(entry), active: id === activeId,
         status: snapshot ? snapshot.agentStatus || snapshot.status : 'closed',
         activeConversationId: snapshot && snapshot.activeConversationId,

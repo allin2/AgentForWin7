@@ -12,6 +12,14 @@ const { defaultWorkdirName, reserveWorkdir } = require('../../product/a9-default
 const date = new Date(2026, 10, 9, 12);
 const done = { id: 'done', content: 'done', finishReason: 'stop' };
 
+async function until(check: () => boolean) {
+  const deadline = Date.now() + 5000;
+  while (!check()) {
+    if (Date.now() > deadline) throw new Error('WORKDIR_CONDITION_TIMEOUT');
+    await new Promise(resolve => setTimeout(resolve, 5));
+  }
+}
+
 describe('A9-55 default workdir real State/runtime/IPC', () => {
   let root: string, documents: string, dataRoot: string, registry: any, handler: any, databases: any[], store: any;
   let steps: any[], chosen: string | null, opened: string[];
@@ -23,7 +31,9 @@ describe('A9-55 default workdir real State/runtime/IPC', () => {
     registry = createA9WorkspaceRegistry({ getDocumentsPath: () => documents, now: () => date, normalizeConversationTitle,
       openPersistence: () => { const result = openA9RuntimePersistence(options); store = result.manager; return result; },
       createRuntime: (workspaceRoot: string, host: any) => createA9AgentRuntime({ ...options, ...host, workspaceRoot,
-        ownerId: `main-${process.pid}`, wrapProvider: () => ({ sendStreamRequest: async () => steps.shift() || done }),
+        ownerId: `main-${process.pid}`, wrapProvider: () => ({ sendStreamRequest: async () => {
+          const step = steps.shift(); return typeof step === 'function' ? step() : step || done;
+        } }),
       }) });
     handler = createA9ProductRequestHandler({ workspaceRegistry: registry, isValidRendererSender: (e: any) => e.trusted !== false,
       getA9Runtime: () => registry.getActive()?.runtime, chooseWorkspace: async () => chosen, openWorkdir: async (value: string) => { opened.push(value); } });
@@ -66,7 +76,7 @@ describe('A9-55 default workdir real State/runtime/IPC', () => {
   it('keeps chat and viewers empty, creates before file tools, recreates, and reopens the reserved path after restart', async () => {
     const initial = await start(); expect(initial.scope).toEqual(scope());
     const reserved = initial.workdir.path; const id = scope().conversationId;
-    expect(initial.error.code).toBe('A9_MODE_SELECTION_REQUIRED');
+    expect(initial).toMatchObject({ ok: false, scope: scope(), error: { code: 'A9_MODE_SELECTION_REQUIRED' } });
     await configure(); expect((await runtime().submitTurn('普通问答')).ok).toBe(true);
     expect(fs.existsSync(reserved)).toBe(false);
     expect((await call('workspace.browse', { path: '' })).result.entries).toEqual([]);
@@ -93,11 +103,45 @@ describe('A9-55 default workdir real State/runtime/IPC', () => {
     const seed = path.join(root, 'seed'); fs.mkdirSync(seed); fs.mkdirSync(path.join(seed, '.git'));
     registry.activate(seed); await configure();
     const result = await call('workdir.start', { prompt: '第一条消息', mode: 'read_only' }, null);
-    expect(result.ok).toBe(true); expect(result.result.outcome).toBe('completed');
+    expect(result).toMatchObject({ ok: true, accepted: true, scope: scope() });
+    expect(result.result).toBeUndefined();
+    await until(() => runtime().getSnapshot().conversation[0]?.outcome === 'completed');
     expect(runtime().getSnapshot().mode).toBe('read_only');
     expect(fs.existsSync(result.workdir.path)).toBe(false);
     expect(runtime().getSnapshot().conversation[0].requestPrompt).toBe('第一条消息');
     expect(store.getConversationMetadata(result.scope.conversationId).workdir).toEqual({ version: 1, origin: 'auto', createdAt: null });
+  });
+
+  it('releases both selection locks before first-turn execution and keeps approval alive across workspace activation', async () => {
+    const seed = path.join(root, 'seed'); fs.mkdirSync(seed); fs.mkdirSync(path.join(seed, '.git'));
+    registry.activate(seed); await configure(); const seedScope = scope();
+    let release!: (value: any) => void;
+    const held = new Promise(resolve => { release = resolve; });
+    let requested = false;
+    steps.push(() => { requested = true; return held; });
+    try {
+      const started = await call('workdir.start', { prompt: '首轮需要审批', mode: 'full_access' }, null);
+      expect(started).toMatchObject({ ok: true, accepted: true });
+      const first = runtime();
+      await until(() => requested);
+      first.ensureWorkdir(); fs.writeFileSync(path.join(started.workdir.path, 'keep.txt'), 'keep', 'utf8');
+      // Keep this workspace independent even if the machine's temp root is in Git.
+      fs.mkdirSync(path.join(started.workdir.path, '.git'));
+      const switched = await call('workspace.activate', { workspaceId: seedScope.workspaceId }, null);
+      expect(switched).toMatchObject({ ok: true, scope: seedScope });
+      expect(first.getSnapshot().agentStatus).toBe('running');
+      release({ id: 'approval', content: '', finishReason: 'tool_calls', toolCalls: [{ id: 'delete', name: 'delete', arguments: '{"path":"keep.txt","permanent":true}' }] });
+      await until(() => Boolean(first.getSnapshot().pendingApproval));
+      const approval = first.getSnapshot().pendingApproval;
+      // The registry creation lock must also be free while the first turn awaits approval.
+      const second = await call('workdir.start', { prompt: '另一个默认对话', mode: 'read_only' }, null);
+      expect(second.error).toBeUndefined();
+      expect(second).toMatchObject({ ok: true, accepted: true });
+      expect(second.scope.workspaceId).not.toBe(started.scope.workspaceId);
+      expect((await call('workspace.activate', { workspaceId: seedScope.workspaceId }, null)).ok).toBe(true);
+      expect(first.getSnapshot().pendingApproval).toEqual(approval);
+      expect(fs.readFileSync(path.join(started.workdir.path, 'keep.txt'), 'utf8')).toBe('keep');
+    } finally { release(done); }
   });
 
   it('refuses the default root or an ordinary ancestor already resident', async () => {
@@ -128,6 +172,30 @@ describe('A9-55 default workdir real State/runtime/IPC', () => {
     expect(fs.readdirSync(outside)).toEqual([]);
     // Shutdown reads no workspace files; remove only this fixture link.
     fs.unlinkSync(result.workdir.path);
+  });
+
+  it('lists both resident workspaces after one default identity changes while file, command, Git and browse access stay refused', async () => {
+    const seed = path.join(root, 'seed'); fs.mkdirSync(seed); fs.mkdirSync(path.join(seed, '.git'));
+    registry.activate(seed); await configure(); const seedScope = scope();
+    const result = await call('workdir.start', { prompt: '身份变化', mode: 'full_access' }, null);
+    const first = runtime(); await until(() => first.getSnapshot().conversation[0]?.outcome === 'completed');
+    const outside = path.join(root, 'outside'); fs.mkdirSync(outside);
+    fs.writeFileSync(path.join(outside, 'keep.txt'), 'untouched', 'utf8');
+    fs.symlinkSync(outside, result.workdir.path, process.platform === 'win32' ? 'junction' : 'dir');
+    const listed = await call('workspace.list', {}, null);
+    expect(listed.ok).toBe(true); expect(listed.workspaces).toHaveLength(2);
+    expect(listed.workspaces.find((w: any) => w.workspaceId === result.scope.workspaceId).workdir)
+      .toMatchObject({ path: result.workdir.path, origin: 'auto', created: false, identityChanged: true });
+    expect(listed.workspaces.find((w: any) => w.workspaceId === seedScope.workspaceId).workdir.identityChanged).toBeUndefined();
+    expect((await call('snapshot.get', {}, null)).snapshot.workdir.identityChanged).toBe(true);
+    for (const [action, payload] of [
+      ['workspace.read', { path: 'keep.txt', startLine: 1, maxLines: 10 }],
+      ['workspace.browse', { path: '' }], ['git.status', {}], ['turn.submit', { prompt: 'run a command' }],
+    ] as const) expect((await call(action, payload, result.scope)).error.code).toBe('A9_WORKDIR_IDENTITY_CHANGED');
+    expect((await first.submitTurn('run a command')).error.code).toBe('A9_WORKDIR_IDENTITY_CHANGED');
+    await expect(first.gitStatus()).rejects.toMatchObject({ code: 'A9_WORKDIR_IDENTITY_CHANGED' });
+    expect(fs.readFileSync(path.join(outside, 'keep.txt'), 'utf8')).toBe('untouched');
+    expect(fs.readdirSync(outside)).toEqual(['keep.txt']);
   });
 
   it('allows target-bound native relinking after root substitution while retaining the old link', async () => {
