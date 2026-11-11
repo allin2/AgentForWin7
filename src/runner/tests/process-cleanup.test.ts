@@ -14,8 +14,16 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { killWindowsProcessTree } from '../src/process-cleanup';
+import * as cleanup from '../src/process-cleanup';
+
+// The second argument shortens only internal helper deadlines in this harness.
+const runCleanup: (pid: number, timeoutMs?: number) => ReturnType<typeof killWindowsProcessTree> = killWindowsProcessTree;
 
 describe('A9-63 process cleanup deadlines', () => {
+  it('defaults internal helper deadlines to ten seconds pending Win7 calibration', () => {
+    expect((cleanup as any).DEFAULT_INTERNAL_CLEANUP_COMMAND_TIMEOUT_MS).toBe(10_000);
+  });
+
   it('times out a non-exiting WMIC helper and leaves no helper process', async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-63-runner-'));
     const wmic = path.join(root, 'wmic');
@@ -30,15 +38,16 @@ describe('A9-63 process cleanup deadlines', () => {
       (globalThis as any).__a9Wmic = wmic;
       (globalThis as any).__a9Taskkill = taskkill;
       const started = Date.now();
-      const result = await killWindowsProcessTree(target.pid!);
-      expect(Date.now() - started).toBeLessThan(5000);
+      const result = await runCleanup(target.pid!, 750);
+      expect(Date.now() - started).toBeLessThan(1900);
       expect(result.success).toBe(false);
       expect(result.error).toMatch(/wmic timed out|unable to prove cleanup/i);
       const helperPid = Number(fs.readFileSync(helperPidFile, 'utf8'));
       expect(() => process.kill(helperPid, 0)).toThrow();
       expect(() => process.kill(target.pid!, 0)).toThrow();
     } finally {
-      try { target.kill('SIGKILL'); } catch (_err) { /* already gone */ }
+      const closed = new Promise<void>((resolve) => target.once('close', () => resolve()));
+      if (target.exitCode === null && target.signalCode === null) { target.kill('SIGKILL'); await closed; }
       delete (globalThis as any).__a9Wmic;
       delete (globalThis as any).__a9Taskkill;
       fs.rmSync(root, { recursive: true, force: true });
@@ -58,13 +67,16 @@ describe('A9-63 process cleanup deadlines', () => {
     try {
       (globalThis as any).__a9Wmic = wmic;
       (globalThis as any).__a9Taskkill = taskkill;
-      const result = await killWindowsProcessTree(target.pid!);
+      const started = Date.now();
+      const result = await runCleanup(target.pid!, 750);
+      expect(Date.now() - started).toBeLessThan(1900);
       expect(result.success).toBe(false);
       expect(result.error).toMatch(/taskkill timed out|unable to prove cleanup/i);
       const helperPid = Number(fs.readFileSync(helperPidFile, 'utf8'));
       expect(() => process.kill(helperPid, 0)).toThrow();
     } finally {
-      try { target.kill('SIGKILL'); } catch (_err) { /* already gone */ }
+      const closed = new Promise<void>((resolve) => target.once('close', () => resolve()));
+      if (target.exitCode === null && target.signalCode === null) { target.kill('SIGKILL'); await closed; }
       delete (globalThis as any).__a9Wmic;
       delete (globalThis as any).__a9Taskkill;
       fs.rmSync(root, { recursive: true, force: true });

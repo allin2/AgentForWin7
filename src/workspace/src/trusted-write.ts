@@ -340,12 +340,12 @@ export class RecoveryManifestStore {
       raw = fs.readFileSync(this.filePath, 'utf8');
     } catch (error: any) {
       if (error?.code === 'ENOENT') return undefined;
-      throw recoveryManifestError();
+      throw recoveryManifestError(this.filePath);
     }
     try {
       return JSON.parse(raw) as RecoveryManifest;
     } catch (_error) {
-      throw recoveryManifestError();
+      throw recoveryManifestError(this.filePath);
     }
   }
   save(manifest: RecoveryManifest): void {
@@ -355,8 +355,8 @@ export class RecoveryManifestStore {
   clear(): void { try { if (fs.existsSync(this.filePath)) fs.unlinkSync(this.filePath); } catch { /* keep evidence when cleanup fails */ } }
 }
 
-function recoveryManifestError(): Error & { code: string } {
-  return Object.assign(new Error('Recovery manifest is unreadable.'), { code: 'A9_RECOVERY_MANIFEST_UNREADABLE' });
+function recoveryManifestError(manifestPath: string): Error & { code: string } {
+  return Object.assign(new Error(`Recovery manifest is unreadable: ${manifestPath}`), { code: 'A9_RECOVERY_MANIFEST_UNREADABLE' });
 }
 
 export class WriteTransactionCoordinator {

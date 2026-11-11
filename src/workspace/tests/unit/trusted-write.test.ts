@@ -30,6 +30,18 @@ describe('Desktop Alpha 2 trusted write boundary', () => {
     fs.writeFileSync(store.path, '{bad', 'utf8');
     const coordinator = new WriteTransactionCoordinator(root, recovery);
     expect(() => coordinator.getPendingRecovery()).toThrow(expect.objectContaining({ code: 'A9_RECOVERY_MANIFEST_UNREADABLE' }));
+    expect(() => coordinator.getPendingRecovery()).toThrow(store.path);
+    expect(() => store.load()).not.toThrow('{bad');
+    expect(coordinator.isLocked()).toBe(true);
+  });
+
+  it('includes the manifest path on read errors without leaking content', () => {
+    const store = new RecoveryManifestStore(recovery);
+    fs.mkdirSync(store.path, { recursive: true });
+    const coordinator = new WriteTransactionCoordinator(root, recovery);
+    expect(() => coordinator.getPendingRecovery()).toThrow(expect.objectContaining({
+      code: 'A9_RECOVERY_MANIFEST_UNREADABLE', message: expect.stringContaining(store.path),
+    }));
     expect(coordinator.isLocked()).toBe(true);
   });
 

@@ -9,7 +9,7 @@
 
 import * as childProcess from 'child_process';
 
-export const INTERNAL_CLEANUP_COMMAND_TIMEOUT_MS = 2_000;
+export const DEFAULT_INTERNAL_CLEANUP_COMMAND_TIMEOUT_MS = 10_000;
 
 export interface KillResult {
   success: boolean;
@@ -57,7 +57,7 @@ interface WindowsDescendantResult {
   error?: string;
 }
 
-function enumerateWindowsDescendants(pid: number): Promise<WindowsDescendantResult> {
+function enumerateWindowsDescendants(pid: number, timeoutMs: number): Promise<WindowsDescendantResult> {
   return new Promise((resolve) => {
     let settled = false;
     const helper = childProcess.execFile(
@@ -75,10 +75,10 @@ function enumerateWindowsDescendants(pid: number): Promise<WindowsDescendantResu
       if (settled) return;
       settled = true;
       try { helper.kill('SIGKILL'); } catch (_err) { /* best effort; result remains unknown */ }
-      const finish = () => resolve({ descendants: null, error: `wmic timed out after ${INTERNAL_CLEANUP_COMMAND_TIMEOUT_MS}ms; descendant enumeration unavailable` });
+      const finish = () => resolve({ descendants: null, error: `wmic timed out after ${timeoutMs}ms; descendant enumeration unavailable` });
       helper.once('close', finish);
       setTimeout(finish, 250);
-    }, INTERNAL_CLEANUP_COMMAND_TIMEOUT_MS);
+    }, timeoutMs);
     const clear = () => clearTimeout(timer);
     // Keep the callback and timeout mutually exclusive without changing the
     // one-shot result contract.
@@ -87,18 +87,18 @@ function enumerateWindowsDescendants(pid: number): Promise<WindowsDescendantResu
   });
 }
 
-function runTaskkill(pid: number): Promise<{ error?: string; stderr: string }> {
+function runTaskkill(pid: number, timeoutMs: number): Promise<{ error?: string; stderr: string }> {
   return new Promise((resolve) => {
     let settled = false;
     const helper = childProcess.execFile('taskkill', ['/F', '/T', '/PID', String(pid)], {
       windowsHide: true,
-      timeout: INTERNAL_CLEANUP_COMMAND_TIMEOUT_MS,
+      timeout: timeoutMs,
     }, (err, _stdout, stderr) => {
       if (settled) return;
       settled = true;
       if (!err) resolve({ stderr: String(stderr ?? '') });
       else if ((err as any).killed || (err as any).code === 'ETIMEDOUT') {
-        resolve({ error: `taskkill timed out after ${INTERNAL_CLEANUP_COMMAND_TIMEOUT_MS}ms; unable to prove cleanup completed`, stderr: String(stderr ?? '') });
+        resolve({ error: `taskkill timed out after ${timeoutMs}ms; unable to prove cleanup completed`, stderr: String(stderr ?? '') });
       } else {
         resolve({ error: `taskkill failed for PID ${pid}: ${String((err as any).message || err)}`, stderr: String(stderr ?? '') });
       }
@@ -107,10 +107,10 @@ function runTaskkill(pid: number): Promise<{ error?: string; stderr: string }> {
       if (settled) return;
       settled = true;
       try { helper.kill('SIGKILL'); } catch (_err) { /* best effort */ }
-      const finish = () => resolve({ error: `taskkill timed out after ${INTERNAL_CLEANUP_COMMAND_TIMEOUT_MS}ms; unable to prove cleanup completed`, stderr: '' });
+      const finish = () => resolve({ error: `taskkill timed out after ${timeoutMs}ms; unable to prove cleanup completed`, stderr: '' });
       helper.once('close', finish);
       setTimeout(finish, 250);
-    }, INTERNAL_CLEANUP_COMMAND_TIMEOUT_MS);
+    }, timeoutMs);
     const originalResolve = resolve;
     resolve = ((value: { error?: string; stderr: string }) => { clearTimeout(timer); originalResolve(value); }) as typeof resolve;
   });
@@ -159,12 +159,12 @@ export async function killProcessTree(pid: number): Promise<KillResult> {
 }
 
 /** Windows branch is exported for a real-helper regression harness on non-Windows CI. */
-export async function killWindowsProcessTree(pid: number): Promise<KillResult> {
+export async function killWindowsProcessTree(pid: number, internalCommandTimeoutMs = DEFAULT_INTERNAL_CLEANUP_COMMAND_TIMEOUT_MS): Promise<KillResult> {
   if (!isPidAlive(pid)) return { success: true, method: 'already_gone' };
-  const descendantResult = await enumerateWindowsDescendants(pid);
+  const descendantResult = await enumerateWindowsDescendants(pid, internalCommandTimeoutMs);
   const descendants = descendantResult.descendants;
   return new Promise<KillResult>((resolve) => {
-    void runTaskkill(pid).then(({ error, stderr }) => {
+    void runTaskkill(pid, internalCommandTimeoutMs).then(({ error, stderr }) => {
       if (!error) {
         // taskkill 成功后再验证 PID 确已消失，防止命令成功但树仍有残留。
         setTimeout(() => {
