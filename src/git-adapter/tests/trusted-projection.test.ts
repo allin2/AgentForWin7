@@ -112,4 +112,31 @@ describe('A9-05: trusted git projection on real temp repositories', () => {
       fs.rmSync(plain, { recursive: true, force: true });
     }
   });
+
+  it('distinguishes git spawn failure and non-zero exit from a non-repository', async () => {
+    const oldPath = process.env.PATH;
+    const fakeRoot = makeTempDir('a9-git-fake-');
+    try {
+      process.env.PATH = fakeRoot;
+      const missing = await projectTrustedGit(repo);
+      expect(missing.diagnostics?.[0]).toMatchObject({ code: 'A9_GIT_SPAWN_FAILED' });
+      fs.writeFileSync(path.join(fakeRoot, 'git'), '#!/bin/sh\nexit 7\n');
+      fs.chmodSync(path.join(fakeRoot, 'git'), 0o755);
+      const failed = await projectTrustedGit(repo);
+      expect(failed.diagnostics?.[0]).toMatchObject({ code: 'A9_GIT_EXIT_FAILED' });
+    } finally {
+      process.env.PATH = oldPath;
+      fs.rmSync(fakeRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('reports unreadable Git configuration mechanisms without hiding them as absent', async () => {
+    const hooks = path.join(repo, '.git', 'hooks');
+    fs.rmSync(hooks, { recursive: true, force: true });
+    fs.writeFileSync(hooks, 'unreadable marker');
+    const projection = await projectTrustedGit(repo);
+    expect(projection.diagnostics).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'A9_GIT_CONFIG_UNREADABLE' }),
+    ]));
+  });
 });

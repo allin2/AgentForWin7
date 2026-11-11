@@ -23,6 +23,16 @@ describe('Desktop Alpha 2 trusted write boundary', () => {
 
   afterEach(() => fs.rmSync(root, { recursive: true, force: true }));
 
+  it('returns undefined only for a missing recovery manifest and locks on corruption', () => {
+    const store = new RecoveryManifestStore(recovery);
+    expect(store.load()).toBeUndefined();
+    fs.mkdirSync(recovery, { recursive: true });
+    fs.writeFileSync(store.path, '{bad', 'utf8');
+    const coordinator = new WriteTransactionCoordinator(root, recovery);
+    expect(() => coordinator.getPendingRecovery()).toThrow(expect.objectContaining({ code: 'A9_RECOVERY_MANIFEST_UNREADABLE' }));
+    expect(coordinator.isLocked()).toBe(true);
+  });
+
   function intent(callId = 'call-1') {
     return {
       workspaceRoot: root,

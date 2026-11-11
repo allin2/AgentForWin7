@@ -335,13 +335,28 @@ export class RecoveryManifestStore {
   }
   get path(): string { return this.filePath; }
   load(): RecoveryManifest | undefined {
-    try { return JSON.parse(fs.readFileSync(this.filePath, 'utf8')) as RecoveryManifest; } catch { return undefined; }
+    let raw: string;
+    try {
+      raw = fs.readFileSync(this.filePath, 'utf8');
+    } catch (error: any) {
+      if (error?.code === 'ENOENT') return undefined;
+      throw recoveryManifestError();
+    }
+    try {
+      return JSON.parse(raw) as RecoveryManifest;
+    } catch (_error) {
+      throw recoveryManifestError();
+    }
   }
   save(manifest: RecoveryManifest): void {
     fs.mkdirSync(path.dirname(this.filePath), { recursive: true });
     fs.writeFileSync(this.filePath, JSON.stringify(manifest, null, 2) + '\n', 'utf8');
   }
   clear(): void { try { if (fs.existsSync(this.filePath)) fs.unlinkSync(this.filePath); } catch { /* keep evidence when cleanup fails */ } }
+}
+
+function recoveryManifestError(): Error & { code: string } {
+  return Object.assign(new Error('Recovery manifest is unreadable.'), { code: 'A9_RECOVERY_MANIFEST_UNREADABLE' });
 }
 
 export class WriteTransactionCoordinator {
@@ -398,10 +413,23 @@ export class WriteTransactionCoordinator {
     return result;
   }
 
-  getPendingRecovery(): RecoveryManifest | undefined { return this.recovery.load(); }
+  getPendingRecovery(): RecoveryManifest | undefined {
+    try {
+      return this.recovery.load();
+    } catch (error) {
+      this.locked = true;
+      throw error;
+    }
+  }
 
   restorePending(): { restored: boolean; detail: string } {
-    const pending = this.recovery.load();
+    let pending: RecoveryManifest | undefined;
+    try {
+      pending = this.recovery.load();
+    } catch (error) {
+      this.locked = true;
+      throw error;
+    }
     if (!pending) return { restored: false, detail: 'No pending A2 recovery transaction.' };
     try {
       if (!fs.existsSync(pending.backupPath)) throw new Error('Backup file is missing.');

@@ -32,6 +32,38 @@ export interface A9ConversationInbox {
   lastVisitedAt: string | null;
 }
 
+export interface A9PersistenceDiagnostic {
+  code: string;
+  detail: string;
+  count?: number;
+  table?: string;
+  rowId?: string;
+}
+
+const MAX_PERSISTENCE_DIAGNOSTICS = 32;
+
+class PersistenceDiagnosticBuffer {
+  private readonly entries: A9PersistenceDiagnostic[] = [];
+
+  add(entry: A9PersistenceDiagnostic): void {
+    const existing = this.entries.find((item) => item.code === entry.code);
+    if (existing && entry.code === 'A9_PERSISTED_JSON_INVALID') {
+      existing.count = Math.min(100_000, (existing.count ?? 0) + 1);
+      return;
+    }
+    if (this.entries.length >= MAX_PERSISTENCE_DIAGNOSTICS) return;
+    this.entries.push({ ...entry });
+  }
+
+  snapshot(): A9PersistenceDiagnostic[] { return this.entries.map((entry) => ({ ...entry })); }
+}
+
+let activeSafeParseContext: { buffer: PersistenceDiagnosticBuffer; table: string; rowId: string } | undefined;
+
+function setSafeParseContext(buffer: PersistenceDiagnosticBuffer, table: string, rowId: unknown): void {
+  activeSafeParseContext = { buffer, table, rowId: String(rowId ?? 'unknown') };
+}
+
 function a9PersistenceError(code: string, message: string): Error & { code: string } {
   const error = new Error(`${code}: ${message}`) as Error & { code: string };
   error.code = code;
@@ -61,7 +93,7 @@ export interface A9OpenOptions {
 }
 
 export type A9OpenOutcome =
-  | { status: 'ready'; manager: A9PersistenceManager; backupPath?: string; backupSha256?: string; importedA8Workspaces: number }
+  | { status: 'ready'; manager: A9PersistenceManager; backupPath?: string; backupSha256?: string; importedA8Workspaces: number; diagnostics?: A9PersistenceDiagnostic[] }
   | { status: 'schema_refused'; reason: string; foundVersion?: number }
   | { status: 'diagnostics'; error: string; hint: string };
 
@@ -129,11 +161,21 @@ export interface A9QuestionResolution extends A9QuestionReplyFact {
 }
 
 export class A9PersistenceManager {
+  private readonly diagnosticBuffer = new PersistenceDiagnosticBuffer();
+
   private constructor(
     readonly db: SqliteDatabase,
     private readonly databasePath: string,
     private readonly retentionDays: number,
   ) {}
+
+  getDiagnostics(): A9PersistenceDiagnostic[] { return this.diagnosticBuffer.snapshot(); }
+
+  addDiagnostic(diagnostic: A9PersistenceDiagnostic): void { this.diagnosticBuffer.add(diagnostic); }
+
+  private markParseLocation(table: string, rowId: unknown): void {
+    setSafeParseContext(this.diagnosticBuffer, table, rowId);
+  }
 
   /**
    * 打开/迁移 A9 数据库。任何失败都返回结构化结果，不覆盖旧库。
@@ -252,7 +294,18 @@ export class A9PersistenceManager {
     let backupPath: string | undefined;
     let backupSha256: string | undefined;
     let backupDataVersion: number | undefined;
-    const embeddedA8Data = a8TablesPresent(db);
+    let embeddedA8Data = false;
+    try {
+      embeddedA8Data = a8TablesPresent(db);
+    } catch (err) {
+      try { db.close(); } catch (_closeError) { /* best effort */ }
+      try { externalA8Db?.close(); } catch (_closeError) { /* best effort */ }
+      return {
+        status: 'diagnostics',
+        error: err instanceof Error ? err.message : 'A9_SQLITE_PROBE_FAILED: A8 table probe failed',
+        hint: 'A8 表探测失败（锁定、损坏或权限不足）；产品进入受限诊断模式。',
+      };
+    }
     const hasA8Data = embeddedA8Data || Boolean(externalA8Db);
     const requiresMigrationBackup = embeddedA8Data
       || (existingVersion !== undefined && existingVersion < A9_SCHEMA_VERSION)
@@ -308,11 +361,24 @@ export class A9PersistenceManager {
 
     // 只有 schema 创建/迁移和 A8 白名单导入整体成功后才切换 WAL；失败路径
     // 不应仅因 journal mode 预写而改变原库身份。
+    const openDiagnostics: A9PersistenceDiagnostic[] = [];
     try {
-      db.exec('PRAGMA journal_mode = WAL');
+      const actual = String(db.pragma('journal_mode = WAL', { simple: true })).toLowerCase();
+      if (actual !== 'wal') {
+        openDiagnostics.push({
+          code: 'A9_SQLITE_WAL_UNAVAILABLE',
+          detail: `WAL request failed; actual journal mode=${actual || 'unknown'}`,
+        });
+      }
     } catch (_err) {
-      // WAL 不可用时不伪造成功；后续 SQLite 操作会返回实际错误。
+      let actual = 'unknown';
+      try { actual = String(db.pragma('journal_mode', { simple: true })).toLowerCase() || 'unknown'; } catch (_probeError) { /* keep unknown */ }
+      openDiagnostics.push({
+        code: 'A9_SQLITE_WAL_UNAVAILABLE',
+        detail: `WAL request failed; actual journal mode=${actual}`,
+      });
     }
+    for (const diagnostic of openDiagnostics) manager.addDiagnostic(diagnostic);
 
     try { externalA8Db?.close(); } catch (_closeError) { /* best effort */ }
 
@@ -322,6 +388,7 @@ export class A9PersistenceManager {
       manager,
       ...(backupPath ? { backupPath, backupSha256 } : {}),
       importedA8Workspaces,
+      ...(openDiagnostics.length > 0 ? { diagnostics: manager.getDiagnostics() } : {}),
     };
   }
 
@@ -934,6 +1001,7 @@ export class A9PersistenceManager {
   getConversationMetadata(sessionId: string): Record<string, unknown> {
     const row = this.db.prepare('SELECT metadata_json FROM a9_sessions WHERE session_id = ?').get(sessionId) as any;
     if (!row) throw a9PersistenceError('A9_CONVERSATION_NOT_FOUND', '未找到对话。');
+    this.markParseLocation('a9_sessions', row.session_id);
     return safeParse(typeof row.metadata_json === 'string' ? row.metadata_json : '{}');
   }
 
@@ -1109,6 +1177,7 @@ export class A9PersistenceManager {
     const changes: string[] = [];
     const sideEffects = new Set(['write','edit','copy','move','delete','shell','start_process','stop_process']);
     for (const row of rows) {
+      this.markParseLocation('a9_events', row.id);
       const payload = safeParse(row.payload_json) as any;
       const data = payload.data || payload;
       if (row.event_type === 'tool_start' && typeof data.callId === 'string') started.set(`${row.turn_id}:${data.callId}`, data);
@@ -1129,10 +1198,12 @@ export class A9PersistenceManager {
     }));
     const request = this.db.prepare("SELECT payload_json FROM a9_events WHERE session_id = ? AND event_type = 'conversation.request' AND json_extract(CASE WHEN json_valid(payload_json) THEN payload_json ELSE '{}' END, '$.interruptedTurnId') IS NULL AND json_extract(payload_json, '$.taskId') = ? ORDER BY id LIMIT 1").get(sessionId, taskId) as any;
     const checkpoint = this.db.prepare('SELECT payload_json FROM a9_checkpoints WHERE session_id = ? AND turn_id = ?').get(sessionId, turn.turn_id) as any;
+    if (checkpoint) this.markParseLocation('a9_checkpoints', checkpoint.turn_id);
     const checkpointPayload = checkpoint ? safeParse(checkpoint.payload_json) as any : {};
     if (Array.isArray(checkpointPayload.externalChanges)) {
       for (const change of checkpointPayload.externalChanges) if (typeof change.path === 'string') changes.push(change.path.slice(0, 512));
     }
+    if (request) this.markParseLocation('a9_events', request.id ?? taskId);
     const requestPayload = request ? safeParse(request.payload_json) as any : {};
     const originalGoal = typeof requestPayload.requestPrompt === 'string' ? requestPayload.requestPrompt.slice(0, 2000) : '';
     if (!originalGoal) throw a9PersistenceError('A9_RECOVERY_GOAL_UNAVAILABLE', '原用户目标不可核验，请输入新的任务要求。');
@@ -1144,6 +1215,7 @@ export class A9PersistenceManager {
         AND json_extract(r.payload_json, '$.revision') = json_extract(e.payload_json, '$.revision')
         AND json_extract(r.payload_json, '$.decision') = 'answered')
       ORDER BY e.id DESC LIMIT 1`).get(sessionId) as any;
+    if (answeredQuestionRow) this.markParseLocation('a9_events', answeredQuestionRow.id ?? sessionId);
     const answeredQuestionPayload = answeredQuestionRow ? safeParse(answeredQuestionRow.payload_json) as any : null;
     const answerRow = answeredQuestionPayload ? this.db.prepare(`SELECT payload_json FROM a9_events WHERE session_id = ?
       AND event_type = 'question_resolved'
@@ -1151,6 +1223,7 @@ export class A9PersistenceManager {
       AND json_extract(payload_json, '$.revision') = ?
       AND json_extract(payload_json, '$.decision') = 'answered'
       ORDER BY id DESC LIMIT 1`).get(sessionId, answeredQuestionPayload.questionId, answeredQuestionPayload.revision) as any : null;
+    if (answerRow) this.markParseLocation('a9_events', answerRow.id ?? sessionId);
     const answerPayload = answerRow ? safeParse(answerRow.payload_json) as any : null;
     const recoveryRevision = crypto.createHash('sha256').update(JSON.stringify({ workspacePath, sessionId, task, turn, rows, checkpoint }), 'utf8').digest('hex');
     return { conversationId: sessionId, taskId, interruptedTurnId: turn.turn_id, recoveryRevision, originalGoal,
@@ -1245,7 +1318,10 @@ export class A9PersistenceManager {
       turnId: row.turn_id,
       sessionId: row.session_id,
       createdAt: row.created_at,
-      payload: safeParse(row.payload_json),
+      payload: (() => {
+        this.markParseLocation('a9_checkpoints', row.turn_id);
+        return safeParse(row.payload_json);
+      })(),
     };
   }
 
@@ -1389,6 +1465,7 @@ export class A9PersistenceManager {
 
     const facts = new Map<string, any>();
     for (const row of requestRows.reverse()) {
+      this.markParseLocation('a9_events', row.request_id ?? row.task_id);
       const payload = safeParse(row.payload_json) as any;
       if (!payload.taskId || typeof payload.requestPrompt !== 'string') continue;
       const task = tasks.get(payload.taskId);
@@ -1404,6 +1481,7 @@ export class A9PersistenceManager {
       });
     }
     for (const row of checkpointRows.reverse()) {
+      this.markParseLocation('a9_checkpoints', row.turn_id);
       const payload = safeParse(row.payload_json) as any;
       const taskId = row.task_id || `legacy:${row.turn_id}`;
       const existing = facts.get(taskId);
@@ -1480,7 +1558,9 @@ export class A9PersistenceManager {
     const selected = rows.slice(0, limit);
     const last = selected[selected.length - 1];
     const facts = selected.reverse().map((row) => {
+      this.markParseLocation('a9_events', row.request_id ?? row.task_id);
       const request = safeParse(row.request_payload || '{}') as any;
+      this.markParseLocation('a9_checkpoints', row.turn_id ?? row.task_id);
       const checkpoint = safeParse(row.checkpoint_payload || '{}') as any;
       return {
         taskId: row.task_id, turnId: row.turn_id || null,
@@ -1590,6 +1670,7 @@ export class A9PersistenceManager {
   }
 
   private isContinuationTurn(payloadJson: string | undefined): boolean {
+    this.markParseLocation('a9_turns', payloadJson ? 'turn-payload' : 'unknown');
     const payload = safeParse(payloadJson || '{}') as any;
     return typeof payload.interruptedTurnId === 'string' || typeof payload.continuation?.interruptedTurnId === 'string';
   }
@@ -1646,6 +1727,7 @@ export class A9PersistenceManager {
         AND json_extract(payload_json, '$.revision') = ? LIMIT 1`)
         .get(question.conversationId, question.questionId, question.revision) as any;
       if (duplicate) {
+        this.markParseLocation('a9_events', duplicate.id);
         const stored = safeParse((this.db.prepare('SELECT payload_json FROM a9_events WHERE id = ?').get(duplicate.id) as any)?.payload_json);
         if (JSON.stringify(stored) !== JSON.stringify(question)) {
           throw a9PersistenceError('A9_QUESTION_FACT_CONFLICT', '同一问题身份出现不同事实。');
@@ -1677,6 +1759,7 @@ export class A9PersistenceManager {
         AND json_extract(r.payload_json, '$.revision') = json_extract(e.payload_json, '$.revision'))
       ORDER BY e.id DESC LIMIT 1`).get(sessionId) as any;
     if (!row) return null;
+    this.markParseLocation('a9_events', row.id);
     const payload = safeParse(row.payload_json) as any;
     if (!payload || payload.schemaVersion !== 1 || typeof payload.questionId !== 'string'
       || !Number.isSafeInteger(payload.revision) || !Array.isArray(payload.options)
@@ -1730,12 +1813,14 @@ export class A9PersistenceManager {
           AND json_extract(payload_json, '$.revision') = ?
           ORDER BY id DESC LIMIT 1`).get(input.conversationId, input.questionId, input.revision) as any;
         if (!existingRow) throw a9PersistenceError('A9_QUESTION_STALE', '问询不存在、已变化或不属于当前对话。');
+        this.markParseLocation('a9_events', existingRow.id ?? input.questionId);
         const existing = safeParse(existingRow.payload_json) as any;
         if (existing.decision !== input.decision || existing.answer !== input.answer) {
           throw a9PersistenceError('A9_QUESTION_REPLY_CONFLICT', '同一问题已用不同回答解决。');
         }
         return { ...existing, duplicate: true } as A9QuestionResolution;
       }
+      this.markParseLocation('a9_events', pendingRow.id ?? input.questionId);
       const pending = safeParse(pendingRow.payload_json) as any;
       if (pending.conversationId !== input.conversationId || pending.workspace !== workspacePath) {
         throw a9PersistenceError('A9_QUESTION_IDENTITY_MISMATCH', '问询不属于当前工作区或对话。');
@@ -1823,6 +1908,7 @@ export class A9PersistenceManager {
   } | undefined {
     const row = this.db.prepare("SELECT payload_json FROM a9_events WHERE event_type='managed_process_ownership' AND json_extract(payload_json, '$.handleId')=? ORDER BY id DESC LIMIT 1").get(handleId) as any;
     if (!row) return undefined;
+    this.markParseLocation('a9_events', row.id ?? handleId);
     const payload = safeParse(row.payload_json) as any;
     if (!payload || payload.schemaVersion !== 1 || !payload.owner) throw new Error('A9_MANAGED_OWNERSHIP_CORRUPT');
     const { handleId: _handleId, ...ownership } = payload; return ownership;
@@ -1849,7 +1935,9 @@ export class A9PersistenceManager {
 
   getManagedProcessDisposition(handleId: string): (Record<string, any> & { eventId: number }) | undefined {
     const row = this.db.prepare("SELECT id, payload_json FROM a9_events WHERE event_type='managed_process_disposition' AND json_extract(payload_json, '$.handleId')=? ORDER BY id DESC LIMIT 1").get(handleId) as any;
-    return row ? { ...(safeParse(row.payload_json) as Record<string, any>), eventId: Number(row.id) } : undefined;
+    if (!row) return undefined;
+    this.markParseLocation('a9_events', row.id);
+    return { ...(safeParse(row.payload_json) as Record<string, any>), eventId: Number(row.id) };
   }
 
   /** 必需事件与处置状态原子提交；不变更 ownership 或声明清理成功。 */
@@ -1933,6 +2021,7 @@ export class A9PersistenceManager {
       // The runtime is the unique writer; transaction binds sequence checks and insertion.
       return this.db.transaction(() => {
         const row = this.db.prepare("SELECT payload_json FROM a9_events WHERE session_id = ? AND turn_id = ? AND event_type = 'tool_output' AND json_extract(payload_json, '$.data.toolCallId') = ? ORDER BY id DESC LIMIT 1").get(sessionId, turnId, d.toolCallId) as { payload_json: string } | undefined;
+        if (row) this.markParseLocation('a9_events', d.toolCallId);
         const previous = row ? (safeParse(row.payload_json) as any)?.data : undefined;
         if (Number(d.outputSeq) !== Number(previous?.outputSeq ?? 0) + 1 || (previous && (previous.requestId !== d.requestId || previous.taskId !== d.taskId))) throw new Error('A9_OUTPUT_EVENT_SEQUENCE');
         return this.insertEvent(sessionId, turnId, 'tool', eventType, payload);
@@ -1983,14 +2072,17 @@ export class A9PersistenceManager {
       ORDER BY id DESC
       LIMIT ?
     `).all(...params, limit) as any[];
-    return rows.reverse().map((row) => ({
-      eventId: Number(row.id),
-      turnId: row.turn_id ?? null,
-      kind: row.kind,
-      eventType: row.event_type,
-      payload: safeParse(row.payload_json) as Record<string, unknown> | null,
-      createdAt: row.created_at,
-    }));
+    return rows.reverse().map((row) => {
+      this.markParseLocation('a9_events', row.id);
+      return {
+        eventId: Number(row.id),
+        turnId: row.turn_id ?? null,
+        kind: row.kind,
+        eventType: row.event_type,
+        payload: safeParse(row.payload_json) as Record<string, unknown> | null,
+        createdAt: row.created_at,
+      };
+    });
   }
 
   /**
@@ -2076,7 +2168,7 @@ function a8TablesPresent(db: SqliteDatabase): boolean {
     const row = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='a8_workspaces'").get();
     return Boolean(row);
   } catch (_err) {
-    return false;
+    throw a9PersistenceError('A9_SQLITE_PROBE_FAILED', 'A8 table probe failed');
   }
 }
 
@@ -2338,9 +2430,13 @@ function assertA9CurrentSchema(db: SqliteDatabase, profile: A9SchemaV4Profile = 
 }
 
 function a8TablesPresentStrict(db: SqliteDatabase): boolean {
-  const row = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='a8_workspaces'").get();
-  if (!row) return false;
-  assertA8WorkspaceSchema(db);
+  if (!a8TablesPresent(db)) return false;
+  try {
+    assertA8WorkspaceSchema(db);
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : 'A8 workspace schema validation failed';
+    throw a9PersistenceError('A9_SQLITE_PROBE_FAILED', detail);
+  }
   return true;
 }
 
@@ -2520,8 +2616,27 @@ function parseConversationInbox(value: unknown): A9ConversationInbox {
 function safeParse(text: string): Record<string, unknown> {
   try {
     const parsed = JSON.parse(text);
-    return parsed && typeof parsed === 'object' ? parsed : {};
+    if (parsed && typeof parsed === 'object') return parsed;
+    if (activeSafeParseContext) {
+      activeSafeParseContext.buffer.add({
+        code: 'A9_PERSISTED_JSON_INVALID',
+        detail: 'Persisted JSON is not an object; empty object returned for compatibility.',
+        count: 1,
+        table: activeSafeParseContext.table,
+        rowId: activeSafeParseContext.rowId,
+      });
+    }
+    return {};
   } catch (_err) {
+    if (activeSafeParseContext) {
+      activeSafeParseContext.buffer.add({
+        code: 'A9_PERSISTED_JSON_INVALID',
+        detail: 'Persisted JSON is invalid; empty object returned for compatibility.',
+        count: 1,
+        table: activeSafeParseContext.table,
+        rowId: activeSafeParseContext.rowId,
+      });
+    }
     return {};
   }
 }
