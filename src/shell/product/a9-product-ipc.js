@@ -88,6 +88,11 @@ function restrictedScopeRuntime(registry, request) {
   return A9_RESTRICTED_STATUSES.includes(active.runtime.status) ? active.runtime : null;
 }
 
+/** A9-61: restricted/diagnostic runtimes have no startup reconciliation. */
+function awaitRuntimeReady(runtime) {
+  return runtime && typeof runtime.whenReady === 'function' ? runtime.whenReady() : undefined;
+}
+
 function createA9ProductRequestHandler(options) {
   const config = options || {};
   let selectionInFlight = false;
@@ -175,6 +180,7 @@ function createA9ProductRequestHandler(options) {
           }
           const knownBefore = new Set(registry.directory().map(item => item.workspaceId));
           const entry = registry.open(workspace);
+          await awaitRuntimeReady(entry.runtime);
           const snapshot = entry.runtime.getSnapshot({ conversationPage: true });
           if (values.conversationId && values.conversationId !== snapshot.activeConversationId) {
             const response = await entry.runtime.activateConversation(values.conversationId);
@@ -213,6 +219,9 @@ function createA9ProductRequestHandler(options) {
         };
       }
       if (!runtime) throw Object.assign(new Error('A9_RUNTIME_UNAVAILABLE'), { code: 'A9_RUNTIME_UNAVAILABLE' });
+      // A9-61: serve a runtime only after its cooperative startup checkpoint
+      // reconciliation settled. Stop is never held behind it.
+      if (request.action !== A9_ACTIONS.TURN_STOP) await awaitRuntimeReady(runtime);
 
       const payload = request.payload || {};
       switch (request.action) {

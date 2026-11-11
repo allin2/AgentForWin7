@@ -376,6 +376,10 @@ function createA9AgentRuntime(options) {
   let managedDismissInFlight = false;
   let checkpointRecoveryDiagnostics = null;
   let checkpointRecoveryFatal = false;
+  // A9-61: startup checkpoint reconciliation validates manifests cooperatively.
+  // Until it settles no Turn, continuation, Undo or Diff may run (fail-closed).
+  let checkpointRecoveryPending = true;
+  let checkpointRecoveryReady = null;
 
   // ----- 按对话草稿（D-020：DPAPI Current User；失败时仅内存） -----
   function draftEncryptionAvailable() {
@@ -865,13 +869,12 @@ function createA9AgentRuntime(options) {
   const standaloneWorkspaceService = guardedWorkspaceService({
     containsSensitiveData: containsSensitiveCheckpointData,
   });
-  try {
+  async function reconcileStartupCheckpoints(candidateTurnIds) {
     const checkpointManager = standaloneWorkspaceService.getCheckpointManager();
     // Only Turns this workspace left interrupted without a final checkpoint row
     // need their manifest now (A9-21 M1). Other history is validated when diff or
     // undo loads it, so startup cost no longer grows with the whole history, and
     // manifests SQLite does not know about stay untouched with undo unavailable.
-    const candidateTurnIds = persistence.findInterruptedWorkspaceTurnsNeedingCheckpoint(canonicalWorkspace);
     const validTurnIds = [];
     const rejectedTurns = [];
     // Invalid or pre-binding v4 manifests remain immutable evidence and their
@@ -879,7 +882,8 @@ function createA9AgentRuntime(options) {
     for (const turnId of candidateTurnIds) {
       let loaded;
       try {
-        loaded = checkpointManager.loadCheckpoint(turnId);
+        // A9-61: full validation in yielded slices; the cache is filled only after it passed.
+        loaded = await checkpointManager.loadCheckpointAsync(turnId);
       } catch (error) {
         rejectedTurns.push({
           turnId,
@@ -910,12 +914,43 @@ function createA9AgentRuntime(options) {
         rejectedTurns,
       };
     }
-  } catch (err) {
+  }
+  const failStartupCheckpointRecovery = (err) => {
     checkpointRecoveryFatal = true;
     checkpointRecoveryDiagnostics = {
       code: 'A9_CHECKPOINT_RECONCILIATION_FAILED',
       detail: redactSecrets(err && err.message ? err.message : String(err)),
     };
+  };
+  let startupCandidateTurnIds = null;
+  try {
+    startupCandidateTurnIds = persistence.findInterruptedWorkspaceTurnsNeedingCheckpoint(canonicalWorkspace);
+  } catch (err) {
+    failStartupCheckpointRecovery(err);
+  }
+  if (!startupCandidateTurnIds || startupCandidateTurnIds.length === 0) {
+    // Nothing to validate: keep the former synchronous startup timing.
+    try {
+      if (startupCandidateTurnIds) persistence.reconcileInterruptedWorkspaceCheckpoints(canonicalWorkspace, []);
+    } catch (err) {
+      failStartupCheckpointRecovery(err);
+    }
+    checkpointRecoveryPending = false;
+    checkpointRecoveryReady = Promise.resolve();
+  } else {
+    checkpointRecoveryReady = (async () => {
+      try {
+        await reconcileStartupCheckpoints(startupCandidateTurnIds);
+      } catch (err) {
+        failStartupCheckpointRecovery(err);
+      } finally {
+        checkpointRecoveryPending = false;
+      }
+    })();
+  }
+  /** Resolves (never rejects) once startup checkpoint reconciliation settled. */
+  function whenCheckpointRecoveryReady() {
+    return checkpointRecoveryReady;
   }
 
   // ----- 用户显式 Shell / 工作区环境覆盖（ADR-0101） -----
@@ -1414,6 +1449,11 @@ function createA9AgentRuntime(options) {
       err.code = 'A9_WORKSPACE_LOCKED';
       throw err;
     }
+    if (checkpointRecoveryPending) {
+      const err = new Error('A9_CHECKPOINT_RECOVERY_PENDING: 崩溃恢复事实仍在校验，暂不执行');
+      err.code = 'A9_CHECKPOINT_RECOVERY_PENDING';
+      throw err;
+    }
     if (checkpointRecoveryFatal) {
       const err = new Error('A9_CHECKPOINT_RECONCILIATION_FAILED: 崩溃恢复事实无法与 SQLite 对账，已停止后续自动执行');
       err.code = 'A9_CHECKPOINT_RECONCILIATION_FAILED';
@@ -1878,7 +1918,8 @@ function createA9AgentRuntime(options) {
       const managers = new Set([standaloneWorkspaceService, loopWorkspaceService].filter(Boolean)
         .map((service) => service.getCheckpointManager()));
       for (const manager of managers) {
-        try { manager.revalidatePersistedTurns(); } catch (error) { recoverySecretError = recoverySecretError || error; }
+        // A9-61: same complete secret revalidation, yielding between bounded slices.
+        try { await manager.revalidatePersistedTurnsAsync(); } catch (error) { recoverySecretError = recoverySecretError || error; }
       }
       if (recoverySecretError) throw recoverySecretError;
     }
@@ -2253,6 +2294,7 @@ function createA9AgentRuntime(options) {
   }
 
   async function continueTask(input) {
+    if (checkpointRecoveryPending) await checkpointRecoveryReady;
     let ownedController = null;
     let lifecycle = null;
     try {
@@ -2345,6 +2387,7 @@ function createA9AgentRuntime(options) {
   }
 
   async function submitTurn(prompt, options = {}) {
+    if (checkpointRecoveryPending) await checkpointRecoveryReady;
     if (activeConversation.state === 'archived') return { ok: false, error: { code: 'A9_CONVERSATION_ARCHIVED' } };
     if (managedAuditFailure) return presentAuditFailure(managedAuditFailure);
     if (auditFailureBlock) return presentAuditFailure(auditFailureBlock);
@@ -2416,6 +2459,7 @@ function createA9AgentRuntime(options) {
   }
 
   async function resumeApproval(input) {
+    if (checkpointRecoveryPending) await checkpointRecoveryReady;
     let resumeProducedResult = false;
     let ownedController = null;
     try {
@@ -2531,6 +2575,7 @@ function createA9AgentRuntime(options) {
   }
 
   async function answerQuestion(input) {
+    if (checkpointRecoveryPending) await checkpointRecoveryReady;
     let ownedController = null;
     let lifecycle = activeLifecycle;
     let producedResult = false;
@@ -3053,34 +3098,51 @@ function createA9AgentRuntime(options) {
     }
   }
 
-  function classifyCheckpointDrift(turnId, outcome, manager) {
+  async function classifyCheckpointDrift(turnId, outcome, manager) {
     if (!outcome || !Array.isArray(outcome.drifted) || outcome.drifted.length === 0) return [];
     const checkpoints = persistence.listCheckpoints(a9SessionId);
     const targetIndex = checkpoints.findIndex((checkpoint) => checkpoint.turnId === String(turnId));
     const later = targetIndex < 0 ? [] : checkpoints.slice(targetIndex + 1);
-    return outcome.drifted.map((entry) => {
+    const reasons = [];
+    for (const entry of outcome.drifted) {
       const raw = String(entry);
       const suffix = raw.lastIndexOf(' (');
       const relPath = suffix < 0 ? raw : raw.slice(0, suffix);
-      const laterTurn = later.find((checkpoint) => manager.getTurnChanges(checkpoint.turnId)
-        .some((change) => change.filePath === relPath && !change.undoAppliedAt));
-      return laterTurn
+      let laterTurn;
+      for (const checkpoint of later) {
+        // A9-61: later Turns load cooperatively; validation errors surface exactly as before.
+        await manager.loadCheckpointAsync(checkpoint.turnId);
+        if (manager.getTurnChanges(checkpoint.turnId)
+          .some((change) => change.filePath === relPath && !change.undoAppliedAt)) {
+          laterTurn = checkpoint;
+          break;
+        }
+      }
+      reasons.push(laterTurn
         ? { path: relPath, kind: 'later_turn', laterTurnId: laterTurn.turnId }
-        : { path: relPath, kind: 'external' };
-    });
+        : { path: relPath, kind: 'external' });
+    }
+    return reasons;
   }
 
-  function undoResponse(turnId, manager, outcome) {
-    return { ok: true, outcome, driftReasons: classifyCheckpointDrift(turnId, outcome, manager) };
+  async function undoResponse(turnId, manager, outcome) {
+    return { ok: true, outcome, driftReasons: await classifyCheckpointDrift(turnId, outcome, manager) };
+  }
+
+  /** A9-61: validate the target manifest cooperatively before the synchronous undo reads the cache. */
+  async function prepareCheckpoint(manager, turnId) {
+    await manager.loadCheckpointAsync(String(turnId));
+    return manager;
   }
 
   async function undoTurn(turnId, confirmationId) {
+    if (checkpointRecoveryPending) await checkpointRecoveryReady;
     assertCheckpointForCurrentConversation(turnId);
     const service = workspaceServiceForState();
     const reconciliation = await service.reconcilePendingExternalBaseline(String(turnId));
     if (reconciliation && confirmationId === reconciliation.confirmationId
       && service.getCheckpointManager().confirmExternalUndo(String(turnId), String(confirmationId))) {
-      const manager = service.getCheckpointManager();
+      const manager = await prepareCheckpoint(service.getCheckpointManager(), turnId);
       return undoResponse(turnId, manager, manager.undoTurn(String(turnId)));
     }
     if (reconciliation) {
@@ -3097,17 +3159,18 @@ function createA9AgentRuntime(options) {
         ...(reconciliation.report ? { externalChanges: reconciliation.report } : {}),
       };
     }
-    const manager = service.getCheckpointManager();
+    const manager = await prepareCheckpoint(service.getCheckpointManager(), turnId);
     return undoResponse(turnId, manager, manager.undoTurn(String(turnId)));
   }
 
   async function undoFile(turnId, relPath, confirmationId) {
+    if (checkpointRecoveryPending) await checkpointRecoveryReady;
     assertCheckpointForCurrentConversation(turnId);
     const service = workspaceServiceForState();
     const reconciliation = await service.reconcilePendingExternalBaseline(String(turnId));
     if (reconciliation && confirmationId === reconciliation.confirmationId
       && service.getCheckpointManager().confirmExternalUndo(String(turnId), String(confirmationId))) {
-      const manager = service.getCheckpointManager();
+      const manager = await prepareCheckpoint(service.getCheckpointManager(), turnId);
       return undoResponse(turnId, manager, manager.undoFile(String(turnId), String(relPath)));
     }
     if (reconciliation) {
@@ -3124,15 +3187,18 @@ function createA9AgentRuntime(options) {
         ...(reconciliation.report ? { externalChanges: reconciliation.report } : {}),
       };
     }
-    const manager = service.getCheckpointManager();
+    const manager = await prepareCheckpoint(service.getCheckpointManager(), turnId);
     return undoResponse(turnId, manager, manager.undoFile(String(turnId), String(relPath)));
   }
 
   function getDiff(turnId) {
+    // Preconditions keep their synchronous throws; only manifest validation and previews are cooperative.
+    if (checkpointRecoveryPending) return checkpointRecoveryReady.then(() => getDiff(turnId));
     if (!ensureWorkdir(false)) return { ok: true, diff: [], review: { files: [] } };
     assertCheckpointForCurrentConversation(turnId);
     const manager = workspaceServiceForState().getCheckpointManager();
-    return { ok: true, diff: manager.getTurnDiff(String(turnId)), review: manager.getTurnReview(String(turnId)) };
+    // A9-61: one cooperative cold load and one preview per record; same result as the sync pair.
+    return manager.getTurnDiffAndReviewAsync(String(turnId)).then(({ diff, review }) => ({ ok: true, diff, review }));
   }
 
   function canLeaveWorkspace() {
@@ -3325,6 +3391,7 @@ function createA9AgentRuntime(options) {
     },
     setMode,
     getSnapshot,
+    whenReady: whenCheckpointRecoveryReady,
     listCheckpoints,
     queryEvents,
     queryConversation,
@@ -3436,6 +3503,7 @@ function createSqliteUnavailableRuntime(reason) {
     shareProviderState() { throw Object.assign(new Error('ELECTRON_SQLITE_UNAVAILABLE'), { code: 'ELECTRON_SQLITE_UNAVAILABLE' }); },
     acceptProviderState() { throw Object.assign(new Error('ELECTRON_SQLITE_UNAVAILABLE'), { code: 'ELECTRON_SQLITE_UNAVAILABLE' }); },
     diagnostics: { code: 'ELECTRON_SQLITE_UNAVAILABLE', detail: safeReason },
+    whenReady() { return Promise.resolve(); },
     configureProvider() { throw new Error('ELECTRON_SQLITE_UNAVAILABLE'); },
     probeProvider() { throw new Error('ELECTRON_SQLITE_UNAVAILABLE'); },
     configureShell() { throw new Error('ELECTRON_SQLITE_UNAVAILABLE'); },
@@ -3493,6 +3561,7 @@ function createDiagnosticsRuntime(outcome) {
     shareProviderState() { throw Object.assign(new Error('A9_DIAGNOSTICS_MODE'), { code: 'A9_DIAGNOSTICS_MODE' }); },
     acceptProviderState() { throw Object.assign(new Error('A9_DIAGNOSTICS_MODE'), { code: 'A9_DIAGNOSTICS_MODE' }); },
     diagnostics: safeDiagnostics,
+    whenReady() { return Promise.resolve(); },
     configureProvider() { throw new Error('A9_DIAGNOSTICS_MODE'); },
     probeProvider() { throw new Error('A9_DIAGNOSTICS_MODE'); },
     configureShell() { throw new Error('A9_DIAGNOSTICS_MODE'); },

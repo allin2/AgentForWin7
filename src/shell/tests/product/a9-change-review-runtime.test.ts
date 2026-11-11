@@ -46,7 +46,7 @@ describe('A9-24 runtime change review response', () => {
     await service.edit('calc.ts', 'one', 'two', { turnId: 'turn-1' });
     register('turn-1', 1);
     const legacyDiff = service.getCheckpointManager().getTurnDiff('turn-1');
-    const response = runtime.getDiff('turn-1');
+    const response = await runtime.getDiff('turn-1');
     expect(JSON.stringify(response.diff)).toBe(JSON.stringify(legacyDiff));
     expect(response.review.files).toMatchObject([{ path: 'calc.ts', additions: 1, deletions: 1, undone: false }]);
     await service.read('calc.ts');

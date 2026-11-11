@@ -15,6 +15,57 @@ import { buildContentDiffPreview } from './diff';
 
 export const CHECKPOINT_SCHEMA_VERSION = 4;
 
+/**
+ * A9-61: cooperative work on the Electron main thread yields after this much
+ * synchronous time or this many steps, whichever comes first. The step bound
+ * keeps interleaving deterministic on fast machines; the time bound caps stalls.
+ */
+const CHECKPOINT_YIELD_SLICE_MS = 16;
+const CHECKPOINT_YIELD_MAX_STEPS = 64;
+/** A9-61: external facts of one Turn are made durable in atomic manifest writes of this size. */
+export const EXTERNAL_FACT_BATCH_OPERATIONS = 256;
+/** A9-61: a manifest rewritten during cooperative validation is re-validated, then falls back to sync. */
+const COOPERATIVE_LOAD_ATTEMPTS = 3;
+
+function yieldToEventLoop(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
+/** Counts cooperative steps and yields once a step or time bound is reached. */
+export class CooperativeSlice {
+  private started = Date.now();
+  private steps = 0;
+
+  async step(): Promise<void> {
+    this.steps += 1;
+    if (this.steps >= CHECKPOINT_YIELD_MAX_STEPS || Date.now() - this.started >= CHECKPOINT_YIELD_SLICE_MS) {
+      await yieldToEventLoop();
+      this.started = Date.now();
+      this.steps = 0;
+    }
+  }
+}
+
+export interface ExternalFactOptions {
+  originalBlobPath?: string;
+  newBlobPath?: string;
+  originalHash?: string;
+  newHash?: string;
+  unrecoverable?: boolean;
+}
+
+export interface ExternalDirectoryFactOptions {
+  originalSnapshotPath?: string;
+  originalTreeHash?: string;
+  emptyTreeHash?: string;
+}
+
+/** One external fact of a Turn, applied in order exactly as the matching record* method would. */
+export type ExternalFactOperation =
+  | { kind: 'file'; path: string; action: 'created' | 'modified' | 'deleted'; options?: ExternalFactOptions }
+  | { kind: 'directory'; path: string; action: 'created' | 'deleted' | 'present' | 'replaced_by_file'; options?: ExternalDirectoryFactOptions }
+  | { kind: 'unrecoverable'; change: UnrecoverableExternalChange };
+
 export interface FileChangeRecord {
   filePath: string;
   action: 'create' | 'modify' | 'delete';
@@ -90,10 +141,29 @@ export interface UndoOutcome {
   drifted: string[];
 }
 
+export interface TurnReviewFile {
+  path: string; action: FileChangeRecord['action']; originalKind?: FileChangeRecord['originalKind'];
+  newKind?: FileChangeRecord['newKind']; undone: boolean; additions: number; deletions: number;
+  diffText: string; diffTruncated: boolean;
+}
+
+export interface TurnReview {
+  turnId: string;
+  files: TurnReviewFile[];
+  unrecoverable: Array<UnrecoverableExternalChange & { reasonCode?: string }>;
+  externalBaselineStatus: 'none' | PersistedExternalBaseline['collectionStatus'];
+}
+
 class CheckpointDriftError extends Error {}
 
 export class CheckpointManager {
   private readonly checkpoints = new Map<string, TurnCheckpoint>();
+  /** A9-61: one cooperative cold load per Turn; concurrent readers share it. */
+  private readonly checkpointLoads = new Map<string, Promise<TurnCheckpoint | undefined>>();
+  /** Incremented whenever cached validation results become untrusted (e.g. new secret material). */
+  private cacheGeneration = 0;
+  /** Manifest bytes behind a failed cooperative validation; private, never serialized. */
+  private readonly failedManifestBytes = new WeakMap<Error, string>();
   private readonly authorizedExternalUndoTurns = new Set<string>();
   private readonly workspaceRoot: string;
   private readonly recoveryRoot: string;
@@ -297,11 +367,13 @@ export class CheckpointManager {
     const artifact = this.assertRecoveryArtifact(candidate, this.snapshotsRoot, label, 'file');
     const expectedPath = fs.realpathSync(this.fileSnapshotPath(turnId, relPath, role));
     if (artifact !== expectedPath) throw new Error(`${label} is not bound to its turn, file path and role`);
-    if (typeof expectedHash !== 'string' || !/^[a-f0-9]{64}$/.test(expectedHash)
-      || this.hashBytes(fs.readFileSync(artifact)) !== expectedHash) {
+    if (typeof expectedHash !== 'string' || !/^[a-f0-9]{64}$/.test(expectedHash)) {
       throw new Error(`${label} content SHA-256 mismatch`);
     }
-    this.assertNotSensitive(fs.readFileSync(artifact), `${label} content`);
+    // Hash and secret-scan the same bytes: one read, identical checks.
+    const content = fs.readFileSync(artifact);
+    if (this.hashBytes(content) !== expectedHash) throw new Error(`${label} content SHA-256 mismatch`);
+    this.assertNotSensitive(content, `${label} content`);
   }
 
   private assertSnapshotNotSensitive(root: string, label: string): void {
@@ -546,6 +618,30 @@ export class CheckpointManager {
   }
 
   private validateCheckpoint(parsed: unknown, requestedTurnId: string): TurnCheckpoint {
+    const steps = this.validateCheckpointSteps(parsed, requestedTurnId);
+    for (;;) {
+      const next = steps.next();
+      if (next.done) return next.value;
+    }
+  }
+
+  /** Runs the same validation steps, yielding the event loop between bounded slices. */
+  private async validateCheckpointCooperatively(parsed: unknown, requestedTurnId: string): Promise<TurnCheckpoint> {
+    const steps = this.validateCheckpointSteps(parsed, requestedTurnId);
+    const slice = new CooperativeSlice();
+    for (;;) {
+      const next = steps.next();
+      if (next.done) return next.value;
+      await slice.step();
+    }
+  }
+
+  /**
+   * The single manifest validation implementation (A9-61). Each `yield` only
+   * marks a boundary between independently validated entries; both the
+   * synchronous and the cooperative drivers execute every check in order.
+   */
+  private *validateCheckpointSteps(parsed: unknown, requestedTurnId: string): Generator<void, TurnCheckpoint, void> {
     if (!this.isPlainRecord(parsed)) throw new Error('checkpoint manifest must be an object');
     if (Number(parsed.schemaVersion) !== CHECKPOINT_SCHEMA_VERSION) {
       throw new Error(`checkpoint manifest schema mismatch for ${requestedTurnId}`);
@@ -647,6 +743,7 @@ export class CheckpointManager {
         originalKind: originalKind as FileChangeRecord['originalKind'],
         newKind: newKind as FileChangeRecord['newKind'],
       };
+      yield;
     }
     const unrecoverable = parsed.unrecoverable === undefined ? {} : parsed.unrecoverable;
     if (!this.isPlainRecord(unrecoverable)) throw new Error('checkpoint manifest unrecoverable must be an object');
@@ -660,6 +757,7 @@ export class CheckpointManager {
       this.assertNotSensitive(raw.path, `checkpoint unrecoverable ${key}.path`);
       this.assertNotSensitive(raw.reason, `checkpoint unrecoverable ${key}.reason`);
       normalizedUnrecoverable[key] = raw as unknown as UnrecoverableExternalChange;
+      yield;
     }
     let externalBaseline: PersistedExternalBaseline | undefined;
     if (parsed.externalBaseline !== undefined) {
@@ -685,6 +783,7 @@ export class CheckpointManager {
         this.assertNotSensitive(relPath, 'checkpoint external baseline file path');
         this.validateBoundFile(raw.blobPath, raw.sha256, requestedTurnId, relPath, 'baseline', 'checkpoint external baseline file');
         files[relPath] = raw as unknown as PersistedExternalBaseline['files'][string];
+        yield;
       }
       const directories: PersistedExternalBaseline['directories'] = Object.create(null);
       for (const [relPath, raw] of Object.entries(baseline.directories)) {
@@ -699,16 +798,19 @@ export class CheckpointManager {
         }
         this.assertSnapshotNotSensitive(artifact, 'checkpoint external baseline directory');
         directories[relPath] = raw as unknown as PersistedExternalBaseline['directories'][string];
+        yield;
       }
-      const skipped = baseline.skipped.map((raw) => {
+      const skipped: PersistedExternalBaseline['skipped'] = [];
+      for (const raw of baseline.skipped as unknown[]) {
         if (!this.isPlainRecord(raw) || typeof raw.path !== 'string'
           || !['too_large', 'backup_failed', 'outside'].includes(String(raw.reason))) {
           throw new Error('checkpoint external baseline skipped fact is invalid');
         }
         this.assertWorkspaceRelativePath(raw.path, 'checkpoint external baseline skipped path');
         this.assertNotSensitive(raw.path, 'checkpoint external baseline skipped path');
-        return raw as unknown as PersistedExternalBaseline['skipped'][number];
-      });
+        skipped.push(raw as unknown as PersistedExternalBaseline['skipped'][number]);
+        yield;
+      }
       externalBaseline = {
         ...(baseline as unknown as PersistedExternalBaseline), files, directories, skipped,
       };
@@ -744,6 +846,83 @@ export class CheckpointManager {
     } catch (err) {
       throw new Error(`无法读取 Checkpoint 清单 ${manifestPath}: ${err instanceof Error ? err.message : String(err)}`);
     }
+  }
+
+  /** Cooperative variant of readValidatedCheckpoint: same checks and errors; returns the bytes it validated. */
+  private async readValidatedCheckpointCooperatively(turnId: string): Promise<{ raw: string; checkpoint: TurnCheckpoint } | undefined> {
+    const manifestPath = this.manifestPath(turnId);
+    if (!fs.existsSync(manifestPath)) return undefined;
+    let raw: string | undefined;
+    try {
+      raw = fs.readFileSync(manifestPath, 'utf8');
+      return { raw, checkpoint: await this.validateCheckpointCooperatively(JSON.parse(raw), turnId) };
+    } catch (err) {
+      // Same message as readValidatedCheckpoint. The validated bytes are remembered privately
+      // (never on the error object, which callers may serialize) for the stale-read retry.
+      const failure = new Error(`无法读取 Checkpoint 清单 ${manifestPath}: ${err instanceof Error ? err.message : String(err)}`);
+      if (raw !== undefined) this.failedManifestBytes.set(failure, raw);
+      throw failure;
+    }
+  }
+
+  /**
+   * A9-61: responsive cold load for startup recovery, Diff and Undo. Performs
+   * the complete synchronous validation in yielded slices. The cache is
+   * populated only after every check passed and only if neither the manifest
+   * bytes nor the trusted secret generation changed meanwhile; a synchronous
+   * load or mutation that completed first stays authoritative. Concurrent
+   * callers for one Turn share a single validation.
+   */
+  loadCheckpointAsync(turnId: string): Promise<TurnCheckpoint | undefined> {
+    const memory = this.checkpoints.get(turnId);
+    if (memory) return Promise.resolve(memory);
+    try {
+      this.manifestPath(turnId);
+    } catch (error) {
+      return Promise.reject(error);
+    }
+    const inflight = this.checkpointLoads.get(turnId);
+    if (inflight) return inflight;
+    const currentBytes = (): string | undefined => {
+      try {
+        return fs.readFileSync(this.manifestPath(turnId), 'utf8');
+      } catch (_error) {
+        return undefined;
+      }
+    };
+    const load = (async () => {
+      try {
+        for (let attempt = 0; attempt < COOPERATIVE_LOAD_ATTEMPTS; attempt += 1) {
+          const memory = this.checkpoints.get(turnId);
+          if (memory) return memory;
+          const generation = this.cacheGeneration;
+          let loaded: { raw: string; checkpoint: TurnCheckpoint } | undefined;
+          try {
+            loaded = await this.readValidatedCheckpointCooperatively(turnId);
+          } catch (error) {
+            // A writer that replaced the manifest (and its mutable artifacts) while this
+            // validation ran must not turn into a false rejection: validate the new bytes.
+            // Stable invalid bytes still fail closed with the synchronous error.
+            const raw = error instanceof Error ? this.failedManifestBytes.get(error) : undefined;
+            if (raw !== undefined && attempt + 1 < COOPERATIVE_LOAD_ATTEMPTS && currentBytes() !== raw) continue;
+            throw error;
+          }
+          const settled = this.checkpoints.get(turnId);
+          if (settled) return settled;
+          if (!loaded) return undefined;
+          if (generation === this.cacheGeneration && currentBytes() === loaded.raw) {
+            this.checkpoints.set(turnId, loaded.checkpoint);
+            return loaded.checkpoint;
+          }
+          // Validated bytes or trust inputs are stale: never promote them.
+        }
+        return this.loadCheckpoint(turnId);
+      } finally {
+        this.checkpointLoads.delete(turnId);
+      }
+    })();
+    this.checkpointLoads.set(turnId, load);
+    return load;
   }
 
   /**
@@ -795,6 +974,7 @@ export class CheckpointManager {
   revalidatePersistedTurns(): void {
     const turnIds = this.listPersistedTurns();
     this.checkpoints.clear();
+    this.cacheGeneration += 1;
     for (const turnId of turnIds) {
       try {
         this.readValidatedCheckpoint(turnId);
@@ -802,6 +982,20 @@ export class CheckpointManager {
         if (error instanceof Error && error.message.includes('A9_CHECKPOINT_SECRET_BLOCKED')) throw error;
         // Existing malformed/legacy Turns remain individually quarantined;
         // only a newly recognized plaintext secret blocks Provider setup.
+      }
+    }
+  }
+
+  /** A9-61: revalidatePersistedTurns with the same checks, yielding between bounded slices. */
+  async revalidatePersistedTurnsAsync(): Promise<void> {
+    const turnIds = this.listPersistedTurns();
+    this.checkpoints.clear();
+    this.cacheGeneration += 1;
+    for (const turnId of turnIds) {
+      try {
+        await this.readValidatedCheckpointCooperatively(turnId);
+      } catch (error) {
+        if (error instanceof Error && error.message.includes('A9_CHECKPOINT_SECRET_BLOCKED')) throw error;
       }
     }
   }
@@ -1299,10 +1493,20 @@ export class CheckpointManager {
     turnId: string,
     relPath: string,
     action: 'created' | 'modified' | 'deleted',
-    options: { originalBlobPath?: string; newBlobPath?: string; originalHash?: string; newHash?: string; unrecoverable?: boolean } = {},
+    options: ExternalFactOptions = {},
   ): void {
     this.assertNotSensitive(relPath, 'checkpoint external path');
     const checkpoint = this.startTurn(turnId);
+    this.applyExternalFact(checkpoint, relPath, action, options);
+    this.persist(checkpoint);
+  }
+
+  private applyExternalFact(
+    checkpoint: TurnCheckpoint,
+    relPath: string,
+    action: 'created' | 'modified' | 'deleted',
+    options: ExternalFactOptions,
+  ): void {
     const existing = checkpoint.changes[relPath];
     const record: FileChangeRecord = existing ?? {
       filePath: relPath,
@@ -1353,7 +1557,69 @@ export class CheckpointManager {
     }
     if (options.unrecoverable === true) record.unrecoverable = true;
     checkpoint.changes[relPath] = record;
-    this.persist(checkpoint);
+  }
+
+  /**
+   * A9-61: record an ordered list of external facts for exactly one Turn with
+   * bounded physical writes. Every batch is applied to a private copy of the
+   * current checkpoint and the copy replaces the cache only after its atomic
+   * manifest write succeeded, so memory never acknowledges an undurable fact.
+   * No state is held across an await: each batch starts from the latest cached
+   * checkpoint, so concurrent same-Turn writers are preserved, not overwritten.
+   * The collected mark, when requested, is written in the same atomic write as
+   * the final facts. A failed batch throws and leaves the baseline pending.
+   */
+  async recordExternalFactsBatched(
+    turnId: string,
+    operations: ExternalFactOperation[],
+    options: { collected?: { requireUndoConfirmation: boolean }; batchSize?: number } = {},
+  ): Promise<{ persistCount: number; undoConfirmationId?: string }> {
+    const batchSize = options.batchSize ?? EXTERNAL_FACT_BATCH_OPERATIONS;
+    if (!Number.isSafeInteger(batchSize) || batchSize < 1) throw new Error('external fact batch size must be a positive integer');
+    let persistCount = 0;
+    let undoConfirmationId: string | undefined;
+    const batches = Math.max(1, Math.ceil(operations.length / batchSize));
+    for (let batch = 0; batch < batches; batch += 1) {
+      if (batch > 0) await yieldToEventLoop();
+      await this.loadCheckpointAsync(turnId);
+      // From here to the cache swap there is no await.
+      const draft = this.cloneCheckpoint(this.startTurn(turnId));
+      for (const operation of operations.slice(batch * batchSize, (batch + 1) * batchSize)) {
+        if (operation.kind === 'file') {
+          this.assertNotSensitive(operation.path, 'checkpoint external path');
+          this.applyExternalFact(draft, operation.path, operation.action, operation.options ?? {});
+        } else if (operation.kind === 'directory') {
+          this.assertNotSensitive(operation.path, 'checkpoint external directory path');
+          this.applyExternalDirectoryFact(draft, operation.path, operation.action, operation.options ?? {});
+        } else {
+          this.assertNotSensitive(operation.change.path, 'checkpoint unrecoverable path');
+          this.assertNotSensitive(operation.change.reason, 'checkpoint unrecoverable reason');
+          draft.unrecoverable[operation.change.path] = operation.change;
+        }
+      }
+      if (batch === batches - 1 && options.collected) {
+        undoConfirmationId = this.applyCollectedMark(draft, options.collected.requireUndoConfirmation);
+      }
+      if (operations.length === 0 && !options.collected) break;
+      this.persist(draft);
+      this.checkpoints.set(turnId, draft);
+      persistCount += 1;
+    }
+    return { persistCount, ...(undoConfirmationId ? { undoConfirmationId } : {}) };
+  }
+
+  /** Copy whose mutable records are private; immutable artifact facts stay shared. */
+  private cloneCheckpoint(checkpoint: TurnCheckpoint): TurnCheckpoint {
+    const changes: Record<string, FileChangeRecord> = Object.create(null);
+    for (const [key, record] of Object.entries(checkpoint.changes)) changes[key] = { ...record };
+    const unrecoverable: Record<string, UnrecoverableExternalChange> = Object.create(null);
+    for (const [key, change] of Object.entries(checkpoint.unrecoverable ?? {})) unrecoverable[key] = { ...change };
+    return {
+      ...checkpoint,
+      changes,
+      unrecoverable,
+      ...(checkpoint.externalBaseline ? { externalBaseline: { ...checkpoint.externalBaseline } } : {}),
+    };
   }
 
   /** Persist the complete bounded Shell-entry baseline before execution starts. */
@@ -1377,15 +1643,49 @@ export class CheckpointManager {
     this.loadCheckpoint(turnId);
   }
 
+  /**
+   * A9-61: persistExternalBaseline whose mandatory round-trip validation
+   * yields between bounded slices. The pending manifest is durable before
+   * validation starts; the method resolves only after the persisted bytes
+   * passed every binding/secret check, so no side effect can start earlier.
+   */
+  async persistExternalBaselineAsync(
+    turnId: string,
+    baseline: Omit<PersistedExternalBaseline, 'schemaVersion' | 'collectionStatus'>,
+  ): Promise<void> {
+    const checkpoint = this.startTurn(turnId);
+    if (checkpoint.externalBaseline?.collectionStatus === 'complete') {
+      throw new Error(`Shell external baseline is already complete for ${turnId}`);
+    }
+    checkpoint.externalBaseline = {
+      schemaVersion: 1,
+      collectionStatus: 'pending',
+      frozenAt: baseline.frozenAt,
+      files: baseline.files,
+      directories: baseline.directories,
+      skipped: baseline.skipped,
+    };
+    this.persist(checkpoint);
+    this.checkpoints.delete(turnId);
+    if (!await this.loadCheckpointAsync(turnId)) {
+      throw new Error(`Shell external baseline manifest is missing after persistence for ${turnId}`);
+    }
+  }
+
   markExternalBaselineCollected(turnId: string, requireUndoConfirmation = false): string | undefined {
     const checkpoint = this.startTurn(turnId);
-    if (!checkpoint.externalBaseline) throw new Error(`Shell external baseline is missing for ${turnId}`);
+    const undoConfirmationId = this.applyCollectedMark(checkpoint, requireUndoConfirmation);
+    this.persist(checkpoint);
+    return undoConfirmationId;
+  }
+
+  private applyCollectedMark(checkpoint: TurnCheckpoint, requireUndoConfirmation: boolean): string | undefined {
+    if (!checkpoint.externalBaseline) throw new Error(`Shell external baseline is missing for ${checkpoint.turnId}`);
     checkpoint.externalBaseline.collectionStatus = requireUndoConfirmation ? 'awaiting_confirmation' : 'complete';
     checkpoint.externalBaseline.collectedAt = new Date().toISOString();
     checkpoint.externalBaseline.undoConfirmationId = requireUndoConfirmation
       ? `undo-${crypto.randomBytes(16).toString('hex')}`
       : undefined;
-    this.persist(checkpoint);
     return checkpoint.externalBaseline.undoConfirmationId;
   }
 
@@ -1394,10 +1694,20 @@ export class CheckpointManager {
     turnId: string,
     relPath: string,
     action: 'created' | 'deleted' | 'present' | 'replaced_by_file',
-    options: { originalSnapshotPath?: string; originalTreeHash?: string; emptyTreeHash?: string } = {},
+    options: ExternalDirectoryFactOptions = {},
   ): void {
     this.assertNotSensitive(relPath, 'checkpoint external directory path');
     const checkpoint = this.startTurn(turnId);
+    this.applyExternalDirectoryFact(checkpoint, relPath, action, options);
+    this.persist(checkpoint);
+  }
+
+  private applyExternalDirectoryFact(
+    checkpoint: TurnCheckpoint,
+    relPath: string,
+    action: 'created' | 'deleted' | 'present' | 'replaced_by_file',
+    options: ExternalDirectoryFactOptions,
+  ): void {
     const existing = checkpoint.changes[relPath];
     const record: FileChangeRecord = existing ?? {
       filePath: relPath,
@@ -1437,7 +1747,6 @@ export class CheckpointManager {
     }
     record.isDirectory = true;
     checkpoint.changes[relPath] = record;
-    this.persist(checkpoint);
   }
 
   /** 显式标记不可恢复的外部变化（不静默遗漏）。 */
@@ -1469,53 +1778,69 @@ export class CheckpointManager {
     const checkpoint = this.loadCheckpoint(turnId);
     if (!checkpoint) return [];
 
-    const results: Array<{ path: string; action: string; diffText: string }> = [];
+    return Object.entries(checkpoint.changes).map(([relPath, record]) => {
+      const { diff } = this.recordDiffPreview(record);
+      return { path: relPath, action: record.action, diffText: diff.unifiedDiff };
+    });
+  }
+
+  private recordDiffPreview(record: FileChangeRecord): { diff: ReturnType<typeof buildContentDiffPreview> } {
+    const original = record.originalBlobPath && fs.existsSync(record.originalBlobPath)
+      ? fs.readFileSync(record.originalBlobPath) : null;
+    const next = record.newBlobPath && fs.existsSync(record.newBlobPath)
+      ? fs.readFileSync(record.newBlobPath) : null;
+    return { diff: buildContentDiffPreview(original, next) };
+  }
+
+  private reviewFile(relPath: string, record: FileChangeRecord, diff: ReturnType<typeof buildContentDiffPreview>): TurnReviewFile {
+    const directory = record.isDirectory || record.originalKind === 'directory' || record.newKind === 'directory';
+    const lines = directory ? [] : diff.unifiedDiff.split('\n');
+    return {
+      path: relPath,
+      action: record.action,
+      originalKind: record.originalKind,
+      newKind: record.newKind,
+      undone: Boolean(record.undoAppliedAt),
+      additions: lines.filter((line) => line.startsWith('+') && !line.startsWith('+++')).length,
+      deletions: lines.filter((line) => line.startsWith('-') && !line.startsWith('---')).length,
+      diffText: diff.unifiedDiff,
+      diffTruncated: diff.truncated,
+    };
+  }
+
+  /**
+   * A9-61: getTurnDiff + getTurnReview for one Turn with one cooperative cold
+   * load and one preview per record, yielding between records. Results are
+   * identical to calling the two synchronous methods.
+   */
+  async getTurnDiffAndReviewAsync(turnId: string): Promise<{
+    diff: Array<{ path: string; action: string; diffText: string }>;
+    review: TurnReview | null;
+  }> {
+    const checkpoint = await this.loadCheckpointAsync(turnId);
+    if (!checkpoint) return { diff: [], review: null };
+    const slice = new CooperativeSlice();
+    const diff: Array<{ path: string; action: string; diffText: string }> = [];
+    const files: TurnReviewFile[] = [];
     for (const [relPath, record] of Object.entries(checkpoint.changes)) {
-      const original = record.originalBlobPath && fs.existsSync(record.originalBlobPath)
-        ? fs.readFileSync(record.originalBlobPath)
-        : null;
-      const next = record.newBlobPath && fs.existsSync(record.newBlobPath)
-        ? fs.readFileSync(record.newBlobPath)
-        : null;
-      const diff = buildContentDiffPreview(original, next);
-      results.push({ path: relPath, action: record.action, diffText: diff.unifiedDiff });
+      const preview = this.recordDiffPreview(record).diff;
+      diff.push({ path: relPath, action: record.action, diffText: preview.unifiedDiff });
+      files.push(this.reviewFile(relPath, record, preview));
+      await slice.step();
     }
-    return results;
+    return { diff, review: this.turnReviewFrom(turnId, checkpoint, files) };
   }
 
   /** A9-24: read-only projection for the change inspector. */
-  getTurnReview(turnId: string): {
-    turnId: string;
-    files: Array<{
-      path: string; action: FileChangeRecord['action']; originalKind?: FileChangeRecord['originalKind'];
-      newKind?: FileChangeRecord['newKind']; undone: boolean; additions: number; deletions: number;
-      diffText: string; diffTruncated: boolean;
-    }>;
-    unrecoverable: Array<UnrecoverableExternalChange & { reasonCode?: string }>;
-    externalBaselineStatus: 'none' | PersistedExternalBaseline['collectionStatus'];
-  } | null {
+  getTurnReview(turnId: string): TurnReview | null {
     const checkpoint = this.loadCheckpoint(turnId);
     if (!checkpoint) return null;
-    const files = Object.entries(checkpoint.changes).map(([relPath, record]) => {
-      const original = record.originalBlobPath && fs.existsSync(record.originalBlobPath)
-        ? fs.readFileSync(record.originalBlobPath) : null;
-      const next = record.newBlobPath && fs.existsSync(record.newBlobPath)
-        ? fs.readFileSync(record.newBlobPath) : null;
-      const directory = record.isDirectory || record.originalKind === 'directory' || record.newKind === 'directory';
-      const diff = buildContentDiffPreview(original, next);
-      const lines = directory ? [] : diff.unifiedDiff.split('\n');
-      return {
-        path: relPath,
-        action: record.action,
-        originalKind: record.originalKind,
-        newKind: record.newKind,
-        undone: Boolean(record.undoAppliedAt),
-        additions: lines.filter((line) => line.startsWith('+') && !line.startsWith('+++')).length,
-        deletions: lines.filter((line) => line.startsWith('-') && !line.startsWith('---')).length,
-        diffText: diff.unifiedDiff,
-        diffTruncated: diff.truncated,
-      };
-    });
+    const files = Object.entries(checkpoint.changes)
+      .map(([relPath, record]) => this.reviewFile(relPath, record, this.recordDiffPreview(record).diff));
+    return this.turnReviewFrom(turnId, checkpoint, files);
+  }
+
+  private turnReviewFrom(turnId: string, checkpoint: TurnCheckpoint, files: TurnReviewFile[]): TurnReview {
     return {
       turnId,
       files,

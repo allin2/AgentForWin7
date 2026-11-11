@@ -1670,6 +1670,8 @@ describe('F5: pending approval keeps active state and resume continues the same 
       fs.writeFileSync(path.join(env.workspaceRoot, 'note.txt'), 'changed before crash\n', 'utf8');
 
       reopened = makeRuntime(env);
+      // A9-61: startup reconciliation validates manifests cooperatively; IPC serves snapshots once it settled.
+      await reopened.whenReady();
       const snapshot = reopened.getSnapshot();
       expect(snapshot.checkpoints).toEqual(expect.arrayContaining([
         expect.objectContaining({ turnId: 'turn-crash-manifest-full-id' }),
@@ -1766,6 +1768,8 @@ describe('F5: pending approval keeps active state and resume continues the same 
       db.close();
 
       reopened = makeRuntime(env);
+      // A9-61: startup reconciliation validates manifests cooperatively; IPC serves snapshots once it settled.
+      await reopened.whenReady();
       const snapshot = reopened.getSnapshot();
       expect(snapshot.checkpoints).toEqual(expect.arrayContaining([
         expect.objectContaining({ turnId: 'turn-m1-valid' }),
