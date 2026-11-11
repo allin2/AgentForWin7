@@ -2,7 +2,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
-const { createDiagnosticsLog, createFlightRecorder, errorFacts } = require('../../product/a9-diagnostics-log');
+const { createDiagnosticsLog, createFlightRecorder, errorFacts } = require(process.env.A9_62_REVIEW_LOGGER || '../../product/a9-diagnostics-log');
 const roots: string[] = [];
 const recorders: any[] = [];
 afterEach(() => {
@@ -32,7 +32,8 @@ describe('A9-62 bounded diagnostic disk log', () => {
     for (let index = 0; index < 40; index++) await log.record('ipc-begin', { operationId: index, channel: 'product:a9-request', action: 'a9.turn.submit' });
     await log.fatal('startup-failed', errorFacts(new Error('not written'), 'A9_STARTUP_FAILED'));
     const { directory } = log.snapshot();
-    expect(fs.readdirSync(directory).sort()).toEqual(['main.fatal.jsonl', 'main.jsonl', 'main.previous.jsonl']);
+    for (let index = 0; index < 40; index++) await log.record('startup-stage-end', { operationId: index, stage: 'desktop-host' });
+    expect(fs.readdirSync(directory).sort()).toEqual(['critical.jsonl', 'critical.previous.jsonl', 'main.jsonl']);
     const sizes = fs.readdirSync(directory).map(name => fs.statSync(path.join(directory, name)).size);
     expect(sizes.every(size => size <= 512)).toBe(true);
     expect(sizes.reduce((a, b) => a + b, 0)).toBeLessThanOrEqual(3 * 512);
@@ -88,14 +89,18 @@ describe('A9-62 bounded diagnostic disk log', () => {
     expect(log.snapshot()).toMatchObject({ writeFailureCount: 2, writtenCount: 0 });
   });
 
-  test('uses one small synchronous emergency write; later errors use the bounded queue', async () => {
+  test('writes exit-end with a small synchronous append and contains synchronous write failures', async () => {
     let writes = 0;
     const io = { ...fs, writeFileSync: (...args: any[]) => { writes++; return (fs.writeFileSync as any)(...args); } };
     const log = createDiagnosticsLog({ userDataPath: root(), fs: io });
-    await log.fatal('uncaught-exception');
-    await log.fatal('unhandled-rejection');
+    await log.record('exit-begin');
+    expect(log.criticalSync('exit-end', { exitCode: 0 })).toBe(true);
     expect(writes).toBe(1);
     expect(log.snapshot().writtenCount).toBe(2);
+    const denied = createDiagnosticsLog({ userDataPath: root(), fs: { ...fs, writeFileSync() { throw new Error('denied'); } } });
+    await denied.record('exit-begin');
+    expect(() => denied.criticalSync('exit-end')).not.toThrow();
+    expect(denied.snapshot().writeFailureCount).toBe(1);
   });
 
   test('never persists prompts, contents, commands, environment, arbitrary error text or fake credentials', async () => {
@@ -105,12 +110,12 @@ describe('A9-62 bounded diagnostic disk log', () => {
     const log = createDiagnosticsLog({ userDataPath: root() });
     await log.record('uncaught-exception', { ...errorFacts(error, 'A9_MAIN_UNCAUGHT_EXCEPTION'),
       prompt: fake, content: fake, command: fake, env: { KEY: fake }, payload: { fake }, error });
-    const text = fs.readFileSync(path.join(log.snapshot().directory, 'main.jsonl'), 'utf8');
+    const text = JSON.stringify(rows(log.snapshot().directory)[0]);
     expect(text).not.toContain(fake);
     expect(text).not.toContain('private-file');
     expect(text).not.toContain('/secret/');
     expect(JSON.parse(text)).toMatchObject({ errorName: 'Error', errorCode: 'A9_MAIN_UNCAUGHT_EXCEPTION', stackFrames: [{ file: 'main.js', line: 12, column: 3 }] });
-    expect(errorFacts({ code: 'A9_THIS_IS_A_FAKE_SECRET', name: 'Password' })).toEqual({ errorCode: 'A9_DIAGNOSTIC_ERROR', errorName: 'Error' });
+    expect(errorFacts({ code: fake, name: 'Password' })).toEqual({ errorCode: 'A9_DIAGNOSTIC_ERROR', errorName: 'Error' });
   });
 
   test('contains hostile error accessors', () => {
@@ -137,7 +142,8 @@ describe('A9-62 stage and heartbeat recorder', () => {
   });
 
   test('captures a synchronous stall with the action still pending, before its microtask completion', async () => {
-    const log = { record: jest.fn(async () => true), checkpoint: async () => true, stop() {} };
+    const record = jest.fn(async () => true);
+    const log = { record, critical: record, checkpoint: async () => true, criticalCheckpoint: async () => true, stop() {} };
     const recorder = createFlightRecorder(log); recorders.push(recorder);
     const op = recorder.begin('ipc', { channel: 'product:a9-request', action: 'a9.checkpoint.undoTurn' }, false);
     const start = process.hrtime.bigint();
@@ -150,7 +156,8 @@ describe('A9-62 stage and heartbeat recorder', () => {
   });
 
   test('does not turn the heartbeat into an operation deadline', async () => {
-    const log = { record: jest.fn(async () => true), checkpoint: async () => true, stop() {} };
+    const record = jest.fn(async () => true);
+    const log = { record, critical: record, checkpoint: async () => true, criticalCheckpoint: async () => true, stop() {} };
     const recorder = createFlightRecorder(log); recorders.push(recorder);
     const op = recorder.begin('ipc', { channel: 'desktop:request', action: 'task.submit' }, false);
     await new Promise(resolve => setTimeout(resolve, 1100));
@@ -158,4 +165,36 @@ describe('A9-62 stage and heartbeat recorder', () => {
     op.end();
     expect(log.record).toHaveBeenCalledWith('ipc-end', expect.objectContaining({ durationMs: expect.any(Number) }));
   });
+});
+
+describe('A9-62 review red-green regressions', () => {
+  test('R1 preserves all syntactically valid error codes and rejects invalid or fake-key codes on disk', async () => {
+    const log = createDiagnosticsLog({ userDataPath: root() });
+    for (const code of ['A9_SCOPE_STALE', 'A9_APPLICATION_BUSY', 'ERR_INVALID_ARG_TYPE']) {
+      await log.record('ipc-end', errorFacts({ code }, 'A9_IPC_FAILED'));
+    }
+    const invalid = ['a9_scope_stale', 'A9 HAS SPACE', 'A'.repeat(65), 123, null, {}, 'sk-FAKE_CREDENTIAL_01234567890123456789'];
+    for (const code of invalid) await log.record('ipc-end', errorFacts({ code }, 'A9_IPC_FAILED'));
+    const recorded = rows(log.snapshot().directory);
+    expect(recorded.slice(0, 3).map(row => row.errorCode)).toEqual(['A9_SCOPE_STALE', 'A9_APPLICATION_BUSY', 'ERR_INVALID_ARG_TYPE']);
+    expect(recorded.slice(3).map(row => row.errorCode)).toEqual(invalid.map(() => 'A9_IPC_FAILED'));
+    expect(JSON.stringify(recorded)).not.toContain('sk-FAKE_CREDENTIAL');
+  });
+
+  test('R3 retains one stall through 20000 IPC records and initializes directory/file sizes only once', async () => {
+    let mkdirCalls = 0; let statCalls = 0;
+    const io = { ...fs, promises: { ...fs.promises,
+      mkdir: (...args: any[]) => { mkdirCalls++; return (fs.promises.mkdir as any)(...args); },
+      stat: (...args: any[]) => { statCalls++; return (fs.promises.stat as any)(...args); },
+    } };
+    const log = createDiagnosticsLog({ userDataPath: root(), maxFileBytes: 4096, fs: io });
+    await log.record('main-thread-stall', { durationMs: 3000, pending: [{ operationId: 1, stage: 'desktop-host' }] });
+    const initialStats = statCalls;
+    for (let index = 0; index < 20000; index++) await log.record(index % 2 ? 'ipc-end' : 'ipc-begin', { channel: 'product:a9-request', action: 'a9.snapshot.get', operationId: index });
+    const directory = log.snapshot().directory;
+    expect(rows(directory).some(row => row.event === 'main-thread-stall')).toBe(true);
+    expect(mkdirCalls).toBe(1);
+    expect(statCalls).toBe(initialStats);
+    expect(fs.readdirSync(directory).reduce((sum, name) => sum + fs.statSync(path.join(directory, name)).size, 0)).toBeLessThanOrEqual(3 * 4096);
+  }, 20000);
 });

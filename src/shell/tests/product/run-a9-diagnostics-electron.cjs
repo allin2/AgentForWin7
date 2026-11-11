@@ -38,7 +38,9 @@ function verify(mode, runRoot, code, signal) {
   assert(rows.every(row => row.schemaVersion === 1));
   if (mode.startsWith('kill-')) {
     assert.equal(signal, 'SIGKILL');
-    const tail = JSON.parse(fs.readFileSync(path.join(runRoot, '中文 user data %#', 'diagnostics', 'main.jsonl'), 'utf8').trim().split('\n').pop());
+    const directory = path.join(runRoot, '中文 user data %#', 'diagnostics');
+    const tailFile = mode === 'kill-stage' && fs.existsSync(path.join(directory, 'critical.jsonl')) ? 'critical.jsonl' : 'main.jsonl';
+    const tail = JSON.parse(fs.readFileSync(path.join(directory, tailFile), 'utf8').trim().split('\n').pop());
     assert.equal(tail.event, mode === 'kill-stage' ? 'startup-stage-begin' : 'ipc-begin');
     assert.equal(tail[mode === 'kill-stage' ? 'stage' : 'action'], mode === 'kill-stage' ? 'desktop-host' : 'a9.workspace.list');
     return { rows: rows.length, tail };
@@ -60,6 +62,19 @@ function verify(mode, runRoot, code, signal) {
     const d = read('dialog.json'); assert(d.content.includes('EIO')); assert(d.content.includes('diagnostics')); assert(!d.content.includes('sk-A9_62_'));
   }
   if (mode === 'rejection') { assert(has('unhandled-rejection', 'errorCode', 'EIO')); assert.equal(read('alive.json').alive, true); }
+  if (mode === 'normal-exit') {
+    assert.equal(read('normal-exit-requested.json').requested, true);
+    for (const event of ['exit-begin', 'exit-end']) {
+      assert.equal(rows.filter(row => row.event === event).length, 1, `${event} count`);
+    }
+    assert.equal(rows.filter(row => row.event === 'exit-end')[0].exitCode, 0);
+    assert.deepEqual(read('lifecycle.json'), { beforeQuit: 1, willQuit: 1, dispose: 1 });
+  }
+  if (mode === 'steady-2m') {
+    const steady = read('steady.json');
+    assert(steady.durationMs >= 115000); assert(steady.requests >= 100);
+    assert(steady.ipcPerMinute > 0); assert(steady.logBytes > 0);
+  }
   if (mode === 'window-events') for (const event of ['window-unresponsive', 'window-responsive', 'render-process-gone']) assert(has(event), `${event} missing`);
   if (!['smoke', 'startup-failure', 'native-startup'].includes(mode)) {
     const diagnostics = read('diagnostics.json');
@@ -87,7 +102,7 @@ async function run(mode) {
     });
     child.stdout.on('data', data => { stdout = (stdout + data).slice(-16000); });
     child.stderr.on('data', data => { stderr = (stderr + data).slice(-16000); });
-    const deadline = mode.startsWith('native-') || mode === 'baseline-uncaught' ? 180000 : 20000;
+    const deadline = mode === 'steady-2m' ? 150000 : (mode.startsWith('native-') || mode === 'baseline-uncaught' ? 180000 : 20000);
     const expired = new Promise((_resolve, reject) => { timer = setTimeout(() => reject(new Error('ELECTRON_TEST_DEADLINE')), deadline); });
     if (mode.startsWith('kill-')) {
       const ready = (async () => { while (!fs.existsSync(path.join(runRoot, 'kill-ready.json')) && !exited) await pause(20); assert(!exited, 'process exited before kill checkpoint'); process.kill(-child.pid, 'SIGKILL'); })();
@@ -98,7 +113,7 @@ async function run(mode) {
     try { result = { mode, status: 'PASS', code, signal, ...verify(mode, runRoot, code, signal) }; }
     catch (error) { result = { mode, status: 'FAIL', code, signal, error: error.message }; }
     const destination = path.join(output, mode); fs.mkdirSync(destination, { recursive: true });
-    for (const name of ['runtime.json', 'smoke.json', 'diagnostics.json', 'ipc-result.json', 'dialog.json', 'alive.json', 'driver-error.json']) {
+    for (const name of ['runtime.json', 'smoke.json', 'diagnostics.json', 'ipc-result.json', 'dialog.json', 'alive.json', 'normal-exit-requested.json', 'steady.json', 'lifecycle.json', 'driver-error.json']) {
       const file = path.join(runRoot, name); if (fs.existsSync(file)) fs.copyFileSync(file, path.join(destination, name));
     }
     fs.writeFileSync(path.join(destination, 'records.json'), JSON.stringify(readRows(runRoot), null, 2) + '\n', 'utf8');

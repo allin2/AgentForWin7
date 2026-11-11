@@ -86,7 +86,7 @@ const diagnosticAutomationMode = Boolean(smokeReportPath || a8ReviewSmokeReportP
   || process.env.A9_SMOKE_REQUIRE_PRODUCT_MAIN === '1');
 function showDiagnosticError(title, code) {
   if (diagnosticAutomationMode) return;
-  try { dialog.showErrorBox(title, `错误码：${code}\n诊断日志：${diagnosticsLog.snapshot().directory}`); }
+  try { flightRecorder.withoutStall('error-dialog', () => dialog.showErrorBox(title, `错误码：${code}\n诊断日志：${diagnosticsLog.snapshot().directory}`)); }
   catch (_error) { void diagnosticsLog.record('error-dialog-failed', { errorCode: 'A9_DIAGNOSTIC_DIALOG_FAILED' }); }
 }
 // Electron 22's default handler only shows its dialog when it is the sole
@@ -100,10 +100,11 @@ process.on('unhandledRejection', (error) => {
   void diagnosticsLog.record('unhandled-rejection', errorFacts(error, 'A9_MAIN_UNHANDLED_REJECTION'));
 });
 let diagnosticQuitStarted = false;
+let diagnosticWillQuitStarted = false;
 app.on('before-quit', () => {
   if (diagnosticQuitStarted) return;
   diagnosticQuitStarted = true;
-  void diagnosticsLog.record('exit-begin');
+  diagnosticsLog.criticalSync('exit-begin');
 });
 let diagnosticExitPrepared = false;
 let diagnosticExitInFlight = null;
@@ -111,7 +112,7 @@ async function exitProduct(exitCode) {
   if (diagnosticExitInFlight) return diagnosticExitInFlight;
   diagnosticExitInFlight = (async () => {
     await diagnosticsLog.checkpoint('exit-begin', { exitCode });
-    await diagnosticsLog.checkpoint('exit-end', { exitCode });
+    diagnosticsLog.criticalSync('exit-end', { exitCode });
     diagnosticExitPrepared = true;
     flightRecorder.stop();
     app.exit(exitCode);
@@ -119,7 +120,7 @@ async function exitProduct(exitCode) {
   return diagnosticExitInFlight;
 }
 app.on('quit', (_event, exitCode) => {
-  if (!diagnosticExitPrepared) void diagnosticsLog.fatal('exit-end', { exitCode });
+  if (!diagnosticExitPrepared) diagnosticsLog.criticalSync('exit-end', { exitCode });
   flightRecorder.stop();
 });
 
@@ -1277,6 +1278,8 @@ function recordBlockedRequest(url) {
 
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 if (!hasSingleInstanceLock) {
+  appReadyOperation.end();
+  void diagnosticsLog.record('second-instance-exit', { exitCode: 2 });
   void exitProduct(2);
 } else {
   app.on('second-instance', focusMainWindow);
@@ -1411,7 +1414,9 @@ if (!hasSingleInstanceLock) {
   });
 
   app.on('window-all-closed', () => app.quit());
-  app.on('will-quit', (event) => {
+  app.on('will-quit', () => {
+    if (diagnosticWillQuitStarted) return;
+    diagnosticWillQuitStarted = true;
     startupClosing = true;
     startupPaintReject(Object.assign(new Error('APP_SHUTTING_DOWN'), { code: 'APP_SHUTTING_DOWN' }));
     try {
@@ -1437,12 +1442,8 @@ if (!hasSingleInstanceLock) {
     desktopHost = null;
     rcComposition = null;
     if (!diagnosticExitPrepared) {
-      event.preventDefault();
-      void (async () => {
-        await diagnosticsLog.checkpoint('exit-end', { exitCode: 0 });
-        diagnosticExitPrepared = true;
-        app.quit();
-      })();
+      diagnosticsLog.criticalSync('exit-end', { exitCode: 0 });
+      diagnosticExitPrepared = true;
     }
   });
 }

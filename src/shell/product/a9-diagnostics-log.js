@@ -5,21 +5,16 @@ const path = require('path');
 
 const FILE_BYTES = 2 * 1024 * 1024;
 const LINE_BYTES = 4096;
+const CODE_PATTERN = /^[A-Z][A-Z0-9_]{2,63}$/;
 const ERROR_NAMES = new Set(['Error', 'TypeError', 'RangeError', 'ReferenceError', 'SyntaxError', 'URIError', 'EvalError', 'AggregateError']);
-const SYSTEM_CODES = new Set(['EACCES', 'EPERM', 'ENOENT', 'ENOSPC', 'EIO', 'EMFILE', 'ENFILE', 'EBUSY', 'EROFS', 'ERR_DLOPEN_FAILED']);
-const PRODUCT_CODES = new Set(['A9_STARTUP_FAILED', 'A9_IPC_FAILED', 'A9_MAIN_UNCAUGHT_EXCEPTION', 'A9_MAIN_UNHANDLED_REJECTION',
-  'A9_WORKSPACE_REQUIRED', 'A9_SCOPE_INVALID', 'A9_PAYLOAD_INVALID', 'A9_ACTION_UNAVAILABLE', 'A9_WORKSPACE_SELECTION_BUSY',
-  'A9_PROVIDER_UNVERIFIED', 'A9_CHECKPOINT_EVIDENCE_UNAVAILABLE', 'A9_MODE_SELECTION_REQUIRED', 'A9_RUNTIME_UNAVAILABLE',
-  'APP_SHUTTING_DOWN', 'STARTUP_NOT_READY', 'RENDERER_CAPABILITY_DENIED', 'IPC_SCHEMA_INVALID', 'IPC_DIRECTION_DENIED']);
 const STACK_FILES = new Set(['main.js', 'a9-diagnostics-log.js', 'desktop-host.js', 'a9-agent-runtime.js', 'a9-workspace-registry.js', 'a9-product-ipc.js', 'a9-package-runtime.js', 'active-workspace-store.js', 'rc-composition.js', 'runner-runtime.js']);
 
 function errorFacts(error, fallback = 'A9_DIAGNOSTIC_ERROR') {
-  // Error messages can contain entire requests. The Runtime's secret-aware
-  // redactor is private; the acceptance-report regex is not sufficient here.
-  // Never persist a message, arbitrary class name, function name or raw stack.
+  // Error messages can contain entire requests. Never persist a message,
+  // arbitrary class name, function name, or raw stack.
   try {
     const code = error && typeof error.code === 'string' ? error.code : '';
-    const errorCode = SYSTEM_CODES.has(code) || PRODUCT_CODES.has(code) ? code : fallback;
+    const errorCode = CODE_PATTERN.test(code) ? code : fallback;
     const errorName = error && ERROR_NAMES.has(error.name) ? error.name : 'Error';
     const stackFrames = [];
     if (error && typeof error.stack === 'string') {
@@ -38,23 +33,25 @@ function createDiagnosticsLog(options) {
   const config = options || {};
   const io = config.fs || fs;
   const directory = path.join(config.userDataPath, 'diagnostics');
-  const activePath = path.join(directory, 'main.jsonl');
-  const previousPath = path.join(directory, 'main.previous.jsonl');
-  const fatalPath = path.join(directory, 'main.fatal.jsonl');
   const maxFileBytes = Math.max(512, Math.min(FILE_BYTES, config.maxFileBytes || FILE_BYTES));
-  const maxLineBytes = Math.max(256, Math.min(LINE_BYTES, maxFileBytes, config.maxLineBytes || LINE_BYTES));
+  const maxLineBytes = Math.max(256, Math.min(LINE_BYTES, maxFileBytes / 2, config.maxLineBytes || LINE_BYTES));
   const maxQueue = Math.max(1, Math.min(256, config.maxQueue || 256));
+  // 1 MiB IPC + two 2 MiB critical files + 1 MiB emergency = 6 MiB.
+  const normal = { activePath: path.join(directory, 'main.jsonl'), previousPath: null, bytes: 0, limit: maxFileBytes / 2 };
+  const critical = { activePath: path.join(directory, 'critical.jsonl'), previousPath: path.join(directory, 'critical.previous.jsonl'), bytes: 0, previousBytes: 0, limit: maxFileBytes };
+  const emergency = { activePath: path.join(directory, 'main.fatal.jsonl'), bytes: 0, limit: maxFileBytes / 2 };
+  const normalQueue = [];
+  const criticalQueue = [];
   const stats = { recordCount: 0, writtenCount: 0, droppedCount: 0, writeFailureCount: 0, truncatedCount: 0 };
-  const queue = [];
-  let draining = false;
-  let fatalWritten = false;
+  let lastNormalWrite = Promise.resolve(true);
+  let lastCriticalWrite = Promise.resolve(true);
+  let normalDraining = false;
+  let criticalDraining = false;
   let stopped = false;
-  let lastWrite = Promise.resolve(true);
 
   function encode(event, values) {
     const row = { schemaVersion: 1, timestamp: new Date().toISOString(), pid: process.pid, event };
-    // Only host-selected metadata is accepted. No generic object serialization.
-    for (const key of ['stage', 'channel', 'action', 'errorCode', 'errorName', 'reason', 'version', 'electron', 'node']) {
+    for (const key of ['stage', 'channel', 'action', 'errorCode', 'errorName', 'reason', 'version', 'electron', 'node', 'blockReason']) {
       if (typeof values[key] === 'string') row[key] = values[key].slice(0, 96);
     }
     for (const key of ['operationId', 'durationMs', 'exitCode', 'pendingCount']) {
@@ -68,7 +65,6 @@ function createDiagnosticsLog(options) {
     let line = JSON.stringify(row) + '\n';
     if (Buffer.byteLength(line, 'utf8') > maxLineBytes) {
       stats.truncatedCount += 1;
-      // Keep valid JSON and the operation identity, never cut a UTF-8 byte sequence.
       delete row.pending;
       delete row.stackFrames;
       row.truncated = true;
@@ -79,24 +75,73 @@ function createDiagnosticsLog(options) {
     return line;
   }
 
-  async function size(file) {
-    try { return (await io.promises.stat(file)).size; }
-    catch (error) { if (error.code === 'ENOENT') return 0; throw error; }
+  let directoryReady = false;
+  let initialization;
+  async function statAsyncOrZero(file) {
+    if (!file) return 0;
+    try { return (await io.promises.stat(file)).size; } catch (error) { if (error.code === 'ENOENT') return 0; throw error; }
+  }
+  function initialize() {
+    if (!initialization) initialization = (async () => {
+      await io.promises.mkdir(directory, { recursive: true });
+      // Reuse the previous format's rotated file as critical history. Its
+      // bounded retention still applies; obsolete rotation is removed once.
+      const legacyPath = path.join(directory, 'main.previous.jsonl');
+      const legacyBytes = await statAsyncOrZero(legacyPath);
+      if (legacyBytes) {
+        if (await statAsyncOrZero(critical.previousPath)) await io.promises.unlink(legacyPath);
+        else await io.promises.rename(legacyPath, critical.previousPath);
+      }
+      normal.bytes = await statAsyncOrZero(normal.activePath);
+      critical.bytes = await statAsyncOrZero(critical.activePath);
+      critical.previousBytes = await statAsyncOrZero(critical.previousPath);
+      emergency.bytes = await statAsyncOrZero(emergency.activePath);
+      for (const state of [normal, critical, emergency]) {
+        if (state.bytes > state.limit) { await io.promises.truncate(state.activePath, 0); state.bytes = 0; }
+      }
+      if (critical.previousBytes > critical.limit) {
+        await io.promises.truncate(critical.previousPath, 0); critical.previousBytes = 0;
+      }
+      directoryReady = true;
+    })();
+    return initialization;
   }
 
-  async function drain() {
-    if (draining) return;
-    draining = true;
+  async function appendAsync(state, line) {
+    await initialize();
+    const bytes = Buffer.byteLength(line, 'utf8');
+    if (state.bytes + bytes > state.limit) {
+      if (state.previousPath) {
+        try { await io.promises.unlink(state.previousPath); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+        try { await io.promises.rename(state.activePath, state.previousPath); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+        state.previousBytes = state.bytes;
+      } else {
+        await io.promises.writeFile(state.activePath, '', 'utf8');
+      }
+      state.bytes = 0;
+    }
+    await io.promises.appendFile(state.activePath, line, 'utf8');
+    state.bytes += bytes;
+  }
+
+  function appendSync(line) {
+    // Normal initialization already created the directory and measured files.
+    // Never race asynchronous critical writes or their rotation on this path.
+    if (!directoryReady) throw new Error('A9_DIAGNOSTIC_NOT_READY');
+    const bytes = Buffer.byteLength(line, 'utf8');
+    const rotate = emergency.bytes + bytes > emergency.limit;
+    io.writeFileSync(emergency.activePath, line, { encoding: 'utf8', flag: rotate ? 'w' : 'a' });
+    emergency.bytes = (rotate ? 0 : emergency.bytes) + bytes;
+  }
+
+  async function drain(state, queue, criticalDrain) {
+    if (criticalDrain ? criticalDraining : normalDraining) return;
+    if (criticalDrain) criticalDraining = true; else normalDraining = true;
     try {
       while (queue.length) {
         const item = queue[0];
         try {
-          await io.promises.mkdir(directory, { recursive: true });
-          if (await size(activePath) + Buffer.byteLength(item.line, 'utf8') > maxFileBytes) {
-            try { await io.promises.unlink(previousPath); } catch (error) { if (error.code !== 'ENOENT') throw error; }
-            await io.promises.rename(activePath, previousPath);
-          }
-          await io.promises.appendFile(activePath, item.line, 'utf8');
+          await appendAsync(state, item.line);
           stats.writtenCount += 1;
           item.resolve(true);
         } catch (_error) {
@@ -105,17 +150,18 @@ function createDiagnosticsLog(options) {
         }
         queue.shift();
       }
-    } finally { draining = false; }
+    } finally {
+      if (criticalDrain) criticalDraining = false; else normalDraining = false;
+    }
   }
 
-  function record(event, values = {}) {
+  function enqueue(state, queue, event, values, criticalRecord) {
     stats.recordCount += 1;
     if (stopped || queue.length >= maxQueue) { stats.droppedCount += 1; return Promise.resolve(false); }
     try {
-      const line = encode(event, values);
-      const result = new Promise(resolve => queue.push({ line, resolve }));
-      lastWrite = result;
-      void drain();
+      const result = new Promise(resolve => queue.push({ line: encode(event, values), resolve }));
+      if (criticalRecord) lastCriticalWrite = result; else lastNormalWrite = result;
+      void drain(state, queue, criticalRecord);
       return result;
     } catch (_error) {
       stats.writeFailureCount += 1;
@@ -124,30 +170,41 @@ function createDiagnosticsLog(options) {
   }
 
   async function boundedWait(result) {
-    // This bounds only diagnostic I/O waiting, never an Agent command or tool.
     let timer;
     try { return await Promise.race([result, new Promise(resolve => { timer = setTimeout(() => resolve(false), 50); })]); }
     finally { clearTimeout(timer); }
   }
 
-  function fatal(event, values = {}) {
-    if (fatalWritten) return boundedWait(record(event, values));
-    fatalWritten = true;
+  function criticalSync(event, values = {}) {
     stats.recordCount += 1;
     try {
-      const line = encode(event, values);
-      io.mkdirSync(directory, { recursive: true });
-      let length = 0;
-      try { length = io.statSync(fatalPath).size; } catch (error) { if (error.code !== 'ENOENT') throw error; }
-      // Separate emergency file cannot race the asynchronous normal rotation.
-      io.writeFileSync(fatalPath, line, { encoding: 'utf8', flag: length + Buffer.byteLength(line, 'utf8') > maxFileBytes ? 'w' : 'a' });
+      appendSync(encode(event, values));
       stats.writtenCount += 1;
-      return Promise.resolve(true);
-    } catch (_error) { stats.writeFailureCount += 1; return Promise.resolve(false); }
+      return true;
+    } catch (_error) {
+      stats.writeFailureCount += 1;
+      return false;
+    }
   }
 
-  return { record, checkpoint: (event, values) => boundedWait(record(event, values)), flush: () => boundedWait(lastWrite),
-    fatal, stop: () => { stopped = true; }, snapshot: () => ({ directory, ...stats, queuedCount: queue.length }) };
+  function isCritical(event, values) {
+    return event !== 'ipc-begin' && event !== 'ipc-end' || Boolean(values.errorCode);
+  }
+  function record(event, values = {}) {
+    return isCritical(event, values) ? enqueue(critical, criticalQueue, event, values, true)
+      : enqueue(normal, normalQueue, event, values, false);
+  }
+  return {
+    record,
+    critical: (event, values = {}) => enqueue(critical, criticalQueue, event, values, true),
+    checkpoint: (event, values = {}) => boundedWait(record(event, values)),
+    criticalCheckpoint: (event, values = {}) => boundedWait(enqueue(critical, criticalQueue, event, values, true)),
+    fatal: (event, values = {}) => boundedWait(enqueue(critical, criticalQueue, event, values, true)),
+    flush: () => boundedWait(Promise.all([lastNormalWrite, lastCriticalWrite])),
+    criticalSync,
+    stop: () => { stopped = true; },
+    snapshot: () => ({ directory, ...stats, queuedCount: normalQueue.length + criticalQueue.length }),
+  };
 }
 
 function createFlightRecorder(log) {
@@ -156,10 +213,11 @@ function createFlightRecorder(log) {
   let lastTick = process.hrtime.bigint();
   let timer;
   let stopped = false;
+  let stallSuppressed = false;
   const elapsed = start => Number(process.hrtime.bigint() - start) / 1e6;
   function pulse() {
     const durationMs = elapsed(lastTick);
-    if (durationMs > 1000) void log.record('main-thread-stall', { durationMs, pendingCount: pending.size, pending: Array.from(pending.values()).slice(0, 16) });
+    if (!stallSuppressed && durationMs > 1000) void log.critical('main-thread-stall', { durationMs, pendingCount: pending.size, pending: Array.from(pending.values()).slice(0, 16) });
     lastTick = process.hrtime.bigint();
   }
   function tick() {
@@ -175,18 +233,17 @@ function createFlightRecorder(log) {
     const metadata = { ...facts, operationId };
     const start = process.hrtime.bigint();
     if (pending.size < 256) pending.set(operationId, metadata);
-    const ready = recordStart ? log.checkpoint(`${kind}-begin`, metadata) : Promise.resolve();
+    const ready = recordStart ? (kind === 'ipc' ? log.checkpoint(`${kind}-begin`, metadata) : log.criticalCheckpoint(`${kind}-begin`, metadata)) : Promise.resolve();
     return {
       ready,
       end(error) {
-        // Sample before removing the action: a synchronous block can end in
-        // a microtask before the heartbeat timer gets another turn.
         pulse();
         pending.delete(operationId);
         const durationMs = elapsed(start);
-        if (recordStart || error || durationMs > 1000) void log.record(`${kind}-end`, {
-          ...metadata, durationMs, ...(error ? errorFacts(error, kind === 'ipc' ? 'A9_IPC_FAILED' : 'A9_STARTUP_FAILED') : {}),
-        });
+        if (recordStart || error || durationMs > 1000) {
+          const values = { ...metadata, durationMs, ...(error ? errorFacts(error, kind === 'ipc' ? 'A9_IPC_FAILED' : 'A9_STARTUP_FAILED') : {}) };
+          void (kind === 'ipc' ? log.record(`${kind}-end`, values) : log.critical(`${kind}-end`, values));
+        }
       },
     };
   }
@@ -196,7 +253,12 @@ function createFlightRecorder(log) {
     try { const result = await work(); operation.end(); return result; }
     catch (error) { operation.end(error); throw error; }
   }
-  return { begin, stage, stop() { stopped = true; clearTimeout(timer); log.stop(); } };
+  function withoutStall(reason, work) {
+    stallSuppressed = true;
+    try { return work(); }
+    finally { stallSuppressed = false; lastTick = process.hrtime.bigint(); void log.critical('main-thread-blocked', { blockReason: reason }); }
+  }
+  return { begin, stage, withoutStall, stop() { stopped = true; clearTimeout(timer); log.stop(); } };
 }
 
 module.exports = { createDiagnosticsLog, createFlightRecorder, errorFacts };

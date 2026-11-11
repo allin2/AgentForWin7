@@ -18,10 +18,11 @@ afterEach(() => {
   for (const workspace of temporaryWorkspaces.splice(0)) fs.rmSync(workspace, { recursive: true, force: true });
 });
 
-function loadMainHarness(options: { failHost?: boolean; deferPaint?: boolean; restore?: Promise<void>; platform?: NodeJS.Platform; appAlreadyReady?: boolean; ordinaryWorkspace?: boolean } = {}) {
-  const productMain = path.join(__dirname, '..', '..', 'product', 'main.js');
+function loadMainHarness(options: { failHost?: boolean; deferPaint?: boolean; restore?: Promise<void>; platform?: NodeJS.Platform; appAlreadyReady?: boolean; ordinaryWorkspace?: boolean; hasLock?: boolean; errorDialog?: () => void } = {}) {
+  const productMain = process.env.A9_62_REVIEW_MAIN || path.join(__dirname, '..', '..', 'product', 'main.js');
   const source = fs.readFileSync(productMain, 'utf8');
   const calls: string[] = [];
+  const records: Array<{ event: string; values: any; sync?: boolean }> = [];
   const workspacePath = options.restore || options.ordinaryWorkspace ? fs.mkdtempSync(path.join(os.tmpdir(), 'w7ca-startup-')) : '/workspace';
   if (options.restore || options.ordinaryWorkspace) temporaryWorkspaces.push(workspacePath);
   let a9Config: any;
@@ -30,13 +31,13 @@ function loadMainHarness(options: { failHost?: boolean; deferPaint?: boolean; re
   app.disableHardwareAcceleration = () => calls.push('app.disableHardwareAcceleration');
   // Readiness is not recorded as a call: it is a gate, not a policy action.
   app.isReady = () => Boolean(options.appAlreadyReady);
-  app.requestSingleInstanceLock = () => true;
+  app.requestSingleInstanceLock = () => options.hasLock !== false;
   app.whenReady = () => { calls.push('app.whenReady'); return Promise.resolve(); };
   app.getPath = (name: string) => {
     if (name === 'documents') throw new Error('DEFAULT_ROOT_MUST_STAY_LAZY');
     return '/tmp/a9-startup-test';
   };
-  app.quit = () => { calls.push('app.quit'); app.emit('will-quit', { preventDefault() {} }); };
+  app.quit = () => { calls.push('app.quit'); app.emit('before-quit', { preventDefault() {} }); app.emit('will-quit'); app.emit('quit', {}, 0); };
   app.exit = () => calls.push('app.exit');
   const window = new (class extends EventEmitter {
     webContents: any = new EventEmitter(); destroyed = false;
@@ -45,13 +46,15 @@ function loadMainHarness(options: { failHost?: boolean; deferPaint?: boolean; re
     show() { calls.push('window.show'); } focus() {} isDestroyed() { return this.destroyed; } isMinimized() { return false; } restore() {}
     destroy() { this.destroyed = true; this.emit('closed'); } close() { this.emit('close', { preventDefault() {} }); }
   })();
-  const electron = { app, BrowserWindow: class { constructor() { return window as any; } }, dialog: { showOpenDialog: async () => ({ canceled: true, filePaths: [] }), showErrorBox() {}, showMessageBox: async () => ({ response: 0 }) }, ipcMain: { handle: (name: string, handler: any) => { ipc[name] = handler; }, on: () => {} }, safeStorage: {}, session: { defaultSession: {} } };
+  const electron = { app, BrowserWindow: class { constructor() { return window as any; } }, dialog: { showOpenDialog: async () => ({ canceled: true, filePaths: [] }), showErrorBox() { calls.push('error-dialog'); if (options.errorDialog) options.errorDialog(); }, showMessageBox: async () => ({ response: 0 }) }, ipcMain: { handle: (name: string, handler: any) => { ipc[name] = handler; }, on: () => {} }, safeStorage: {}, session: { defaultSession: {} } };
   const host = { selectWorkspace: async () => { calls.push('restore.start'); if (options.restore) await options.restore; calls.push('restore.end'); return { workspacePath, displayName: 'test' }; }, listSessions: () => [], createSession: () => ({ sessionId: 's1' }), getDiagnostics: () => ({}), getSettings: () => ({}), dispose: () => calls.push('host.dispose'), getActiveWorkspacePath: () => null };
   const local = (request: string): any => {
     if (request.endsWith('/a9-diagnostics-log')) {
-      const { createFlightRecorder, errorFacts } = require('../../product/a9-diagnostics-log');
-      const log = { record: async () => true, checkpoint: async () => true, fatal: async () => true,
-        stop() {}, snapshot: () => ({ directory: '/test-only/diagnostics', recordCount: 0 }) };
+      const { createFlightRecorder, errorFacts } = require(process.env.A9_62_REVIEW_LOGGER || '../../product/a9-diagnostics-log');
+      const record = async (event: string, values: any) => { records.push({ event, values }); return true; };
+      const log = { record, critical: record, checkpoint: record, criticalCheckpoint: record, fatal: record,
+        criticalSync: (event: string, values: any) => { records.push({ event, values, sync: true }); return true; },
+        stop() {}, snapshot: () => ({ directory: '/test-only/diagnostics', recordCount: records.length }) };
       return { errorFacts, createDiagnosticsLog: () => log, createFlightRecorder: () => {
         const recorder = createFlightRecorder(log); cleanups.push(() => recorder.stop()); return recorder;
       } };
@@ -86,7 +89,7 @@ function loadMainHarness(options: { failHost?: boolean; deferPaint?: boolean; re
   Object.defineProperty(processMock, 'platform', { value: options.platform || process.platform });
   const context: any = { require: (request: string) => request === 'electron' ? electron : request.startsWith('.') ? local(path.resolve(path.dirname(productMain), request)) : request === 'fs' ? fsMock : require(request), __dirname: path.dirname(productMain), __filename: productMain, process: processMock, console, Buffer, setImmediate, clearTimeout, setTimeout, Promise, Date, Object, String, Number, Array, JSON, Error };
   vm.runInNewContext(source, context, { filename: productMain });
-  return { app, window, ipc, calls, a9Config, workspacePath };
+  return { app, window, ipc, calls, a9Config, workspacePath, records, processEvents };
 }
 
 describe('A9-17 real main entry startup ordering', () => {
@@ -159,7 +162,7 @@ describe('A9-17 real main entry startup ordering', () => {
     const result = expect(pending).rejects.toBeTruthy();
     expect(h.calls).not.toContain('desktop.handler');
     h.window.close();
-    h.app.emit('will-quit', { preventDefault() {} });
+    h.app.emit('will-quit');
     release();
     await result;
     expect(h.calls).toContain('host.dispose');
@@ -184,5 +187,50 @@ describe('A9-17 real main entry startup ordering', () => {
     const h = loadMainHarness();
     await expect(h.ipc['desktop:request']({ sender: {}, senderFrame: { url: 'file:///tmp' } }, {})).rejects.toThrow('RENDERER_CAPABILITY_DENIED');
     expect(h.calls).not.toContain('desktop.handler');
+  });
+});
+
+describe('A9-62 review main regressions', () => {
+  test('R2 normal quit emits before-quit/will-quit/dispose once and synchronously finishes the exit pair', async () => {
+    const h = loadMainHarness();
+    await until(() => h.calls.includes('createDesktopHost'));
+    await h.ipc['product:get-diagnostics']({ sender: h.window.webContents, senderFrame: { url: 'file:///tmp' } });
+    let before = 0; let will = 0;
+    h.app.on('before-quit', () => before++); h.app.on('will-quit', () => will++);
+    expect(() => h.app.quit()).not.toThrow();
+    await new Promise(resolve => setImmediate(resolve));
+    expect(before).toBe(1); expect(will).toBe(1);
+    expect(h.calls.filter(call => call === 'app.quit')).toHaveLength(1);
+    expect(h.calls.filter(call => call === 'host.dispose')).toHaveLength(1);
+    expect(h.records.filter(row => row.event === 'exit-begin')).toHaveLength(1);
+    expect(h.records.filter(row => row.event === 'exit-end')).toEqual([
+      expect.objectContaining({ sync: true, values: { exitCode: 0 } }),
+    ]);
+  });
+
+  test('R4 excludes native error-dialog blocking time from the heartbeat stall', async () => {
+    let now = process.hrtime.bigint();
+    const clock = jest.spyOn(process.hrtime, 'bigint').mockImplementation(() => now);
+    try {
+      const h = loadMainHarness({ errorDialog: () => { now += BigInt(3000000000); } });
+      await until(() => h.calls.includes('createDesktopHost'));
+      await h.ipc['product:get-diagnostics']({ sender: h.window.webContents, senderFrame: { url: 'file:///tmp' } });
+      h.processEvents.emit('uncaughtException', Object.assign(new Error('fake error'), { code: 'EIO' }));
+      await until(() => h.calls.includes('error-dialog'));
+      await h.ipc['product:get-diagnostics']({ sender: h.window.webContents, senderFrame: { url: 'file:///tmp' } });
+      expect(h.records.filter(row => row.event === 'main-thread-stall')).toHaveLength(0);
+    } finally { clock.mockRestore(); }
+  });
+
+  test('R5 second-instance exit finishes app-ready before exit and records its reason', async () => {
+    const h = loadMainHarness({ hasLock: false });
+    await until(() => h.calls.includes('app.exit'));
+    const begin = h.records.find(row => row.event === 'startup-stage-begin' && row.values.stage === 'app-ready');
+    const end = h.records.find(row => row.event === 'startup-stage-end' && row.values.stage === 'app-ready');
+    expect(begin).toBeDefined(); expect(end).toBeDefined();
+    expect(end!.values.operationId).toBe(begin!.values.operationId);
+    expect(h.records.filter(row => row.event === 'second-instance-exit')).toHaveLength(1);
+    expect(h.calls).not.toContain('app.whenReady');
+    expect(h.calls).not.toContain('createDesktopHost');
   });
 });
