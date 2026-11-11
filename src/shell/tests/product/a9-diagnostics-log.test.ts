@@ -198,3 +198,80 @@ describe('A9-62 review red-green regressions', () => {
     expect(fs.readdirSync(directory).reduce((sum, name) => sum + fs.statSync(path.join(directory, name)).size, 0)).toBeLessThanOrEqual(3 * 4096);
   }, 20000);
 });
+
+
+describe('A9-62 R3 seven reliability repairs', () => {
+  test('S1 rejects accidental secrets while retaining approved code families', async () => {
+    const log = createDiagnosticsLog({ userDataPath: root() });
+    const valid = ['A9_SCOPE_STALE', 'A9_APPLICATION_BUSY', 'ENOSPC', 'ERR_INVALID_ARG_TYPE'];
+    const invalid = ['AUDIT_SECRET_0123456789ABCDEF', 'A9_KEY_1234567890', 'WORKSPACE_WRITE_LOCKED',
+      'a9_scope_stale', 'A9 HAS SPACE', 'A9_' + 'A'.repeat(46), 'ERR_' + 'A'.repeat(45)];
+    for (const code of [...valid, ...invalid]) await log.record('ipc-end', errorFacts({ code }, 'A9_IPC_FAILED'));
+    const recorded = rows(log.snapshot().directory);
+    expect(recorded.map(row => row.errorCode)).toEqual([...valid, ...invalid.map(() => 'A9_IPC_FAILED')]);
+    for (const code of invalid) expect(JSON.stringify(recorded)).not.toContain(code);
+  });
+
+  test('S2 rejects nonregular emergency targets before synchronous open', async () => {
+    for (const type of ['fifo', 'symlink', 'directory', 'socket']) {
+      let writes = 0;
+      const io = { ...fs, lstatSync: () => ({ isFile: () => false }),
+        writeFileSync: () => { writes++; } };
+      const log = createDiagnosticsLog({ userDataPath: root(), fs: io });
+      await log.record('process-start');
+      expect({ type, result: log.criticalSync('exit-end'), writes }).toEqual({ type, result: false, writes: 0 });
+      expect(log.snapshot().writeFailureCount).toBe(1);
+    }
+  });
+
+  test('S4 emergency exit creates its directory before async initialization completes', async () => {
+    const log = createDiagnosticsLog({ userDataPath: root(), fs: { ...fs, promises: { ...fs.promises,
+      mkdir: () => new Promise(() => {}) } } });
+    void log.record('process-start');
+    expect(log.criticalSync('exit-end', { exitCode: 0 })).toBe(true);
+    expect(rows(log.snapshot().directory)).toEqual([expect.objectContaining({ event: 'exit-end', exitCode: 0 })]);
+  });
+
+  test('S5 times out only the first IPC wait and recovers after a successful write', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let writeGate: Promise<void> | null = null;
+    const log = createDiagnosticsLog({ userDataPath: root(), fs: { ...fs, promises: { ...fs.promises,
+      mkdir: async (...args: any[]) => { await gate; return (fs.promises.mkdir as any)(...args); },
+      appendFile: async (...args: any[]) => { if (writeGate) await writeGate; return (fs.promises.appendFile as any)(...args); } } } });
+    try {
+      const start = process.hrtime.bigint();
+      await log.checkpoint('ipc-begin', { action: 'a9.workspace.list' });
+      expect(Number(process.hrtime.bigint() - start) / 1e6).toBeGreaterThanOrEqual(40);
+      for (let index = 0; index < 19; index++) {
+        const now = process.hrtime.bigint();
+        await log.checkpoint('ipc-begin', { action: 'a9.workspace.list' });
+        expect(Number(process.hrtime.bigint() - now) / 1e6).toBeLessThan(5);
+      }
+    } finally { release(); await log.record('drain'); }
+    expect(log.snapshot().ipcWaitSuspended).toBe(false);
+    let releaseWrite!: () => void;
+    writeGate = new Promise<void>(resolve => { releaseWrite = resolve; });
+    let finished = false;
+    const recovered = log.checkpoint('ipc-begin').then(() => { finished = true; });
+    try {
+      await new Promise(resolve => setImmediate(resolve));
+      expect(finished).toBe(false); // The recovered checkpoint really waits again.
+    } finally { releaseWrite(); await recovered; await log.record('drain'); }
+    expect(log.snapshot().writeFailureCount).toBe(0);
+  });
+
+  test('S7 keeps successful slow IPC completion in critical.jsonl', async () => {
+    const log = createDiagnosticsLog({ userDataPath: root() });
+    const recorder = createFlightRecorder(log); recorders.push(recorder);
+    const operation = recorder.begin('ipc', { channel: 'product:a9-request', action: 'a9.workspace.list' });
+    await operation.ready;
+    await new Promise(resolve => setTimeout(resolve, 1100));
+    operation.end();
+    await log.record('drain'); await log.flush();
+    const critical = fs.readFileSync(path.join(log.snapshot().directory, 'critical.jsonl'), 'utf8');
+    expect(critical.split('\n').filter(Boolean).map(line => JSON.parse(line))).toEqual(expect.arrayContaining([
+      expect.objectContaining({ event: 'ipc-end', action: 'a9.workspace.list', durationMs: expect.any(Number) }),
+    ]));
+  });
+});

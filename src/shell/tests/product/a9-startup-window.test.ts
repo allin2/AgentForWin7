@@ -191,7 +191,7 @@ describe('A9-17 real main entry startup ordering', () => {
 });
 
 describe('A9-62 review main regressions', () => {
-  test('R2 normal quit emits before-quit/will-quit/dispose once and synchronously finishes the exit pair', async () => {
+  test('R2 normal quit emits before-quit/will-quit/dispose once and synchronously finishes confirmed exit', async () => {
     const h = loadMainHarness();
     await until(() => h.calls.includes('createDesktopHost'));
     await h.ipc['product:get-diagnostics']({ sender: h.window.webContents, senderFrame: { url: 'file:///tmp' } });
@@ -202,7 +202,8 @@ describe('A9-62 review main regressions', () => {
     expect(before).toBe(1); expect(will).toBe(1);
     expect(h.calls.filter(call => call === 'app.quit')).toHaveLength(1);
     expect(h.calls.filter(call => call === 'host.dispose')).toHaveLength(1);
-    expect(h.records.filter(row => row.event === 'exit-begin')).toHaveLength(1);
+    expect(h.records.filter(row => row.event === 'exit-requested')).toHaveLength(1);
+    expect(h.records.filter(row => row.event === 'exit-begin')).toHaveLength(0);
     expect(h.records.filter(row => row.event === 'exit-end')).toEqual([
       expect.objectContaining({ sync: true, values: { exitCode: 0 } }),
     ]);
@@ -232,5 +233,34 @@ describe('A9-62 review main regressions', () => {
     expect(h.records.filter(row => row.event === 'second-instance-exit')).toHaveLength(1);
     expect(h.calls).not.toContain('app.whenReady');
     expect(h.calls).not.toContain('createDesktopHost');
+  });
+});
+
+
+describe('A9-62 R3 fatal and quit entry regressions', () => {
+  test('S3 startup failure and uncaught exception use the synchronous emergency path', async () => {
+    const failed = loadMainHarness({ failHost: true });
+    await until(() => failed.calls.includes('app.exit'));
+    expect(failed.records.filter(row => row.event === 'startup-failed')).toEqual([
+      expect.objectContaining({ sync: true }),
+    ]);
+    const h = loadMainHarness();
+    await until(() => h.calls.includes('createDesktopHost'));
+    h.processEvents.emit('uncaughtException', Object.assign(new Error('fake'), { code: 'EIO' }));
+    expect(h.records.filter(row => row.event === 'uncaught-exception')).toEqual([
+      expect.objectContaining({ sync: true, values: expect.objectContaining({ errorCode: 'EIO' }) }),
+    ]);
+  });
+
+  test('S6 cancelled quit records every request and only confirmed quit records exit-end', async () => {
+    const h = loadMainHarness();
+    await until(() => h.calls.includes('createDesktopHost'));
+    // Emit the Electron event for a quit that a later listener cancels. No will-quit occurs.
+    h.app.emit('before-quit', { preventDefault() {} });
+    expect(h.records.filter(row => row.event === 'exit-begin' || row.event === 'exit-end')).toHaveLength(0);
+    expect(h.records.filter(row => row.event === 'exit-requested')).toHaveLength(1);
+    h.app.quit();
+    expect(h.records.filter(row => row.event === 'exit-requested')).toHaveLength(2);
+    expect(h.records.filter(row => row.event === 'exit-end')).toHaveLength(1);
   });
 });

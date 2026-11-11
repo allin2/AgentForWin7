@@ -5,7 +5,7 @@ const path = require('path');
 
 const FILE_BYTES = 2 * 1024 * 1024;
 const LINE_BYTES = 4096;
-const CODE_PATTERN = /^[A-Z][A-Z0-9_]{2,63}$/;
+const CODE_PATTERN = /^(?:A[89]_[A-Z0-9_]+|E[A-Z0-9]{2,15}|ERR_[A-Z0-9_]{2,44})$/;
 const ERROR_NAMES = new Set(['Error', 'TypeError', 'RangeError', 'ReferenceError', 'SyntaxError', 'URIError', 'EvalError', 'AggregateError']);
 const STACK_FILES = new Set(['main.js', 'a9-diagnostics-log.js', 'desktop-host.js', 'a9-agent-runtime.js', 'a9-workspace-registry.js', 'a9-product-ipc.js', 'a9-package-runtime.js', 'active-workspace-store.js', 'rc-composition.js', 'runner-runtime.js']);
 
@@ -14,7 +14,7 @@ function errorFacts(error, fallback = 'A9_DIAGNOSTIC_ERROR') {
   // arbitrary class name, function name, or raw stack.
   try {
     const code = error && typeof error.code === 'string' ? error.code : '';
-    const errorCode = CODE_PATTERN.test(code) ? code : fallback;
+    const errorCode = code.length <= 48 && CODE_PATTERN.test(code) && !/[0-9]{6}/.test(code) ? code : fallback;
     const errorName = error && ERROR_NAMES.has(error.name) ? error.name : 'Error';
     const stackFrames = [];
     if (error && typeof error.stack === 'string') {
@@ -48,6 +48,7 @@ function createDiagnosticsLog(options) {
   let normalDraining = false;
   let criticalDraining = false;
   let stopped = false;
+  let ipcWaitSuspended = false;
 
   function encode(event, values) {
     const row = { schemaVersion: 1, timestamp: new Date().toISOString(), pid: process.pid, event };
@@ -124,14 +125,24 @@ function createDiagnosticsLog(options) {
     state.bytes += bytes;
   }
 
+  let syncDirectoryReady = false;
   function appendSync(line) {
-    // Normal initialization already created the directory and measured files.
-    // Never race asynchronous critical writes or their rotation on this path.
-    if (!directoryReady) throw new Error('A9_DIAGNOSTIC_NOT_READY');
+    // Fatal/exit only: a bounded record must not open a FIFO or follow a link.
+    // Async initialization may still be pending when Electron exits early.
+    if (!directoryReady && !syncDirectoryReady) {
+      io.mkdirSync(directory, { recursive: true });
+      syncDirectoryReady = true;
+    }
+    let existingBytes = 0;
+    try {
+      const target = io.lstatSync(emergency.activePath);
+      if (!target.isFile()) throw new Error('A9_DIAGNOSTIC_TARGET_INVALID');
+      existingBytes = target.size;
+    } catch (error) { if (error.code !== 'ENOENT') throw error; }
     const bytes = Buffer.byteLength(line, 'utf8');
-    const rotate = emergency.bytes + bytes > emergency.limit;
+    const rotate = existingBytes + bytes > emergency.limit;
     io.writeFileSync(emergency.activePath, line, { encoding: 'utf8', flag: rotate ? 'w' : 'a' });
-    emergency.bytes = (rotate ? 0 : emergency.bytes) + bytes;
+    emergency.bytes = (rotate ? 0 : existingBytes) + bytes;
   }
 
   async function drain(state, queue, criticalDrain) {
@@ -143,6 +154,7 @@ function createDiagnosticsLog(options) {
         try {
           await appendAsync(state, item.line);
           stats.writtenCount += 1;
+          ipcWaitSuspended = false;
           item.resolve(true);
         } catch (_error) {
           stats.writeFailureCount += 1;
@@ -169,9 +181,9 @@ function createDiagnosticsLog(options) {
     }
   }
 
-  async function boundedWait(result) {
+  async function boundedWait(result, onTimeout) {
     let timer;
-    try { return await Promise.race([result, new Promise(resolve => { timer = setTimeout(() => resolve(false), 50); })]); }
+    try { return await Promise.race([result, new Promise(resolve => { timer = setTimeout(() => { if (onTimeout) onTimeout(); resolve(false); }, 50); })]); }
     finally { clearTimeout(timer); }
   }
 
@@ -180,6 +192,7 @@ function createDiagnosticsLog(options) {
     try {
       appendSync(encode(event, values));
       stats.writtenCount += 1;
+      ipcWaitSuspended = false;
       return true;
     } catch (_error) {
       stats.writeFailureCount += 1;
@@ -188,7 +201,7 @@ function createDiagnosticsLog(options) {
   }
 
   function isCritical(event, values) {
-    return event !== 'ipc-begin' && event !== 'ipc-end' || Boolean(values.errorCode);
+    return event !== 'ipc-begin' && event !== 'ipc-end' || Boolean(values.errorCode) || (event === 'ipc-end' && values.durationMs > 1000);
   }
   function record(event, values = {}) {
     return isCritical(event, values) ? enqueue(critical, criticalQueue, event, values, true)
@@ -197,13 +210,18 @@ function createDiagnosticsLog(options) {
   return {
     record,
     critical: (event, values = {}) => enqueue(critical, criticalQueue, event, values, true),
-    checkpoint: (event, values = {}) => boundedWait(record(event, values)),
+    checkpoint: (event, values = {}) => {
+      const result = record(event, values);
+      if (event !== 'ipc-begin') return boundedWait(result);
+      if (ipcWaitSuspended) return Promise.resolve(false);
+      return boundedWait(result, () => { ipcWaitSuspended = true; });
+    },
     criticalCheckpoint: (event, values = {}) => boundedWait(enqueue(critical, criticalQueue, event, values, true)),
     fatal: (event, values = {}) => boundedWait(enqueue(critical, criticalQueue, event, values, true)),
     flush: () => boundedWait(Promise.all([lastNormalWrite, lastCriticalWrite])),
     criticalSync,
     stop: () => { stopped = true; },
-    snapshot: () => ({ directory, ...stats, queuedCount: normalQueue.length + criticalQueue.length }),
+    snapshot: () => ({ directory, ...stats, ipcWaitSuspended, queuedCount: normalQueue.length + criticalQueue.length }),
   };
 }
 

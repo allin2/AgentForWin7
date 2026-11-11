@@ -94,24 +94,22 @@ function showDiagnosticError(title, code) {
 // behavior while replacing the unbounded raw error text with safe metadata.
 process.on('uncaughtException', (error) => {
   const facts = errorFacts(error, 'A9_MAIN_UNCAUGHT_EXCEPTION');
-  void diagnosticsLog.fatal('uncaught-exception', facts).then(() => showDiagnosticError('主进程发生错误', facts.errorCode));
+  diagnosticsLog.criticalSync('uncaught-exception', facts);
+  showDiagnosticError('主进程发生错误', facts.errorCode);
 });
 process.on('unhandledRejection', (error) => {
   void diagnosticsLog.record('unhandled-rejection', errorFacts(error, 'A9_MAIN_UNHANDLED_REJECTION'));
 });
-let diagnosticQuitStarted = false;
 let diagnosticWillQuitStarted = false;
 app.on('before-quit', () => {
-  if (diagnosticQuitStarted) return;
-  diagnosticQuitStarted = true;
-  diagnosticsLog.criticalSync('exit-begin');
+  void diagnosticsLog.record('exit-requested');
 });
 let diagnosticExitPrepared = false;
 let diagnosticExitInFlight = null;
 async function exitProduct(exitCode) {
   if (diagnosticExitInFlight) return diagnosticExitInFlight;
   diagnosticExitInFlight = (async () => {
-    await diagnosticsLog.checkpoint('exit-begin', { exitCode });
+    await diagnosticsLog.checkpoint('exit-requested', { exitCode });
     diagnosticsLog.criticalSync('exit-end', { exitCode });
     diagnosticExitPrepared = true;
     flightRecorder.stop();
@@ -120,7 +118,10 @@ async function exitProduct(exitCode) {
   return diagnosticExitInFlight;
 }
 app.on('quit', (_event, exitCode) => {
-  if (!diagnosticExitPrepared) diagnosticsLog.criticalSync('exit-end', { exitCode });
+  if (!diagnosticExitPrepared) {
+    diagnosticsLog.criticalSync('exit-end', { exitCode });
+    diagnosticExitPrepared = true;
+  }
   flightRecorder.stop();
 });
 
@@ -1284,6 +1285,7 @@ if (!hasSingleInstanceLock) {
 } else {
   app.on('second-instance', focusMainWindow);
   app.whenReady().then(async () => {
+    if (diagnosticExitPrepared) return;
     appReadyOperation.end();
     await flightRecorder.stage('session-policy', () => {
     installSessionPolicy(session.defaultSession, {
@@ -1405,7 +1407,7 @@ if (!hasSingleInstanceLock) {
     await startupInitializationPromise;
   }).catch(async (error) => {
     const facts = errorFacts(error, 'A9_STARTUP_FAILED');
-    await diagnosticsLog.fatal('startup-failed', facts);
+    diagnosticsLog.criticalSync('startup-failed', facts);
     runtimeState.errors.push('startup:' + String(error && error.stack ? error.stack : error));
     if (smokeReportPath) finishSmoke('FAIL', 1, 'The Electron product entry failed during startup.');
     else if (a8ReviewSmokeReportPath) failA8ReviewSmoke(error);
@@ -1418,7 +1420,7 @@ if (!hasSingleInstanceLock) {
     if (diagnosticWillQuitStarted) return;
     diagnosticWillQuitStarted = true;
     startupClosing = true;
-    startupPaintReject(Object.assign(new Error('APP_SHUTTING_DOWN'), { code: 'APP_SHUTTING_DOWN' }));
+    if (startupInitializationPromise) startupPaintReject(Object.assign(new Error('APP_SHUTTING_DOWN'), { code: 'APP_SHUTTING_DOWN' }));
     try {
       writeAcceptanceEventReport();
     } catch (error) {
