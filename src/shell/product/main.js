@@ -32,8 +32,8 @@ const {
   isTrustedLocalUrl,
 } = require('./policy');
 const { createDesktopRequestHandler } = require('./desktop-ipc');
-const { createA8ProductRequestHandler } = require('./a8-product-ipc');
-const { createA9ProductRequestHandler } = require('./a9-product-ipc');
+const { createA8ProductRequestHandler, ACTIONS: A8_ACTIONS } = require('./a8-product-ipc');
+const { createA9ProductRequestHandler, A9_ACTIONS } = require('./a9-product-ipc');
 const { createA9AgentRuntime, openA9RuntimePersistence, normalizeConversationTitle } = require('./a9-agent-runtime');
 const { createA9WorkspaceRegistry } = require('./a9-workspace-registry');
 const { loadA9PackageRuntime } = require('./a9-package-runtime');
@@ -57,6 +57,14 @@ const preloadPath = path.join(productRoot, 'preload.js');
 // v3 package only: bind the immutable native closure and select the documented
 // LOCALAPPDATA/portable data root before Electron creates its default userData.
 const a9PackageRuntime = loadA9PackageRuntime({ productRoot, app });
+const { createDiagnosticsLog, createFlightRecorder, errorFacts } = require('./a9-diagnostics-log');
+const diagnosticsLog = createDiagnosticsLog({ userDataPath: app.getPath('userData') });
+const flightRecorder = createFlightRecorder(diagnosticsLog);
+void diagnosticsLog.record('process-start', {
+  version: a9PackageRuntime ? a9PackageRuntime.version : '0.1.0-mvp',
+  electron: process.versions.electron, node: process.versions.node,
+});
+const appReadyOperation = flightRecorder.begin('startup-stage', { stage: 'app-ready' });
 const startedAt = new Date().toISOString();
 const mvpId = readArgument('--mvp-id=') || 'MVP-UNKNOWN';
 const smokeReportPath = readArgument('--smoke-report=');
@@ -72,6 +80,48 @@ const acceptanceEventReportPath = readArgument('--acceptance-event-report=');
 const runnerManifestPath = readArgument('--runner-manifest=');
 const runnerManifestSha256 = readArgument('--runner-manifest-sha256=');
 const smokeTimeoutMs = boundedInteger(readArgument('--smoke-timeout-ms='), 20000, 5000, 60000);
+
+const diagnosticAutomationMode = Boolean(smokeReportPath || a8ReviewSmokeReportPath || a8BoundarySmokeReportPath
+  || acceptanceEventReportPath || a9WorkbenchScreenshotPath || process.env.A9_SMOKE_PRODUCT_MAIN
+  || process.env.A9_SMOKE_REQUIRE_PRODUCT_MAIN === '1');
+function showDiagnosticError(title, code) {
+  if (diagnosticAutomationMode) return;
+  try { dialog.showErrorBox(title, `错误码：${code}\n诊断日志：${diagnosticsLog.snapshot().directory}`); }
+  catch (_error) { void diagnosticsLog.record('error-dialog-failed', { errorCode: 'A9_DIAGNOSTIC_DIALOG_FAILED' }); }
+}
+// Electron 22's default handler only shows its dialog when it is the sole
+// uncaughtException listener. Adding ours preserves its continue-after-dialog
+// behavior while replacing the unbounded raw error text with safe metadata.
+process.on('uncaughtException', (error) => {
+  const facts = errorFacts(error, 'A9_MAIN_UNCAUGHT_EXCEPTION');
+  void diagnosticsLog.fatal('uncaught-exception', facts).then(() => showDiagnosticError('主进程发生错误', facts.errorCode));
+});
+process.on('unhandledRejection', (error) => {
+  void diagnosticsLog.record('unhandled-rejection', errorFacts(error, 'A9_MAIN_UNHANDLED_REJECTION'));
+});
+let diagnosticQuitStarted = false;
+app.on('before-quit', () => {
+  if (diagnosticQuitStarted) return;
+  diagnosticQuitStarted = true;
+  void diagnosticsLog.record('exit-begin');
+});
+let diagnosticExitPrepared = false;
+let diagnosticExitInFlight = null;
+async function exitProduct(exitCode) {
+  if (diagnosticExitInFlight) return diagnosticExitInFlight;
+  diagnosticExitInFlight = (async () => {
+    await diagnosticsLog.checkpoint('exit-begin', { exitCode });
+    await diagnosticsLog.checkpoint('exit-end', { exitCode });
+    diagnosticExitPrepared = true;
+    flightRecorder.stop();
+    app.exit(exitCode);
+  })();
+  return diagnosticExitInFlight;
+}
+app.on('quit', (_event, exitCode) => {
+  if (!diagnosticExitPrepared) void diagnosticsLog.fatal('exit-end', { exitCode });
+  flightRecorder.stop();
+});
 
 const runtimeState = {
   rendererReady: false,
@@ -113,6 +163,26 @@ function awaitStartupInitialization() {
   if (startupClosing) return Promise.reject(Object.assign(new Error('APP_SHUTTING_DOWN'), { code: 'APP_SHUTTING_DOWN' }));
   if (!startupInitializationPromise) return Promise.reject(Object.assign(new Error('STARTUP_NOT_READY'), { code: 'STARTUP_NOT_READY' }));
   return startupInitializationPromise;
+}
+
+function registerDiagnosticIpc(channel, handler) {
+  const actions = new Set(Object.values(channel === 'product:a9-request' ? A9_ACTIONS || {}
+    : channel === 'product:a8-request' ? A8_ACTIONS || {} : IPCMessageType));
+  ipcMain.handle(channel, async (event, ...args) => {
+    const request = args[0];
+    // Resolve only an exact known action. Unknown/untrusted strings are never
+    // copied from a request into persistent diagnostics.
+    const candidate = request && (channel === 'desktop:request' ? request.type : request.action);
+    const action = actions.has(candidate) ? candidate : 'unknown';
+    const recordStart = validRendererSender(event) && channel !== 'product:get-diagnostics' && action !== 'unknown';
+    const operation = flightRecorder.begin('ipc', { channel, action }, recordStart);
+    if (recordStart) await operation.ready;
+    try {
+      const result = await handler(event, ...args);
+      operation.end(result && result.ok === false ? result.error || { code: 'A9_IPC_FAILED' } : null);
+      return result;
+    } catch (error) { operation.end(error); throw error; }
+  });
 }
 
 function withStartupBarrier(handler, isValidSender = validRendererSender) {
@@ -345,11 +415,11 @@ function finishSmoke(status, exitCode, summary) {
     writeSmokeReport(status, exitCode, summary);
   } catch (error) {
     process.stderr.write('SMOKE_REPORT_ERROR:' + String(error && error.stack ? error.stack : error) + '\n');
-    app.exit(3);
+    void exitProduct(3);
     return;
   }
   process.stdout.write('SMOKE_REPORT_WRITTEN:' + smokeReportPath + '\n');
-  app.exit(exitCode);
+  void exitProduct(exitCode);
 }
 
 async function runA8ReviewElectronSmoke() {
@@ -592,7 +662,7 @@ async function runA8ReviewElectronSmoke() {
   fs.writeFileSync(a8ReviewSmokeReportPath, JSON.stringify(report, null, 2) + '\n', 'utf8');
   a8ReviewSmokeFinished = true;
   process.stdout.write('A8_REVIEW_SMOKE_REPORT_WRITTEN:' + a8ReviewSmokeReportPath + '\n');
-  app.exit(report.status === 'PASS' ? 0 : 1);
+  void exitProduct(report.status === 'PASS' ? 0 : 1);
 }
 
 async function runA8BoundaryElectronSmoke() {
@@ -698,7 +768,7 @@ async function runA8BoundaryElectronSmoke() {
   fs.writeFileSync(a8BoundarySmokeReportPath, JSON.stringify(report, null, 2) + '\n', 'utf8');
   a8BoundarySmokeFinished = true;
   process.stdout.write('A8_BOUNDARY_SMOKE_REPORT_WRITTEN:' + a8BoundarySmokeReportPath + '\n');
-  app.exit(report.status === 'PASS' ? 0 : 1);
+  void exitProduct(report.status === 'PASS' ? 0 : 1);
 }
 
 function a8BoundarySmokeSessionReady() {
@@ -788,7 +858,7 @@ async function failA8ReviewSmoke(error) {
     process.stderr.write('A8_REVIEW_SMOKE_REPORT_ERROR:' + String(writeError && writeError.stack ? writeError.stack : writeError) + '\n');
   }
   process.stderr.write('A8_REVIEW_SMOKE_FAILED:' + String(error && error.stack ? error.stack : error) + '\n');
-  app.exit(1);
+  void exitProduct(1);
 }
 
 function failA8BoundarySmoke(error) {
@@ -816,7 +886,7 @@ function failA8BoundarySmoke(error) {
     process.stderr.write('A8_BOUNDARY_SMOKE_REPORT_ERROR:' + String(writeError && writeError.stack ? writeError.stack : writeError) + '\n');
   }
   process.stderr.write('A8_BOUNDARY_SMOKE_FAILED:' + String(error && error.stack ? error.stack : error) + '\n');
-  app.exit(1);
+  void exitProduct(1);
 }
 
 function focusMainWindow() {
@@ -837,7 +907,7 @@ async function captureA9WorkbenchScreenshot() {
   fs.mkdirSync(path.dirname(a9WorkbenchScreenshotPath), { recursive: true });
   fs.writeFileSync(a9WorkbenchScreenshotPath, image.toPNG());
   process.stdout.write(`A9_WORKBENCH_SCREENSHOT_WRITTEN:${a9WorkbenchScreenshotPath}\n`);
-  app.exit(0);
+  void exitProduct(0);
 }
 
 function createMainWindow() {
@@ -845,11 +915,17 @@ function createMainWindow() {
   window.setMenuBarVisibility(false);
   installWindowPolicy(window, rendererRoot);
   window.webContents.on('render-process-gone', (_event, details) => {
+    void diagnosticsLog.record('render-process-gone', {
+      reason: ['clean-exit', 'abnormal-exit', 'killed', 'crashed', 'oom', 'launch-failed', 'integrity-failure'].includes(details.reason) ? details.reason : 'unknown',
+      exitCode: details.exitCode,
+    });
     runtimeState.errors.push('render-process-gone:' + details.reason);
     if (smokeReportPath) finishSmoke('FAIL', 1, 'Renderer terminated before the smoke test completed.');
     else if (a8ReviewSmokeReportPath) failA8ReviewSmoke(new Error('Renderer terminated before the A8 Review smoke completed.'));
     else if (a8BoundarySmokeReportPath) failA8BoundarySmoke(new Error('Renderer terminated before the A8-04 boundary smoke completed.'));
   });
+  window.on('unresponsive', () => { void diagnosticsLog.record('window-unresponsive'); });
+  window.on('responsive', () => { void diagnosticsLog.record('window-responsive'); });
   window.once('ready-to-show', () => {
     if (!smokeReportPath) window.show();
     // Let Chromium paint the trusted local shell before starting heavyweight
@@ -941,8 +1017,8 @@ const handleDesktopRequest = createDesktopRequestHandler({
   },
 });
 
-ipcMain.handle('desktop:request', withStartupBarrier(handleDesktopRequest));
-ipcMain.handle('product:a8-request', withStartupBarrier(createA8ProductRequestHandler({
+registerDiagnosticIpc('desktop:request', withStartupBarrier(handleDesktopRequest));
+registerDiagnosticIpc('product:a8-request', withStartupBarrier(createA8ProductRequestHandler({
   getDesktopHost: () => desktopHost,
   isValidRendererSender: validRendererSender,
   // A9 still reuses A8's bounded workspace-read DTOs. Deferred Review
@@ -1019,7 +1095,7 @@ function createWorkspaceRuntime(desiredWorkspace, hostOptions) {
     electronSqliteRoot: runtimeOptions.electronSqliteRoot,
   });
 }
-ipcMain.handle('product:a9-request', withStartupBarrier(createA9ProductRequestHandler({
+registerDiagnosticIpc('product:a9-request', withStartupBarrier(createA9ProductRequestHandler({
   getA9Runtime: getOrCreateA9Runtime,
   isValidRendererSender: validRendererSender,
   workspaceRegistry: a9Workspaces,
@@ -1095,6 +1171,7 @@ function buildDiagnostics() {
       platform: process.platform,
     },
     activeWorkspaceRestore: runtimeState.activeWorkspaceRestore,
+    diagnosticLog: diagnosticsLog.snapshot(),
   };
 }
 
@@ -1139,7 +1216,7 @@ async function restoreActiveWorkspace() {
   }
 }
 
-ipcMain.handle('product:get-diagnostics', withStartupBarrier((event) => {
+registerDiagnosticIpc('product:get-diagnostics', withStartupBarrier((event) => {
   if (!mainWindow || event.sender !== mainWindow.webContents || !isTrustedLocalUrl(event.senderFrame.url, rendererRoot)) {
     throw new Error('RENDERER_CAPABILITY_DENIED');
   }
@@ -1170,7 +1247,7 @@ ipcMain.on('product:renderer-ready', (event, payload) => {
   if (a9WorkbenchScreenshotPath) {
     void awaitStartupInitialization().then(() => captureA9WorkbenchScreenshot()).catch((error) => {
       process.stderr.write(`A9_WORKBENCH_SCREENSHOT_ERROR:${String(error && error.stack ? error.stack : error)}\n`);
-      app.exit(1);
+      void exitProduct(1);
     });
   } else if (smokeReportPath) {
     void awaitStartupInitialization().then(() => {
@@ -1200,21 +1277,28 @@ function recordBlockedRequest(url) {
 
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 if (!hasSingleInstanceLock) {
-  app.exit(2);
+  void exitProduct(2);
 } else {
   app.on('second-instance', focusMainWindow);
   app.whenReady().then(async () => {
+    appReadyOperation.end();
+    await flightRecorder.stage('session-policy', () => {
     installSessionPolicy(session.defaultSession, {
       rendererRoot,
       onRequestBlocked: (url) => recordBlockedRequest(url),
       onPermissionDenied: (permission) => runtimeState.deniedPermissions.push(permission),
     });
+    });
     // Create and display the trusted local shell first. Heavy state/runner/
     // workspace work is behind one promise shared by every product IPC.
-    mainWindow = createMainWindow();
+    const paintOperation = flightRecorder.begin('startup-stage', { stage: 'first-paint' });
+    await paintOperation.ready;
+    mainWindow = await flightRecorder.stage('window-create', () => createMainWindow());
     startupInitializationPromise = startupPaintPromise.then(async () => {
+    paintOperation.end();
     if (startupClosing) throw Object.assign(new Error('APP_SHUTTING_DOWN'), { code: 'APP_SHUTTING_DOWN' });
     let productRunner = null;
+    await flightRecorder.stage('runner-initialization', () => {
     const rcRuntimePath = path.join(__dirname, '..', 'rc-runtime.json');
     if (fs.existsSync(rcRuntimePath)) {
       rcComposition = createRcComposition({
@@ -1235,13 +1319,15 @@ if (!hasSingleInstanceLock) {
           expectedManifestSha256: runnerManifestSha256,
         });
       } catch (error) {
+        void diagnosticsLog.record('runner-initialization-failed', errorFacts(error, 'A9_RUNNER_INITIALIZATION_FAILED'));
         runtimeState.errors.push('runner-manifest:' + String(error && error.message ? error.message : error));
       }
     }
-    if (!legacyRendererRequested) {
-      activeWorkspaceStore = createActiveWorkspaceStore({ dataRoot: getA9DataRoot() });
-    }
-    desktopHost = createDesktopHost({
+    });
+    await flightRecorder.stage('active-workspace-store', () => {
+      if (!legacyRendererRequested) activeWorkspaceStore = createActiveWorkspaceStore({ dataRoot: getA9DataRoot() });
+    });
+    desktopHost = await flightRecorder.stage('desktop-host', () => createDesktopHost({
       allowWorkspaceSwitchWithActiveSessions: !legacyRendererRequested,
       recoveryDirectory: path.join(app.getPath('userData'), 'a2-recovery'),
       reviewDirectory: path.join(app.getPath('userData'), 'a8-reviews'),
@@ -1285,8 +1371,9 @@ if (!hasSingleInstanceLock) {
         }
         sendProductEvent(IPCMessageType.TASK_EVENT, task.sessionId, event);
       },
-    });
+    }));
     if (startupClosing) throw Object.assign(new Error('APP_SHUTTING_DOWN'), { code: 'APP_SHUTTING_DOWN' });
+    await flightRecorder.stage('workspace-restore', async () => {
     if (a8ReviewSmokeReportPath || a8ReviewSmokeWorkspace) {
       if (!a8ReviewSmokeReportPath || !a8ReviewSmokeWorkspace) throw new Error('A8_REVIEW_SMOKE_CONFIGURATION_INVALID');
       const selected = await desktopHost.selectWorkspace(a8ReviewSmokeWorkspace);
@@ -1299,6 +1386,7 @@ if (!hasSingleInstanceLock) {
     } else if (!legacyRendererRequested) {
       await restoreActiveWorkspace();
     }
+    });
     if (startupClosing) throw Object.assign(new Error('APP_SHUTTING_DOWN'), { code: 'APP_SHUTTING_DOWN' });
     if (smokeReportPath || a8ReviewSmokeReportPath || a8BoundarySmokeReportPath) {
       smokeTimer = setTimeout(() => {
@@ -1312,16 +1400,18 @@ if (!hasSingleInstanceLock) {
     return { desktopHost, rcComposition };
     });
     await startupInitializationPromise;
-  }).catch((error) => {
+  }).catch(async (error) => {
+    const facts = errorFacts(error, 'A9_STARTUP_FAILED');
+    await diagnosticsLog.fatal('startup-failed', facts);
     runtimeState.errors.push('startup:' + String(error && error.stack ? error.stack : error));
     if (smokeReportPath) finishSmoke('FAIL', 1, 'The Electron product entry failed during startup.');
     else if (a8ReviewSmokeReportPath) failA8ReviewSmoke(error);
     else if (a8BoundarySmokeReportPath) failA8BoundarySmoke(error);
-    else app.exit(1);
+    else { showDiagnosticError('应用启动失败', facts.errorCode); void exitProduct(1); }
   });
 
   app.on('window-all-closed', () => app.quit());
-  app.on('will-quit', () => {
+  app.on('will-quit', (event) => {
     startupClosing = true;
     startupPaintReject(Object.assign(new Error('APP_SHUTTING_DOWN'), { code: 'APP_SHUTTING_DOWN' }));
     try {
@@ -1346,5 +1436,13 @@ if (!hasSingleInstanceLock) {
     }
     desktopHost = null;
     rcComposition = null;
+    if (!diagnosticExitPrepared) {
+      event.preventDefault();
+      void (async () => {
+        await diagnosticsLog.checkpoint('exit-end', { exitCode: 0 });
+        diagnosticExitPrepared = true;
+        app.quit();
+      })();
+    }
   });
 }

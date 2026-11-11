@@ -5,7 +5,16 @@ import * as vm from 'vm';
 import { EventEmitter } from 'events';
 
 const temporaryWorkspaces: string[] = [];
+const cleanups: Array<() => void> = [];
+async function until(predicate: () => boolean) {
+  const deadline = Date.now() + 2000;
+  while (!predicate()) {
+    if (Date.now() > deadline) throw new Error('STARTUP_TEST_CONDITION_NOT_REACHED');
+    await new Promise(resolve => setImmediate(resolve));
+  }
+}
 afterEach(() => {
+  for (const cleanup of cleanups.splice(0)) cleanup();
   for (const workspace of temporaryWorkspaces.splice(0)) fs.rmSync(workspace, { recursive: true, force: true });
 });
 
@@ -27,7 +36,7 @@ function loadMainHarness(options: { failHost?: boolean; deferPaint?: boolean; re
     if (name === 'documents') throw new Error('DEFAULT_ROOT_MUST_STAY_LAZY');
     return '/tmp/a9-startup-test';
   };
-  app.quit = () => { calls.push('app.quit'); app.emit('will-quit'); };
+  app.quit = () => { calls.push('app.quit'); app.emit('will-quit', { preventDefault() {} }); };
   app.exit = () => calls.push('app.exit');
   const window = new (class extends EventEmitter {
     webContents: any = new EventEmitter(); destroyed = false;
@@ -39,6 +48,14 @@ function loadMainHarness(options: { failHost?: boolean; deferPaint?: boolean; re
   const electron = { app, BrowserWindow: class { constructor() { return window as any; } }, dialog: { showOpenDialog: async () => ({ canceled: true, filePaths: [] }), showErrorBox() {}, showMessageBox: async () => ({ response: 0 }) }, ipcMain: { handle: (name: string, handler: any) => { ipc[name] = handler; }, on: () => {} }, safeStorage: {}, session: { defaultSession: {} } };
   const host = { selectWorkspace: async () => { calls.push('restore.start'); if (options.restore) await options.restore; calls.push('restore.end'); return { workspacePath, displayName: 'test' }; }, listSessions: () => [], createSession: () => ({ sessionId: 's1' }), getDiagnostics: () => ({}), getSettings: () => ({}), dispose: () => calls.push('host.dispose'), getActiveWorkspacePath: () => null };
   const local = (request: string): any => {
+    if (request.endsWith('/a9-diagnostics-log')) {
+      const { createFlightRecorder, errorFacts } = require('../../product/a9-diagnostics-log');
+      const log = { record: async () => true, checkpoint: async () => true, fatal: async () => true,
+        stop() {}, snapshot: () => ({ directory: '/test-only/diagnostics', recordCount: 0 }) };
+      return { errorFacts, createDiagnosticsLog: () => log, createFlightRecorder: () => {
+        const recorder = createFlightRecorder(log); cleanups.push(() => recorder.stop()); return recorder;
+      } };
+    }
     if (request.endsWith('/policy')) return { createWindowOptions: () => ({}), isTrustedLocalUrl: () => true };
     if (request.endsWith('/desktop-ipc')) return { createDesktopRequestHandler: () => async (event: any) => { if (event.sender !== window.webContents) throw new Error('RENDERER_CAPABILITY_DENIED'); calls.push('desktop.handler'); return { ok: true }; } };
     if (request.endsWith('/a8-product-ipc')) return { createA8ProductRequestHandler: () => async () => ({ ok: true }) };
@@ -64,6 +81,8 @@ function loadMainHarness(options: { failHost?: boolean; deferPaint?: boolean; re
   };
   const fsMock = { ...fs, existsSync: () => false };
   const processMock = Object.create(process);
+  const processEvents = new EventEmitter();
+  processMock.on = processEvents.on.bind(processEvents);
   Object.defineProperty(processMock, 'platform', { value: options.platform || process.platform });
   const context: any = { require: (request: string) => request === 'electron' ? electron : request.startsWith('.') ? local(path.resolve(path.dirname(productMain), request)) : request === 'fs' ? fsMock : require(request), __dirname: path.dirname(productMain), __filename: productMain, process: processMock, console, Buffer, setImmediate, clearTimeout, setTimeout, Promise, Date, Object, String, Number, Array, JSON, Error };
   vm.runInNewContext(source, context, { filename: productMain });
@@ -105,8 +124,7 @@ describe('A9-17 real main entry startup ordering', () => {
     const h = loadMainHarness();
     await Promise.resolve();
     expect(h.calls).not.toContain('createDesktopHost');
-    await new Promise((resolve) => setImmediate(resolve));
-    await new Promise((resolve) => setImmediate(resolve));
+    await until(() => h.calls.includes('createDesktopHost'));
     expect(h.calls).toContain('createDesktopHost');
     await h.ipc['desktop:request']({ sender: h.window.webContents, senderFrame: { url: 'file:///tmp' } }, {});
     expect(h.calls).toContain('desktop.handler');
@@ -114,15 +132,14 @@ describe('A9-17 real main entry startup ordering', () => {
 
   test('initialization failure does not execute IPC handler', async () => {
     const h = loadMainHarness({ failHost: true });
-    await new Promise((resolve) => setImmediate(resolve));
-    await new Promise((resolve) => setImmediate(resolve));
+    await until(() => h.calls.includes('app.exit'));
     await expect(h.ipc['desktop:request']({ sender: h.window.webContents, senderFrame: { url: 'file:///tmp' } }, {})).rejects.toBeTruthy();
     expect(h.calls).not.toContain('desktop.handler');
   });
 
   test('closing before paint prevents late host creation', async () => {
     const h = loadMainHarness({ deferPaint: true });
-    await Promise.resolve();
+    await until(() => h.window.listenerCount('close') > 0);
     h.window.close();
     await Promise.resolve();
     h.window.emit('ready-to-show');
@@ -136,14 +153,13 @@ describe('A9-17 real main entry startup ordering', () => {
     let release!: () => void;
     const restore = new Promise<void>(resolve => { release = resolve; });
     const h = loadMainHarness({ restore });
-    await new Promise(resolve => setImmediate(resolve));
-    await new Promise(resolve => setImmediate(resolve));
+    await until(() => h.calls.includes('restore.start'));
     expect(h.calls).toContain('restore.start');
     const pending = h.ipc['desktop:request']({ sender: h.window.webContents, senderFrame: { url: 'file:///tmp' } }, {});
     const result = expect(pending).rejects.toBeTruthy();
     expect(h.calls).not.toContain('desktop.handler');
     h.window.close();
-    h.app.emit('will-quit');
+    h.app.emit('will-quit', { preventDefault() {} });
     release();
     await result;
     expect(h.calls).toContain('host.dispose');
@@ -152,16 +168,14 @@ describe('A9-17 real main entry startup ordering', () => {
 
   test('ordinary workspace activation keeps the main desktop-host selection path', async () => {
     const h = loadMainHarness({ ordinaryWorkspace: true });
-    await new Promise(resolve => setImmediate(resolve));
-    await new Promise(resolve => setImmediate(resolve));
+    await until(() => h.calls.includes('createDesktopHost'));
     await expect(h.a9Config.selectWorkspace(h.workspacePath)).resolves.toMatchObject({ workspacePath: h.workspacePath });
     expect(h.calls).toContain('restore.end');
   });
 
   test('ordinary workspace startup restoration does not call default-directory management', async () => {
     const h = loadMainHarness({ restore: Promise.resolve() });
-    await new Promise(resolve => setImmediate(resolve));
-    await new Promise(resolve => setImmediate(resolve));
+    await until(() => h.calls.includes('restore.end'));
     expect(h.calls).toContain('restore.start');
     expect(h.calls).toContain('restore.end');
   });
