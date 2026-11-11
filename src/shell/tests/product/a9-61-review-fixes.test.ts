@@ -380,6 +380,67 @@ describe('A9-61 review wait boundaries', () => {
     } finally { gate.release(); await f.close(); }
   });
 
+  it.each(['runtime', 'manager', 'cross-workspace', 'failed-shell'])('F3 revokes an already running warm Diff preview (%s)', async route => {
+    const f = environment(); const secret = 'IN-FLIGHT-PREVIEW-SECRET-A961';
+    let configuring: Promise<any> | undefined;
+    let scheduled: NodeJS.Immediate | undefined;
+    let rendered = 0, renderedAtChange = 0;
+    try {
+      const entry = f.registry.activate(f.a), runtime = entry.runtime;
+      await runtime.whenReady();
+      if (route === 'failed-shell') await runtime.configureShell({ kind: 'automatic', envOverlay: { BUILD_MODE: secret } });
+      for (let i = 0; i < 70; i += 1) {
+        const name = `preview-${i}.txt`;
+        fs.writeFileSync(path.join(f.a, name), i === 0 ? secret : `public original ${i}`, 'utf8');
+        await f.services[0].read(name);
+        await f.services[0].write(name, 'safe replacement', { turnId: 'preview-turn' });
+      }
+      f.persistence.saveCheckpoint({ turnId: 'preview-turn', sessionId: runtime.getSnapshot().activeConversationId, payload: {} });
+      const manager = f.services[0].getCheckpointManager();
+      expect(manager.loadCheckpoint('preview-turn')).toBeDefined();
+      const preview = manager.recordDiffPreview.bind(manager);
+      jest.spyOn(manager, 'recordDiffPreview').mockImplementation((record: any) => {
+        const value = preview(record); rendered += 1;
+        if (rendered === 1) scheduled = setImmediate(() => {
+          renderedAtChange = rendered;
+          const target = route === 'cross-workspace' ? f.registry.activate(f.b).runtime : runtime;
+          configuring = f.registry.configureProvider(target, {
+            baseUrl: 'https://fixture.invalid', model: 'fixture', apiKey: secret, skipProbe: true,
+          }).then(() => null, (error: any) => error);
+        });
+        return value;
+      });
+      const response = route === 'manager'
+        ? await manager.getTurnDiffAndReviewAsync('preview-turn').then((value: any) => ({ ok: true, ...value }), (error: any) => ({ ok: false, error: { message: error.message } }))
+        : await f.call('a9.diff.get', { turnId: 'preview-turn' });
+      expect(renderedAtChange).toBeGreaterThan(0);
+      expect(renderedAtChange).toBeLessThan(70);
+      const configurationError = await configuring;
+      if (route === 'cross-workspace') expect(configurationError).toBeNull();
+      else expect(String(configurationError?.message)).toContain(route === 'failed-shell' ? 'A9_ENV_OVERLAY_REJECTED' : 'A9_CHECKPOINT_SECRET_BLOCKED');
+      expect(response.ok).toBe(false);
+      expect(JSON.stringify(response)).not.toContain(secret);
+    } finally {
+      if (scheduled) clearImmediate(scheduled);
+      if (configuring) await configuring;
+      await f.close();
+    }
+  });
+
+  it('F3 checks preview file bytes without classifying unified Diff markers as secret content', async () => {
+    const f = environment();
+    try {
+      const runtime = f.registry.activate(f.a).runtime;
+      await f.services[0].write('plain.txt', 'original public text', { turnId: 'marker-turn' });
+      await f.services[0].write('plain.txt', 'next public text', { turnId: 'marker-turn' });
+      f.persistence.saveCheckpoint({ turnId: 'marker-turn', sessionId: runtime.getSnapshot().activeConversationId, payload: {} });
+      await runtime.configureProvider({ baseUrl: 'https://fixture.invalid', model: 'fixture', apiKey: '+', skipProbe: true });
+      const response = await f.call('a9.diff.get', { turnId: 'marker-turn' });
+      expect(response.ok).toBe(true);
+      expect(response.diff[0].diffText).toContain('+next public text');
+    } finally { await f.close(); }
+  });
+
   it.each(['normal', 'listing-failure'])('F3 revokes both populated caches before new-secret validation yields (%s)', async failure => {
     const f = environment(); const gate = deferred(), entered = deferred();
     const secret = 'NEWLY-REGISTERED-CHECKPOINT-SECRET-61';

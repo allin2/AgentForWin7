@@ -539,17 +539,25 @@ function createA9AgentRuntime(options) {
   let provider = null;
   let providerConfigurationInFlight = false;
   const knownSecrets = new Set();  // 仅内存；保留本进程见过的旧值用于切换后继续脱敏。
+  let knownSecretGeneration = 0;
   // A9-38：代理 Basic 认证发送 base64(用户名:密码)，其编码不含密码单值的任何编码变体。
   // 仅内存保留本进程见过的组合，与 knownSecrets 同生命周期；不写盘。
   const knownBasicCredentials = new Set();
 
   function rememberSecret(value) {
-    if (typeof value === 'string' && value.length > 0) knownSecrets.add(value);
+    if (typeof value === 'string' && value.length > 0 && !knownSecrets.has(value)) {
+      knownSecrets.add(value);
+      knownSecretGeneration += 1;
+    }
   }
 
   function rememberBasicCredential(username, password) {
     if (typeof username === 'string' && username.length > 0 && typeof password === 'string' && password.length > 0) {
-      knownBasicCredentials.add(`${username}:${password}`);
+      const composite = `${username}:${password}`;
+      if (!knownBasicCredentials.has(composite)) {
+        knownBasicCredentials.add(composite);
+        knownSecretGeneration += 1;
+      }
     }
   }
 
@@ -3261,7 +3269,13 @@ function createA9AgentRuntime(options) {
     assertCheckpointForCurrentConversation(turnId);
     const manager = workspaceServiceForState().getCheckpointManager();
     // A9-61: one cooperative cold load and one preview per record; same result as the sync pair.
-    return manager.getTurnDiffAndReviewAsync(String(turnId)).then(({ diff, review }) => ({ ok: true, diff, review }));
+    const generation = knownSecretGeneration;
+    return manager.getTurnDiffAndReviewAsync(String(turnId)).then(({ diff, review }) => {
+      // Also covers failed configuration before manager revalidation and a
+      // sibling workspace replacing Provider state while the old manager runs.
+      if (generation !== knownSecretGeneration) throw new Error('A9_CHECKPOINT_VALIDATION_STALE: preview secret state changed');
+      return { ok: true, diff, review };
+    });
   }
 
   function canLeaveWorkspace() {
@@ -3408,6 +3422,7 @@ function createA9AgentRuntime(options) {
       knownSecrets: Array.from(knownSecrets), knownBasicCredentials: Array.from(knownBasicCredentials) }),
     acceptProviderState: value => {
       pauseQueue();
+      knownSecretGeneration += 1;
       providerConfig = value.providerConfig ? JSON.parse(JSON.stringify(value.providerConfig)) : null;
       memoryApiKey = value.memoryApiKey;
       memorySecrets = value.memorySecrets ? JSON.parse(JSON.stringify(value.memorySecrets)) : null;

@@ -1789,6 +1789,8 @@ export class CheckpointManager {
       ? fs.readFileSync(record.originalBlobPath) : null;
     const next = record.newBlobPath && fs.existsSync(record.newBlobPath)
       ? fs.readFileSync(record.newBlobPath) : null;
+    if (original) this.assertNotSensitive(original, 'checkpoint original preview content');
+    if (next) this.assertNotSensitive(next, 'checkpoint next preview content');
     return { diff: buildContentDiffPreview(original, next) };
   }
 
@@ -1817,16 +1819,23 @@ export class CheckpointManager {
     diff: Array<{ path: string; action: string; diffText: string }>;
     review: TurnReview | null;
   }> {
+    const generation = this.cacheGeneration;
+    const assertCurrent = (): void => {
+      if (generation !== this.cacheGeneration) throw new Error('A9_CHECKPOINT_VALIDATION_STALE: preview trust changed');
+    };
     const checkpoint = await this.loadCheckpointAsync(turnId);
+    assertCurrent();
     if (!checkpoint) return { diff: [], review: null };
     const slice = new CooperativeSlice();
     const diff: Array<{ path: string; action: string; diffText: string }> = [];
     const files: TurnReviewFile[] = [];
     for (const [relPath, record] of Object.entries(checkpoint.changes)) {
       const preview = this.recordDiffPreview(record).diff;
+      this.assertNotSensitive(relPath, 'checkpoint diff path');
       diff.push({ path: relPath, action: record.action, diffText: preview.unifiedDiff });
       files.push(this.reviewFile(relPath, record, preview));
       await slice.step();
+      assertCurrent();
     }
     return { diff, review: this.turnReviewFrom(turnId, checkpoint, files) };
   }
