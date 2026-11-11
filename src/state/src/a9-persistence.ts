@@ -1497,6 +1497,98 @@ export class A9PersistenceManager {
     return { facts, hasMore, nextBefore: hasMore && last ? { createdAt: last.created_at, taskId: last.task_id } : null };
   }
 
+  /** ADR-0326: SQL filters and pages redacted visible text; no history arrays or writes.
+   * The host projector must select visible fields BEFORE applying its secret filter. */
+  private historyProjection(project: (payload: string, type: string) => string): void {
+    const db = this.db as SqliteDatabase & { function?: (name: string, fn: (...args: any[]) => string) => void };
+    if (!db.function) throw a9PersistenceError('A9_HISTORY_SQL_UNAVAILABLE', 'SQLite scalar functions unavailable');
+    db.function('a9_history_visible', (payload: string, type: string) => project(payload, type));
+  }
+
+  private historyCandidates(): string {
+    return `WITH candidates AS (
+      SELECT e.session_id AS conversationId, c.title, c.state AS conversationState,
+        'event' AS source, CAST(e.id AS TEXT) AS id, e.turn_id AS turnId,
+        COALESCE(t.task_id, json_extract(CASE WHEN json_valid(e.payload_json) THEN e.payload_json ELSE '{}' END, '$.taskId')) AS taskId,
+        e.created_at AS createdAt, e.event_type AS kind,
+        a9_history_visible(e.payload_json, e.event_type) AS text
+      FROM a9_events e JOIN a9_sessions c ON c.session_id=e.session_id
+      LEFT JOIN a9_turns t ON t.turn_id=e.turn_id AND t.session_id=e.session_id
+      WHERE c.workspace_path=? AND e.event_type IN ('conversation.request','tool_start','tool_output','tool_end','turn_failed')
+      UNION ALL
+      SELECT p.session_id, c.title, c.state, 'checkpoint', p.turn_id, p.turn_id, t.task_id,
+        p.created_at, 'reply', a9_history_visible(p.payload_json,
+          CASE WHEN EXISTS (SELECT 1 FROM a9_events e WHERE e.session_id=p.session_id
+            AND e.event_type='conversation.request' AND json_extract(CASE WHEN json_valid(e.payload_json)
+            THEN e.payload_json ELSE '{}' END, '$.taskId')=t.task_id) THEN 'reply' ELSE 'retained_reply' END)
+      FROM a9_checkpoints p JOIN a9_sessions c ON c.session_id=p.session_id
+      LEFT JOIN a9_turns t ON t.turn_id=p.turn_id AND t.session_id=p.session_id WHERE c.workspace_path=?
+    )`;
+  }
+
+  searchRetainedHistory(workspace: string, input: { query: string; limit?: number;
+    before?: { createdAt: string; source: string; id: string } }, project: (payload: string, type: string) => string): any {
+    const limit = input.limit ?? 20, before = input.before;
+    if (typeof workspace !== 'string' || !workspace || typeof input.query !== 'string' || !input.query.trim()
+      || input.query.length > 256 || /[\u0000-\u001f]/.test(input.query) || !Number.isSafeInteger(limit) || limit < 1 || limit > 50
+      || (before && (typeof before.createdAt !== 'string' || before.createdAt.length > 64
+        || !['event', 'checkpoint'].includes(before.source) || typeof before.id !== 'string' || !before.id || before.id.length > 256))) {
+      throw a9PersistenceError('A9_PAYLOAD_INVALID', 'Invalid history search');
+    }
+    this.historyProjection(project);
+    const rows = this.db.prepare(`${this.historyCandidates()}
+      SELECT conversationId,title,conversationState,source,id,turnId,taskId,createdAt,kind,
+        substr(text, max(1,instr(text,?)-100), 420) AS snippet
+      FROM candidates WHERE instr(text,?)>0
+      ${before ? 'AND (createdAt,source,id)<(?,?,?)' : ''}
+      ORDER BY createdAt DESC,source DESC,id DESC LIMIT ?`).all(workspace, workspace, input.query, input.query,
+      ...(before ? [before.createdAt, before.source, before.id] : []), limit + 1) as any[];
+    const results = rows.slice(0, limit), last = results[results.length - 1];
+    return { results, hasMore: rows.length > limit, nextBefore: rows.length > limit && last
+      ? { createdAt: last.createdAt, source: last.source, id: last.id } : null };
+  }
+
+  locateRetainedHistory(workspace: string, input: { conversationId: string; source: string; id: string; query?: string },
+    project: (payload: string, type: string) => string): any {
+    this.historyProjection(project);
+    // Direct identity lookups. Never walk previous conversation/event pages.
+    const checkpoint = input.source === 'checkpoint';
+    const sql = checkpoint ? `SELECT p.session_id AS conversationId, c.title,
+        p.turn_id AS turnId, t.task_id AS taskId, p.created_at AS createdAt, 'reply' AS kind,
+        a9_history_visible(p.payload_json,'retained_reply') AS text
+      FROM a9_checkpoints p JOIN a9_sessions c ON c.session_id=p.session_id
+      LEFT JOIN a9_turns t ON t.turn_id=p.turn_id AND t.session_id=p.session_id
+      WHERE c.workspace_path=? AND p.session_id=? AND p.turn_id=?`
+      : `SELECT e.session_id AS conversationId,c.title,e.turn_id AS turnId,
+        COALESCE(t.task_id,json_extract(CASE WHEN json_valid(e.payload_json) THEN e.payload_json ELSE '{}' END,'$.taskId')) AS taskId,
+        e.created_at AS createdAt,e.event_type AS kind,a9_history_visible(e.payload_json,e.event_type) AS text
+      FROM a9_events e JOIN a9_sessions c ON c.session_id=e.session_id
+      LEFT JOIN a9_turns t ON t.turn_id=e.turn_id AND t.session_id=e.session_id
+      WHERE c.workspace_path=? AND e.session_id=? AND e.id=?
+        AND e.event_type IN ('conversation.request','tool_start','tool_output','tool_end','turn_failed')`;
+    // SQL bounds the returned text even if the retained source itself is large.
+    const bounded = this.db.prepare(`SELECT conversationId,title,turnId,taskId,createdAt,kind,
+      substr(text,max(1,instr(text,?)-200),24000) AS text,
+      max(1,instr(text,?)-200) AS textOffset,length(text) AS textLength
+      FROM (${sql})`);
+    return bounded.get(input.query || '', input.query || '', workspace, input.conversationId, input.id) || null;
+  }
+
+  getTurnDeliveryFacts(conversationId: string, turnId: string): any {
+    const turn = this.db.prepare(`SELECT t.task_id AS taskId,t.turn_id AS turnId,t.status,
+      t.outcome_json AS outcomeJson,c.payload_json AS checkpointJson
+      FROM a9_turns t LEFT JOIN a9_checkpoints c ON c.turn_id=t.turn_id AND c.session_id=t.session_id
+      WHERE t.session_id=? AND t.turn_id=?`).get(conversationId, turnId) as any;
+    if (!turn) return null;
+    const events = this.db.prepare(`SELECT e.id,e.event_type AS eventType,e.payload_json AS payloadJson,
+      (SELECT s.payload_json FROM a9_events s WHERE s.session_id=e.session_id AND s.turn_id=e.turn_id
+        AND s.event_type='tool_start' AND json_extract(CASE WHEN json_valid(s.payload_json) THEN s.payload_json ELSE '{}' END,'$.data.callId')=
+          json_extract(CASE WHEN json_valid(e.payload_json) THEN e.payload_json ELSE '{}' END,'$.data.callId') ORDER BY s.id DESC LIMIT 1) AS startJson
+      FROM a9_events e WHERE e.session_id=? AND e.turn_id=?
+      AND e.event_type IN ('tool_end','turn_completed','turn_failed') ORDER BY e.id DESC LIMIT 101`).all(conversationId, turnId);
+    return { ...turn, events: events.slice(0, 100), auditTruncated: events.length > 100 };
+  }
+
   private isContinuationTurn(payloadJson: string | undefined): boolean {
     const payload = safeParse(payloadJson || '{}') as any;
     return typeof payload.interruptedTurnId === 'string' || typeof payload.continuation?.interruptedTurnId === 'string';

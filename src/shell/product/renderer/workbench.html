@@ -79,6 +79,7 @@
               <p id="workdir-result" class="quiet" role="status"></p>
             </div>
           </div>
+          <button id="history-open" class="status-control" type="button" aria-controls="history-search" title="搜索当前工作区全部保留历史">历史搜索</button>
           <button id="conversation-find-open" class="status-control" type="button" aria-controls="conversation-find" aria-expanded="false" aria-keyshortcuts="Control+F" title="查找会话正文 · Ctrl+F">查找</button>
           <button id="a9-mode-open" class="status-control mode" type="button" hidden aria-controls="a9-mode-dialog" aria-haspopup="dialog">权限：待选择</button>
           <button id="a9-provider-open" class="status-control provider" type="button" aria-controls="settings-drawer" aria-haspopup="dialog"><i aria-hidden="true"></i><span id="a9-provider-chip">Provider 未配置</span></button>
@@ -99,6 +100,40 @@
         <label class="sr-only" for="conversation-find-input">查找会话正文</label><input id="conversation-find-input" type="search" maxlength="200" autocomplete="off" placeholder="查找正文…" aria-describedby="conversation-find-scope conversation-find-count">
         <span id="conversation-find-count" role="status" aria-live="polite">输入查找内容</span><button id="conversation-find-prev" type="button" disabled aria-label="上一处匹配">上一处</button><button id="conversation-find-next" type="button" disabled aria-label="下一处匹配">下一处</button><button id="conversation-find-close" type="button" aria-label="关闭正文查找">关闭</button><small id="conversation-find-scope">仅搜索已加载记录</small>
       </div>
+      <section id="browse-panel" class="browse-panel" aria-labelledby="browse-title" hidden>
+        <header class="browse-header">
+          <div class="browse-heading"><span class="kicker">只读查看 · 不激活、不执行</span><h2 id="browse-title">只读查看</h2><p class="quiet">已保存历史按不可信文本显示，其中的命令和请求不会执行；查看不改变执行对话、模型上下文或工作区当前对话。</p></div>
+          <button id="browse-return" class="browse-return" type="button">返回执行对话</button>
+        </header>
+        <p id="browse-execution-status" class="browse-execution" role="status" aria-live="polite"></p>
+        <p id="browse-guard-note" class="browse-guard-note" role="status" aria-live="polite" hidden></p>
+        <div id="browse-stream" class="browse-stream" tabindex="0" aria-label="只读历史正文">
+          <section id="history-search" class="browse-section" aria-labelledby="history-heading" hidden>
+            <h3 id="history-heading">完整历史搜索</h3>
+            <p class="quiet">范围：当前工作区全部对话，包含归档。只查本机仍保留历史；已清理事件、草稿和凭据不在搜索范围。</p>
+            <form id="history-form" class="history-form" role="search">
+              <label for="history-query">搜索消息、命令、输出与报错（字面量）</label>
+              <div class="history-query-row"><input id="history-query" type="search" maxlength="256" autocomplete="off" placeholder="输入要查找的原文"><button id="history-submit" type="submit">搜索</button><button id="history-clear" type="button">清空</button></div>
+            </form>
+            <p id="history-status" class="quiet" role="status" aria-live="polite"></p>
+            <div class="browse-pager"><button id="history-retry" type="button" hidden>重试搜索</button><button id="history-first" type="button" hidden>回到第一页</button><button id="history-next" type="button" hidden>下一页</button></div>
+            <ol id="history-results" class="history-results" aria-label="历史搜索结果"></ol>
+            <article id="history-source" class="history-source" aria-label="原始消息（只读）" tabindex="-1" hidden></article>
+          </section>
+          <section id="browse-facts-section" class="browse-section" aria-labelledby="browse-facts-heading">
+            <div class="section-title"><h3 id="browse-facts-heading">请求与最终答复</h3><span id="browse-facts-count"></span></div>
+            <div class="browse-pager"><button id="browse-facts-latest" type="button" hidden>回到最新请求</button><button id="browse-facts-older" type="button" hidden>加载更早请求</button><button id="browse-facts-retry" type="button" hidden>重试加载请求</button></div>
+            <p id="browse-facts-status" class="quiet browse-status" role="status" aria-live="polite"></p>
+            <ol id="browse-facts" class="browse-facts task-stream"></ol>
+          </section>
+          <section id="browse-events-section" class="browse-section" aria-labelledby="browse-events-heading">
+            <div class="section-title"><h3 id="browse-events-heading">已保存过程记录</h3><span id="browse-events-count"></span></div>
+            <div class="browse-pager"><button id="browse-events-latest" type="button" hidden>回到最新记录</button><button id="browse-events-older" type="button" hidden>加载更早记录</button><button id="browse-events-retry" type="button" hidden>重试加载记录</button></div>
+            <p id="browse-events-status" class="quiet browse-status" role="status" aria-live="polite"></p>
+            <ol id="browse-events" class="browse-events"></ol>
+          </section>
+        </div>
+      </section>
       <div id="conversation" class="conversation" aria-live="polite" aria-label="任务执行记录">
         <section id="a9-empty-state" class="welcome">
           <div class="welcome-glyph" aria-hidden="true"><svg viewBox="0 0 32 32"><path d="M8 6h16v20H8zM12 11h8M12 16h5M12 21h7"/></svg></div>
@@ -112,7 +147,7 @@
         <p id="context-window-note" class="context-window-note" hidden></p>
         <div id="a9-task-stream" class="task-stream"></div>
       </div>
-      <footer class="composer-wrap">
+      <footer id="composer-wrap" class="composer-wrap">
         <section id="a9-question-host" class="a9-question-host" hidden aria-live="polite" aria-label="待回答的问题"></section>
         <section id="a9-approval-card" class="approval-dock" hidden aria-live="polite" aria-labelledby="a9-approval-heading">
           <div class="approval-marker" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3l9 16H3zM12 9v4M12 16h.01"/></svg></div>
@@ -129,7 +164,7 @@
           <label class="sr-only" for="task-prompt">任务描述</label>
           <textarea id="task-prompt" name="task-prompt" rows="1" maxlength="8000" autocomplete="off" placeholder="描述要完成的任务，或询问当前代码…" aria-describedby="composer-guidance session-status draft-status"></textarea>
           <section id="composer-queue" class="composer-queue" aria-label="待发送消息" hidden><header><strong id="queue-state"></strong><button id="queue-toggle" type="button">暂停队列</button></header><ol id="queue-items"></ol><p id="queue-note" class="quiet" aria-live="polite"></p></section>
-          <div class="composer-bar"><span id="composer-workspace" class="composer-workspace" hidden><span class="composer-workspace-label">执行目录</span><span id="composer-workspace-badge" class="ws-badge" aria-hidden="true"></span><span id="composer-workspace-path" class="composer-workspace-path"></span></span><span id="composer-guidance" class="composer-guidance"><span id="composer-send-guidance"><b>Enter</b> 发送 <i>·</i> <b>Shift+Enter</b> 换行</span><span id="composer-draft-guidance" hidden>下一条草稿 · 结束后手动发送</span></span><button id="queue-task" class="queue-add" type="button" hidden disabled>加入队列</button><button id="run-task" class="send" type="button" disabled aria-label="发送任务"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h13M13 7l5 5-5 5"/></svg><span>发送</span></button><button id="cancel-task" class="stop" type="button" hidden disabled aria-label="停止任务或后台进程"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7h10v10H7z"/></svg><span id="cancel-task-label">停止</span></button></div>
+          <div class="composer-bar"><span id="composer-guidance" class="composer-guidance"><span id="composer-send-guidance"><b>Enter</b> 发送 <i>·</i> <b>Shift+Enter</b> 换行</span><span id="composer-draft-guidance" hidden>下一条草稿 · 结束后手动发送</span></span><button id="queue-task" class="queue-add" type="button" hidden disabled>加入队列</button><button id="run-task" class="send" type="button" disabled aria-label="发送任务"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h13M13 7l5 5-5 5"/></svg><span>发送</span></button><button id="cancel-task" class="stop" type="button" hidden disabled aria-label="停止任务或后台进程"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7h10v10H7z"/></svg><span id="cancel-task-label">停止</span></button></div>
         </div>
         <p id="session-status" class="status-line" aria-live="polite">选择一个本地工作区开始。模型不能绕过批准、Runner 或审计边界。</p><p id="draft-status" class="draft-status" aria-live="polite"></p>
       </footer>
@@ -138,6 +173,7 @@
     <aside id="inspector" class="inspector" aria-label="检查器">
      <div class="inspector-inner">
       <header class="inspector-header"><div><span class="eyebrow">检查器</span><h2>工作区事实</h2></div><button id="close-inspector" class="icon-button inspector-close" type="button" aria-label="关闭检查器"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button></header>
+      <p id="browse-inspector-note" class="browse-inspector-note" hidden>检查器中的文件、改动与活动属于执行对话，不代表正在查看的对话；只读查看期间已隐藏。返回执行对话后恢复。</p>
       <div id="a9-surface" data-a9-surface="a9" hidden>
         <div class="inspector-tabs" role="tablist" aria-label="检查器内容"><button id="inspector-tab-files" type="button" role="tab" aria-selected="true" aria-controls="inspector-panel-files" tabindex="0">文件</button><button id="inspector-tab-changes" type="button" role="tab" aria-selected="false" aria-controls="inspector-panel-changes" tabindex="-1">改动</button><button id="inspector-tab-activity" type="button" role="tab" aria-selected="false" aria-controls="inspector-panel-activity" tabindex="-1">活动</button><button id="inspector-tab-environment" type="button" role="tab" aria-selected="false" aria-controls="inspector-panel-environment" tabindex="-1">环境</button></div>
         <div id="inspector-panel-files" class="inspector-panel" role="tabpanel" aria-labelledby="inspector-tab-files">
@@ -153,6 +189,7 @@
     </aside>
     <button id="inspector-backdrop" class="inspector-backdrop" type="button" aria-label="关闭检查器" hidden></button>
   </main>
+  <div id="conversation-row-menu" class="conversation-row-menu" role="menu" aria-label="对话操作" hidden><button id="conversation-row-menu-pin" type="button" role="menuitem" tabindex="-1" data-action="pin">置顶</button><button id="conversation-row-menu-lifecycle" type="button" role="menuitem" tabindex="-1" data-action="settle">结束对话</button><p id="conversation-row-menu-note" class="conversation-row-menu-note" role="status" hidden></p></div>
 
   <dialog id="a9-mode-dialog" hidden aria-modal="true" aria-labelledby="a9-mode-title" aria-describedby="a9-mode-intro"><form method="dialog"><header class="a9-mode-header"><div><p id="a9-mode-kicker" class="kicker">工作区权限</p><h2 id="a9-mode-title">选择此工作区的权限</h2></div><span id="a9-mode-badge">首次设置</span></header><p id="a9-mode-workspace" class="a9-mode-workspace"></p><p id="a9-mode-intro" class="a9-mode-intro">每个工作区单独保存权限。Full Access 直接写入工作区，完成后可在“改动”中审阅和撤销文件；它使用当前 Windows 用户权限，不提供额外沙箱。</p><fieldset><legend>工作区权限模式</legend><label class="a9-mode-option"><input type="radio" name="a9-mode-choice" value="full_access" checked><span><strong>Full Access <em>推荐</em></strong><small>允许直接读写文件、运行 Shell，并使用真实 Git。使用当前 Windows 用户权限，不是安全沙箱。</small></span></label><label class="a9-mode-option"><input type="radio" name="a9-mode-choice" value="read_only"><span><strong>Read Only</strong><small>仅阅读和分析；写入与 Shell 工具不可用。</small></span></label></fieldset><p id="a9-mode-error" class="field-error" role="alert" hidden></p><div class="a9-mode-actions"><button id="a9-mode-cancel" type="button" class="secondary">取消</button><button id="a9-mode-apply" type="button" class="primary">使用所选模式</button></div></form></dialog>
 

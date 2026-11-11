@@ -427,6 +427,8 @@ summary:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--focus
 .status-line[data-tone="block"] { padding: 6px 10px; border-left: 2px solid var(--amber); background: var(--amberbg); color: var(--text-secondary); text-align: left; overflow-wrap: anywhere; }
 .draft-status { min-height: 16px; margin: 2px 0 0; color: var(--muted); font-size: 11px; text-align: center; }
 .draft-status[data-tone="error"] { display: block; color: var(--red); }
+/* A9-56：就绪与 DPAPI 成功说明不再常驻；空文本时不占高度，元素与 aria-live 保留给阻断、异常和恢复说明。 */
+.status-line:empty, .draft-status:empty { min-height: 0; margin: 0; padding: 0; border: 0; }
 
 .primary, .secondary, .danger { min-height: 40px; padding: 0 13px; border-radius: 8px; }
 .primary { border: 1px solid var(--accent); background: var(--accent); color: var(--on-accent); font-weight: 600; }
@@ -744,12 +746,14 @@ summary:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--focus
 /* A9-54：剩余天数、行悬停操作（键盘聚焦行内时同样显示）与行内拒绝原因。 */
 .conversation-flags.countdown { color: var(--muted); }
 .conversation-list li.conversation-item { position: relative; }
-.conversation-row-actions { position: absolute; top: 4px; right: 6px; z-index: 1; display: flex; gap: 4px; padding: 2px; border-radius: 6px; background: var(--raised); box-shadow: 0 1px 4px rgba(31, 35, 40, .12); opacity: 0; pointer-events: none; }
-.conversation-list li.conversation-item:hover > .conversation-row-actions,
-.conversation-list li.conversation-item:focus-within > .conversation-row-actions { opacity: 1; pointer-events: auto; }
-.conversation-list .conversation-row-actions button { display: inline-flex; align-items: center; min-width: 0; min-height: 24px; padding: 0 7px; border: 1px solid var(--line-strong); border-radius: 5px; background: var(--panel); color: var(--text-secondary); font-size: 11px; white-space: nowrap; }
-.conversation-list .conversation-row-actions button:hover:not(:disabled) { border-color: var(--accent); background: var(--soft); color: var(--accent-strong); }
-.conversation-list .conversation-row-actions button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+/* A9-56（ADR-0324）：置顶/结束/恢复在行右键菜单。禁用行不接收指针，右键落到 <li>（Chromium 108 不向禁用按钮派发鼠标事件）。 */
+.conversation-list li.conversation-item > .conversation-row:disabled { pointer-events: none; }
+.conversation-row-menu { position: fixed; z-index: calc(var(--z-drawer) + 5); display: grid; min-width: 168px; max-width: 260px; padding: 4px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--raised); box-shadow: 0 6px 18px rgba(31, 35, 40, .14); }
+.conversation-row-menu button { min-height: 30px; padding: 0 10px; border: 0; border-radius: 6px; background: transparent; color: var(--text-secondary); font-size: 12px; text-align: left; white-space: nowrap; }
+.conversation-row-menu button:hover:not([aria-disabled="true"]) { background: var(--soft); color: var(--accent-strong); }
+.conversation-row-menu button:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+.conversation-row-menu button[aria-disabled="true"] { color: var(--muted); cursor: default; opacity: .6; }
+.conversation-row-menu-note { margin: 2px 8px 4px; color: var(--muted); font-size: 11px; white-space: normal; }
 .conversation-list .conversation-action-error { grid-column: 1 / -1; padding: 0 8px 2px; color: var(--red); font: 11px/16px var(--font-ui); white-space: normal; }
 /* 工作区徽标：按工作区 ID 稳定取色，浅色与暗色各一组。 */
 .ws-badge { display: inline-grid; flex: 0 0 auto; place-items: center; min-width: 22px; height: 16px; padding: 0 3px; border-radius: 4px; font: 700 11px/1 var(--font-mono); letter-spacing: 0; }
@@ -774,10 +778,6 @@ summary:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--focus
 .conversation-filter-chip { display: flex; flex: 0 0 auto; align-items: center; gap: 6px; margin: 4px 8px 0; padding: 2px 4px 2px 8px; border: 1px solid var(--line); border-radius: 7px; background: var(--raised); color: var(--muted); font-size: 11px; }
 .conversation-filter-name { flex: 1 1 auto; min-width: 0; overflow: hidden; color: var(--text-secondary); text-overflow: ellipsis; white-space: nowrap; }
 .conversation-filter-chip button { min-height: 22px; padding: 0 6px; border: 0; background: transparent; color: var(--muted); }
-/* 输入框旁的执行目录。 */
-.composer-workspace { display: inline-flex; align-items: center; gap: 6px; min-width: 0; max-width: 46%; margin-right: 8px; padding: 2px 8px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); color: var(--muted); font-size: 11px; }
-.composer-workspace-label { flex: 0 0 auto; }
-.composer-workspace-path { min-width: 0; overflow: hidden; color: var(--text-secondary); font-family: var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
 /* 新建对话命令面板。 */
 #conversation-new-dialog { width: min(600px, calc(100vw - 32px)); max-height: calc(100vh - 64px); margin: 10vh auto auto; padding: 0; overflow: hidden; border: 1px solid var(--line-strong); border-radius: 14px; background: var(--raised); color: var(--text); box-shadow: 0 28px 90px rgba(31, 35, 40, .28); }
 #conversation-new-dialog::backdrop { background: var(--backdrop); }
@@ -813,3 +813,51 @@ summary:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--focus
 .workdir-menu { position: absolute; right: 0; top: 100%; z-index: 30; width: 280px; max-width: 80vw; padding: 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg-canvas); box-shadow: 0 8px 24px #0002; }
 .workdir-menu button { display: block; width: 100%; text-align: left; }
 .workdir-menu p { margin: 4px 0; overflow-wrap: anywhere; }
+
+/* A9-57（ADR-0325）：运行中只读查看。沿用对话流的请求/答复卡、状态标签与检查器排版。 */
+.browse-panel { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; background: var(--bg); }
+.browse-header { flex: 0 0 auto; display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 16px max(28px, calc((100% - 760px) / 2)) 10px; border-bottom: 1px solid var(--line); background: var(--panel); }
+.browse-heading { min-width: 0; }
+.browse-heading h2 { margin: 2px 0 4px; color: var(--text); font-size: var(--fs-title); line-height: var(--lh-tight); overflow-wrap: anywhere; }
+.browse-heading p { margin: 0; line-height: var(--lh-body); }
+.browse-return { flex: 0 0 auto; min-height: 36px; padding: 0 14px; border: 1px solid var(--accent); border-radius: var(--r-sm); background: var(--accent); color: var(--on-accent); font-weight: 600; }
+.browse-return:hover { background: var(--accent-strong); }
+.browse-execution { flex: 0 0 auto; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin: 0; padding: 8px max(28px, calc((100% - 760px) / 2)); border-bottom: 1px solid var(--line); color: var(--muted); font-size: var(--fs-label); }
+.browse-execution strong { color: var(--text-secondary); font-weight: 600; overflow-wrap: anywhere; }
+.browse-execution[data-state="attention"] { background: var(--amberbg); color: var(--amber-detail); }
+.browse-execution-hint { flex: 1 1 16em; min-width: 0; }
+.browse-guard-note { flex: 0 0 auto; margin: 0; padding: 6px max(28px, calc((100% - 760px) / 2)); border-bottom: 1px solid var(--amber-line); background: var(--amberbg); color: var(--amber); font-size: var(--fs-label); }
+.browse-stream { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 18px max(28px, calc((100% - 760px) / 2)) 28px; scrollbar-gutter: stable; overscroll-behavior: contain; user-select: text; }
+.browse-stream:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+.browse-section { max-width: 760px; margin: 0 auto 22px; display: grid; gap: 8px; }
+.browse-pager { display: flex; flex-wrap: wrap; gap: 8px; }
+.browse-pager button { min-height: 32px; padding: 0 10px; border: 1px solid var(--line-strong); border-radius: var(--r-sm); background: transparent; color: var(--text-secondary); font-size: var(--fs-label); }
+.browse-pager button:hover:not(:disabled) { background: var(--raised); }
+.browse-status { margin: 0; }
+.browse-status:empty { display: none; }
+.browse-facts, .browse-events { margin: 0; padding: 0; list-style: none; }
+.browse-events { display: grid; gap: 6px; }
+.browse-event { display: grid; gap: 4px; min-width: 0; }
+.browse-event-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; color: var(--text-secondary); font-size: var(--fs-label); }
+.browse-event-label { min-width: 0; overflow-wrap: anywhere; }
+.browse-event-head time { margin-left: auto; color: var(--muted); font: 11px var(--font-mono); }
+.browse-inspector-note { margin: 12px 16px; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--panel); color: var(--muted); font-size: var(--fs-label); line-height: var(--lh-body); }
+.conversation-list button.conversation-row.execution { box-shadow: inset 3px 0 var(--line-strong); }
+
+/* A9-58: use the existing workbench palette, density and native controls. */
+.history-form { display: grid; gap: 6px; font-size: var(--fs-label); }
+.history-query-row { display: flex; flex-wrap: wrap; gap: 8px; }
+.history-query-row input { flex: 1 1 15em; min-width: 0; padding: 7px 10px; border: 1px solid var(--line-strong); border-radius: var(--r-sm); background: var(--raised); color: var(--text); font: inherit; }
+.history-query-row button, .history-source button, .delivery-body button { min-height: 32px; padding: 4px 10px; border: 1px solid var(--line-strong); border-radius: var(--r-sm); background: var(--panel); color: var(--text-secondary); font: inherit; }
+.history-results { padding: 0; margin: 4px 0; list-style: none; display: grid; gap: 8px; }
+.history-result { width: 100%; display: grid; gap: 5px; padding: 12px; border: 1px solid var(--line); border-radius: var(--r-sm); text-align: left; background: var(--panel); color: var(--text); font: inherit; overflow-wrap: anywhere; white-space: pre-wrap; }
+.history-result time { color: var(--muted); font-size: var(--fs-label); }
+.history-result:hover { background: var(--raised); }
+.history-source { padding: 16px 0; border-top: 1px solid var(--line); overflow-wrap: anywhere; }
+.history-source-text, .delivery-command { white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--font-mono); font-size: var(--fs-label); }
+.delivery-card { margin: 10px 0; border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--panel); color: var(--text-secondary); font-size: var(--fs-label); }
+.delivery-card > summary { padding: 10px 12px; cursor: pointer; color: var(--text); }
+.delivery-body { padding: 0 12px 10px; overflow-wrap: anywhere; }
+.delivery-body p { margin: 8px 0; }
+.delivery-body button { margin: 4px 8px 0 0; }
+.history-result:focus-visible, .history-source:focus-visible, .delivery-card > summary:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }

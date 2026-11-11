@@ -48,6 +48,7 @@
     cancelled: '已停止',
     interrupted: '已中断',
     needs_approval: '等待批准',
+    needs_input: '等待回答',
     running: '运行中',
   });
   const state = {
@@ -146,6 +147,11 @@
     pendingToolAt: 0,
     runningItems: new Set(),
     liveModelPreview: null,
+    // A9-57（ADR-0325）：只读浏览身份。与执行快照、activeConversationId、事件缓存、草稿和队列分离。
+    browse: null,
+    browseGeneration: 0,
+    browseReturn: null,
+    browseSaved: null,
   };
 
   function el(id) { return document.getElementById(id); }
@@ -314,6 +320,7 @@
   }
 
   async function confirmManagedDismiss() {
+    if (state.browse && browseBlocked('解除后台进程记录')) return;
     const confirmation = state.managedConfirmation;
     if (!confirmation || state.managedDismissBusy) return;
     state.managedDismissBusy = true;
@@ -346,7 +353,7 @@
       el('rail-stop').hidden = true;
       el('queue-task').hidden = true;
       el('composer-queue').hidden = true;
-      text('session-status', '发送首条消息后创建对话；需要文件或命令工具时才创建默认目录。');
+      text('session-status', '发送首条消息后以 Full Access 创建对话；需要文件或命令工具时才创建默认目录。');
       return;
     }
     const snapshot = state.snapshot;
@@ -402,7 +409,8 @@
         ? `检测到 ${recovered.length} 个重启恢复的 PID 事实；身份无法证明，应用不会发送终止信号。请在系统中核对并停止后再次点击“停止后台进程”。`
         : '托管后台进程仍在运行；可继续工作，或点击“停止后台进程”回收进程树。');
     }
-    else text('session-status', '当前工作区已就绪。高影响操作会在执行前显示精确目标并请求批准。');
+    // A9-56（ADR-0324）：就绪时不再常驻说明；空文本由 .status-line:empty 收起，阻断与异常仍写入同一 live region。
+    else text('session-status', '');
     // A9-19 L03：阻断原因始终可见；例行说明在较矮窗口中收起（文本保留在 DOM 中）。
     const routine = Boolean(snapshot) && !runtimeUnavailable && !blockedMode && !blockedApproval && !blockedQuestion
       && Boolean(snapshot.provider && snapshot.provider.configured && snapshot.provider.probe
@@ -473,6 +481,7 @@
   }
 
   function openConversationFind() {
+    if (state.browse && browseBlocked('使用正文查找（查找只覆盖执行对话正文）；可直接选择并复制只读正文')) return;
     if (navigationIsDrawer() && el('navigation-rail').classList.contains('open')) closeNavigation();
     if (inspectorIsDrawer() && el('inspector').classList.contains('open')) closeInspector();
     el('conversation-find').hidden = false;
@@ -1372,6 +1381,21 @@
       block.legacyEl = note;
     }
     updateOutcomeCard(block, fact, events);
+    const deliveryTurn = fact && resolveTurnId(fact);
+    if (deliveryTurn && state.snapshot && state.snapshot.scope) {
+      if (!block.deliveryEl || block.deliveryEl.dataset.turnId !== deliveryTurn) {
+        if (block.deliveryEl) block.deliveryEl.remove();
+        block.deliveryEl = buildDeliveryCard(state.snapshot.activeConversationId, deliveryTurn, false, fact.outcome);
+        block.root.appendChild(block.deliveryEl);
+      }
+      if (typeof block.deliveryEl.syncDeliveryActions === 'function') block.deliveryEl.syncDeliveryActions();
+      const stamp = `${fact.outcome}:${fact.updatedAt}:${state.eventMaxId}:${state.reviewEpoch}`;
+      const card = block.deliveryEl;
+      if (card.dataset.stamp !== stamp) {
+        card.dataset.stamp = stamp; card.deliveryStale = true;
+        if (card.open && !state.browse) void card.loadDelivery();
+      }
+    }
   }
 
   function updateSummaryForTurn(turnId) {
@@ -1426,6 +1450,7 @@
   }
 
   function pumpSummaryQueue() {
+    if (state.browse) return;
     while (state.summaryActive < 2 && state.summaryQueue.length) {
       const task = state.summaryQueue.shift();
       state.summaryActive += 1;
@@ -1443,6 +1468,7 @@
   }
 
   function loadRecentSummaries(snapshot) {
+    if (state.browse) return;
     if (typeof orderedCheckpoints !== 'function') return;
     const known = new Set(orderedCheckpoints().map((checkpoint) => checkpoint.turnId));
     const facts = (snapshot.conversation || []).filter((fact) =>
@@ -2018,6 +2044,7 @@
     } catch (_error) { return new Set(); }
   }
   function togglePinnedConversation(sessionId) {
+    if (state.browse && browseBlocked('置顶对话')) return;
     if (!sessionId) return;
     const pinned = readPinnedConversations();
     if (pinned.has(sessionId)) pinned.delete(sessionId); else pinned.add(sessionId);
@@ -2035,7 +2062,7 @@
     const currentScopeId = snapshot.scope && snapshot.scope.workspaceId ? snapshot.scope.workspaceId : null;
     const add = (workspace, conversation, live, activeId, canSwitch, isCurrent) => {
       const bound = conversation.sessionId === activeId;
-      const viewed = isCurrent && bound;
+      const viewed = isCurrent && bound && !state.browse;
       const scopeWorkspaceId = isCurrent ? currentScopeId : workspace.workspaceId;
       items.push({
         key: `${workspace.workspaceId}:${conversation.sessionId}`,
@@ -2165,6 +2192,7 @@
   /** ADR-0322：结束与恢复按该行自己的 scope 调用；scope.conversationId 与参数一致。 */
   async function runInboxAction(action, item) {
     const label = action === 'settle' ? '结束对话' : '恢复到活跃';
+    if (state.browse && browseBlocked(label)) return null;
     if (!item.scope || state.inboxActionBusy) return null;
     state.inboxActionBusy = item.key;
     state.inboxActionError = null;
@@ -2234,6 +2262,31 @@
     items.forEach((item) => appendConversationRow(list, item, snapshot, false, collapsible));
   }
 
+  /**
+   * A9-57（ADR-0325）：行点击的去向。'switch' 沿用原激活流程；'browse' 只读查看同工作区对话（含已归档），
+   * 不激活、不恢复；'return' 回到执行对话；'none' 不可点。只有执行对话忙、或行已归档时才进入只读查看；
+   * 执行对话空闲时同工作区行仍走原激活流程。跨工作区行保持原逻辑。
+   */
+  function browseRowAction(conversation, snapshot, archived) {
+    const scope = snapshot && snapshot.scope;
+    const sameWorkspace = conversation.workspace && conversation.workspace.workspaceId && scope
+      ? conversation.workspace.workspaceId === scope.workspaceId : archived || conversation.isCurrent === true;
+    const browsable = Boolean(sameWorkspace && scope && scope.workspaceId && scope.conversationId
+      && scope.conversationId === snapshot.activeConversationId && conversation.sessionId !== scope.conversationId
+      && api && api.a9 && typeof api.a9.forScope === 'function');
+    const browse = state.browse;
+    if (browse && sameWorkspace && conversation.sessionId === browse.scope.conversationId) return 'return';
+    if (browse && sameWorkspace && conversation.sessionId === browse.targetId) return 'none';
+    if (sameWorkspace && scope && conversation.sessionId === scope.conversationId) return 'none';
+    if (archived) return browsable ? 'browse' : 'none';
+    const canSwitch = Boolean(snapshot.conversationControls && snapshot.conversationControls.canSwitch);
+    if (browsable && (browse || !canSwitch)) return 'browse';
+    if (browsable && canSwitch) return 'switch';
+    if (conversation.switchable) return 'switch';
+    if (conversation.isCurrent && !conversation.viewed && browsable) return 'browse';
+    return 'none';
+  }
+
   function appendConversationRow(list, conversation, snapshot, archived, compact) {
     const item = document.createElement('li');
     const button = document.createElement('button');
@@ -2242,9 +2295,11 @@
     const defaultWorkdir = workspace.workdir && workspace.workdir.origin === 'auto';
     const directoryName = defaultWorkdir ? pathName(workspace.workdir.path) : workspace.displayName;
     const badgeWorkspace = defaultWorkdir ? { ...workspace, displayName: '默认' } : workspace;
-    const viewed = archived ? false : conversation.viewed === true;
-    button.className = `conversation-row${compact || archived ? ' compact' : ''}${conversation.unread ? ' unread' : ''}`;
-    button.disabled = archived || !conversation.switchable;
+    const rowAction = browseRowAction(conversation, snapshot, archived);
+    const browseTarget = Boolean(state.browse) && rowAction === 'none' && conversation.sessionId === state.browse.targetId;
+    const viewed = state.browse ? browseTarget : archived ? false : conversation.viewed === true;
+    button.className = `conversation-row${compact || archived ? ' compact' : ''}${conversation.unread ? ' unread' : ''}${browseTarget ? ' browsing' : ''}${rowAction === 'return' ? ' execution' : ''}`;
+    button.disabled = rowAction === 'none';
     button.setAttribute('aria-current', String(viewed));
     button.dataset.workspaceId = workspace.workspaceId;
     button.dataset.conversationId = conversation.sessionId;
@@ -2259,7 +2314,10 @@
     const lockReason = conversation.isCurrent && !controls.canSwitch && !viewed
       ? `${controls.reason || '当前任务尚未结束'}，停止或完成后可切换`
       : !conversation.isCurrent && !conversation.switchable ? '该工作区任务尚未结束，停止或完成后可切换到其他对话' : '';
-    const reason = archived ? '已归档，请先恢复对话' : viewed ? '当前对话' : lockReason;
+    const reason = rowAction === 'return' ? '执行对话，点击返回'
+      : browseTarget ? '正在只读查看'
+        : rowAction === 'browse' ? (archived ? '已归档，点击只读查看；不会恢复对话' : '点击只读查看；执行对话继续运行，不会切换')
+          : archived ? '已归档，请先恢复对话' : viewed ? '当前对话' : lockReason;
     const statusText = status ? status.text : '空闲';
     const countdown = !archived && Number.isInteger(conversation.settleInDays) ? `${conversation.settleInDays} 天后结束` : '';
     const label = `${conversation.title || '新对话'}，${defaultWorkdir ? `默认目录 ${directoryName}` : workspace.displayName}，${statusText}${conversation.hasDraft ? '，有未发送草稿' : ''}${countdown ? `，${countdown}` : ''}${updated ? `，更新于 ${updated}` : ''}${reason ? `，${reason}` : ''}`;
@@ -2300,63 +2358,58 @@
       button.appendChild(title);
       button.appendChild(flags);
     }
-    if (!archived) {
-      button.addEventListener('click', () => {
-        if (conversation.isCurrent) void switchConversation(conversation.sessionId);
-        else void activateWorkspace({ workspaceId: workspace.workspaceId, conversationId: conversation.sessionId });
-      });
-    }
+    button.addEventListener('click', () => {
+      // 旧 DOM 也按点击时的当前快照与浏览状态重新判定，不信任渲染时的结论。
+      const action = browseRowAction(conversation, state.snapshot || snapshot, archived);
+      if (action === 'return') { exitBrowse({ restoreFocus: true }); return; }
+      if (action === 'browse') { openBrowse(conversation.sessionId); return; }
+      if (action !== 'switch' || archived) return;
+      if (state.browse) exitBrowse({ restoreFocus: false });
+      if (conversation.isCurrent) void switchConversation(conversation.sessionId);
+      else void activateWorkspace({ workspaceId: workspace.workspaceId, conversationId: conversation.sessionId });
+    });
     item.appendChild(button);
     if (archived) {
       const restore = document.createElement('button');
       restore.type = 'button';
       restore.className = 'conversation-restore';
       restore.textContent = '恢复';
-      restore.disabled = !(snapshot.conversationControls && snapshot.conversationControls.canSwitch);
+      restore.disabled = Boolean(state.browse) || !(snapshot.conversationControls && snapshot.conversationControls.canSwitch);
       if (restore.disabled) {
-        restore.title = `${controls.reason || '当前任务尚未结束'}，停止或完成后可恢复`;
+        restore.title = state.browse ? '只读查看中不能恢复对话，返回执行对话后再操作'
+          : `${controls.reason || '当前任务尚未结束'}，停止或完成后可恢复`;
         restore.setAttribute('aria-label', `恢复 ${conversation.title || '对话'}，${restore.title}`);
       }
       restore.addEventListener('click', () => { void restoreConversation(conversation.sessionId); });
       item.appendChild(restore);
     } else {
-      appendConversationRowActions(item, conversation);
+      appendConversationRowFeedback(item, conversation);
+      // A9-56：右键与 Shift+F10/菜单键都绑定在 <li> 上。禁用行（当前对话、锁定行）在 Chromium 108 不派发鼠标事件，
+      // CSS 让禁用行按钮不接收指针，事件落到 <li>；提示文字同步到 <li>。
+      if (button.disabled) {
+        item.title = button.title;
+        item.setAttribute('tabindex', '0');
+        item.setAttribute('aria-label', label);
+        item.setAttribute('aria-haspopup', 'menu');
+        item.setAttribute('aria-keyshortcuts', 'Shift+F10 ContextMenu');
+      }
+      button.setAttribute('aria-keyshortcuts', 'Shift+F10 ContextMenu');
+      item.addEventListener('contextmenu', (event) => {
+        if (event && typeof event.preventDefault === 'function') event.preventDefault();
+        openRowMenu(conversation, rowMenuPoint(event, button));
+      });
+      item.addEventListener('keydown', (event) => {
+        if (!event || !(event.key === 'ContextMenu' || (event.key === 'F10' && event.shiftKey))) return;
+        event.preventDefault();
+        openRowMenu(conversation, rowMenuPoint(null, button));
+      });
     }
     list.appendChild(item);
   }
 
-  /**
-   * A9-54：行悬停（或键盘聚焦行内）显示的操作。按钮不能嵌套在行按钮里，作为 <li> 内的兄弟节点。
-   * 结束只给活跃组的空闲行；恢复只给已结束组；两者都需要该行的 scope。置顶对所有分组可用。
-   */
-  function appendConversationRowActions(item, conversation) {
+  /** 行内只保留结束/恢复失败的中文原因；操作入口在右键菜单（A9-56，ADR-0324 替代 A9-54 悬停按钮）。 */
+  function appendConversationRowFeedback(item, conversation) {
     item.className = 'conversation-item';
-    const title = conversation.title || '新对话';
-    const actions = document.createElement('span');
-    actions.className = 'conversation-row-actions';
-    const busy = Boolean(state.inboxActionBusy);
-    const action = conversation.scope && conversation.bucket === 'active' && conversation.activity === 'idle' ? 'settle'
-      : conversation.scope && conversation.bucket === 'settled' ? 'reopen' : null;
-    if (action) {
-      const button = document.createElement('button');
-      button.type = 'button';
-      button.className = `conversation-row-action ${action}`;
-      button.dataset.action = action;
-      button.textContent = action === 'settle' ? '结束对话' : '恢复到活跃';
-      button.setAttribute('aria-label', `${button.textContent}：${title}`);
-      button.disabled = busy;
-      button.addEventListener('click', () => { void runInboxAction(action, conversation); });
-      actions.appendChild(button);
-    }
-    const pin = document.createElement('button');
-    pin.type = 'button';
-    pin.className = 'conversation-row-action pin';
-    pin.dataset.action = 'pin';
-    pin.textContent = conversation.pinned ? '取消置顶' : '置顶';
-    pin.setAttribute('aria-label', `${pin.textContent}：${title}`);
-    pin.addEventListener('click', () => togglePinnedConversation(conversation.sessionId));
-    actions.appendChild(pin);
-    item.appendChild(actions);
     const error = state.inboxActionError && state.inboxActionError.key === conversation.key ? state.inboxActionError.message : '';
     if (error) {
       const note = document.createElement('small');
@@ -2365,6 +2418,190 @@
       note.textContent = error;
       item.appendChild(note);
     }
+  }
+
+  /**
+   * A9-56（ADR-0324）：对话行右键菜单。菜单只记住被右键行的 workspaceId + conversationId（key），
+   * 不先激活该行；每次列表重绘与每次点击都按当前快照重新解析该 key，目标离开驻留列表即关闭。
+   * 置顶继续写 localStorage；结束/恢复继续走该行自己的 forScope，结束只给空闲的活跃行。
+   */
+  function rowMenuNodes() {
+    const menu = el('conversation-row-menu');
+    return menu ? { menu, pin: el('conversation-row-menu-pin'), lifecycle: el('conversation-row-menu-lifecycle'), note: el('conversation-row-menu-note') } : null;
+  }
+
+  function rowMenuItem(key) {
+    if (!state.snapshot || !key) return null;
+    return classifyInbox(inboxConversations(state.snapshot)).find((item) => item.key === key) || null;
+  }
+
+  function rowMenuLifecycle(item) {
+    if (!item || !item.scope) return null;
+    if (item.bucket === 'settled') return { action: 'reopen', label: '恢复到活跃', reason: '' };
+    if (item.bucket !== 'active') return null;
+    if (item.activity !== 'idle') {
+      const status = inboxStatus(item);
+      return { action: 'settle', label: '结束对话', reason: `当前状态为“${status ? status.text : '未空闲'}”，暂不能结束对话。` };
+    }
+    return { action: 'settle', label: '结束对话', reason: '' };
+  }
+
+  function renderRowMenu(item) {
+    const nodes = rowMenuNodes();
+    if (!nodes || !item) return;
+    const title = item.title || '新对话';
+    nodes.menu.setAttribute('aria-label', `对话操作：${title}`);
+    nodes.pin.textContent = item.pinned ? '取消置顶' : '置顶';
+    nodes.pin.setAttribute('aria-label', `${nodes.pin.textContent}：${title}`);
+    const lifecycle = rowMenuLifecycle(item);
+    const busy = Boolean(state.inboxActionBusy);
+    const reason = lifecycle ? lifecycle.reason || (busy ? '正在处理上一项对话操作，请稍候。' : '') : '';
+    nodes.lifecycle.hidden = !lifecycle;
+    if (lifecycle) {
+      nodes.lifecycle.dataset.action = lifecycle.action;
+      nodes.lifecycle.textContent = lifecycle.label;
+      nodes.lifecycle.setAttribute('aria-label', `${lifecycle.label}：${title}${reason ? `，${reason}` : ''}`);
+      nodes.lifecycle.setAttribute('aria-disabled', String(Boolean(reason)));
+      nodes.lifecycle.title = reason;
+    }
+    nodes.note.textContent = reason;
+    nodes.note.hidden = !reason;
+    const focused = document.activeElement;
+    if (focused === nodes.lifecycle && nodes.lifecycle.hidden) nodes.pin.focus();
+  }
+
+  function rowMenuPoint(event, button) {
+    if (event && (event.clientX || event.clientY)) return { x: event.clientX, y: event.clientY };
+    const rect = button && typeof button.getBoundingClientRect === 'function' ? button.getBoundingClientRect() : null;
+    return rect ? { x: rect.left + 16, y: rect.bottom - 4 } : { x: 8, y: 8 };
+  }
+
+  function ensureRowMenuListeners() {
+    if (state.rowMenuBound) return;
+    const nodes = rowMenuNodes();
+    if (!nodes) return;
+    state.rowMenuBound = true;
+    nodes.pin.addEventListener('click', () => { void runRowMenuAction('pin'); });
+    nodes.lifecycle.addEventListener('click', () => { void runRowMenuAction(nodes.lifecycle.dataset.action); });
+    nodes.menu.addEventListener('keydown', handleRowMenuKey);
+    // 键盘菜单键在焦点移入菜单后仍可能派发 contextmenu：菜单内不弹出其他菜单。
+    nodes.menu.addEventListener('contextmenu', (event) => { if (event && typeof event.preventDefault === 'function') event.preventDefault(); });
+    // 外点、任意滚动（捕获阶段）、窗口尺寸变化或失焦都关闭；右键另一行时先关闭再按新行打开。
+    document.addEventListener('mousedown', (event) => {
+      if (state.rowMenu && !nodes.menu.contains(event && event.target)) closeRowMenu(false);
+    }, true);
+    // 只看列表本身、其祖先或整页的滚动；运行中对话流的自动滚动不关闭菜单。
+    document.addEventListener('scroll', (event) => {
+      if (!state.rowMenu) return;
+      const target = event && event.target;
+      const list = el('conversation-list');
+      if (!target || target === document || typeof target.contains !== 'function' || target.contains(list)) closeRowMenu(false);
+    }, true);
+    if (typeof root.addEventListener === 'function') {
+      root.addEventListener('resize', () => { if (state.rowMenu) closeRowMenu(false); });
+      root.addEventListener('blur', () => { if (state.rowMenu) closeRowMenu(false); });
+    }
+  }
+
+  function openRowMenu(conversation, point) {
+    if (state.browse && browseBlocked('打开对话操作菜单')) return;
+    const nodes = rowMenuNodes();
+    if (!nodes || !conversation || !conversation.key) return;
+    const item = state.snapshot ? rowMenuItem(conversation.key) : null;
+    if (!item) { closeRowMenu(false); return; }
+    ensureRowMenuListeners();
+    if (typeof setConversationMenu === 'function' && el('conversation-more').getAttribute('aria-expanded') === 'true') setConversationMenu(false);
+    state.rowMenu = { key: item.key, workspaceId: item.workspace.workspaceId, conversationId: item.sessionId };
+    renderRowMenu(item);
+    nodes.menu.hidden = false;
+    // 视口内定位：靠近触发点，越过右/下边缘时向左/向上翻转，最少留 4px。
+    const width = nodes.menu.offsetWidth || 180;
+    const height = nodes.menu.offsetHeight || 76;
+    const viewWidth = root.innerWidth || (document.documentElement && document.documentElement.clientWidth) || width + 8;
+    const viewHeight = root.innerHeight || (document.documentElement && document.documentElement.clientHeight) || height + 8;
+    const left = point.x + width > viewWidth - 4 ? Math.max(4, viewWidth - width - 4) : Math.max(4, point.x);
+    const top = point.y + height > viewHeight - 4 ? Math.max(4, point.y - height) : Math.max(4, point.y);
+    nodes.menu.style.left = `${Math.round(left)}px`;
+    nodes.menu.style.top = `${Math.round(top)}px`;
+    nodes.pin.focus();
+  }
+
+  function closeRowMenu(restoreFocus) {
+    const nodes = rowMenuNodes();
+    const target = state.rowMenu;
+    state.rowMenu = null;
+    if (nodes) nodes.menu.hidden = true;
+    if (restoreFocus && target) restoreRowMenuFocus(target);
+  }
+
+  function findConversationRowButton(target) {
+    const list = el('conversation-list');
+    if (!list || !target) return null;
+    for (const li of Array.from(list.children || [])) {
+      const button = li.children && li.children[0];
+      if (button && button.dataset && button.dataset.workspaceId === target.workspaceId && button.dataset.conversationId === target.conversationId) return button;
+    }
+    return null;
+  }
+
+  /** 列表刷新会替换行节点：按 key 找回按钮或禁用按钮所在的可聚焦行；目标消失才回到顶部入口。 */
+  function restoreRowMenuFocus(target) {
+    const button = findConversationRowButton(target);
+    if (button && !button.disabled) { button.focus(); return; }
+    const item = button && button.parentNode;
+    if (item && item.getAttribute('tabindex') === '0') { item.focus(); return; }
+    const more = el('conversation-more');
+    if (more && typeof more.focus === 'function') more.focus();
+  }
+
+  function handleRowMenuKey(event) {
+    const nodes = rowMenuNodes();
+    if (!nodes || !state.rowMenu) return;
+    const items = [nodes.pin, nodes.lifecycle].filter((node) => !node.hidden);
+    const index = items.indexOf(document.activeElement);
+    if (event.key === 'Escape' || event.key === 'Tab') {
+      event.preventDefault();
+      if (typeof event.stopPropagation === 'function') event.stopPropagation();
+      closeRowMenu(true);
+    } else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault();
+      const step = event.key === 'ArrowDown' ? 1 : -1;
+      items[(index + step + items.length) % items.length].focus();
+    } else if (event.key === 'Home' || event.key === 'End') {
+      event.preventDefault();
+      items[event.key === 'Home' ? 0 : items.length - 1].focus();
+    }
+  }
+
+  /** 点击时按当前快照复核目标与状态；目标消失则关闭，状态已变则只刷新菜单、不调用后端。 */
+  async function runRowMenuAction(kind) {
+    const target = state.rowMenu;
+    if (!target) return null;
+    if (state.browse && browseBlocked('置顶、结束或恢复对话')) { closeRowMenu(false); return null; }
+    const item = rowMenuItem(target.key);
+    if (!item) { closeRowMenu(false); return null; }
+    if (kind === 'pin') {
+      closeRowMenu(false);
+      togglePinnedConversation(item.sessionId);
+      restoreRowMenuFocus(target);
+      return null;
+    }
+    const lifecycle = rowMenuLifecycle(item);
+    if (!lifecycle || lifecycle.action !== kind || lifecycle.reason || state.inboxActionBusy) {
+      renderRowMenu(item);
+      return null;
+    }
+    closeRowMenu(false);
+    const response = await runInboxAction(kind, item);
+    restoreRowMenuFocus(target);
+    return response;
+  }
+
+  function syncRowMenu(items) {
+    if (!state.rowMenu) return;
+    const item = items.find((candidate) => candidate.key === state.rowMenu.key);
+    if (!item) { closeRowMenu(false); return; }
+    renderRowMenu(item);
   }
 
   function renderConversationDirectory(snapshot) {
@@ -2377,7 +2614,8 @@
     const currentId = (snapshot.scope && snapshot.scope.workspaceId) || 'current';
     const now = Date.now();
     const all = classifyInbox(inboxConversations(snapshot), now);
-    syncInboxVisit(all);
+    // A9-57：只读查看期间用户没有在看执行对话，不把它的完成记为已查看；返回后照常记录。
+    if (!state.browse) syncInboxVisit(all);
     scheduleInboxSettleRedraw(all, now);
     const visible = all.filter((item) => (!filter || item.workspace.workspaceId === filter)
       && (!query || String(item.title).toLocaleLowerCase().includes(query) || String(item.workspace.displayName).toLocaleLowerCase().includes(query)));
@@ -2390,6 +2628,15 @@
     const allActive = conversations.filter((item) => item.state === 'active');
     const activeList = el('conversation-list');
     const archivedList = el('conversation-archive-list');
+    // A9-57：轮询会重建行节点；焦点原在某行时，重建后回到同一身份的新行，不丢给页面。
+    const focused = document.activeElement;
+    const inList = (list) => Boolean(focused && list && typeof list.contains === 'function' && list.contains(focused));
+    const focusedRow = inList(activeList) || inList(archivedList)
+      ? (focused.dataset && focused.dataset.conversationId ? focused
+        : focused.children && focused.children[0] && focused.children[0].dataset ? focused.children[0] : null)
+      : null;
+    const focusedKey = focusedRow && focusedRow.dataset.conversationId
+      ? { workspaceId: focusedRow.dataset.workspaceId, conversationId: focusedRow.dataset.conversationId } : null;
     activeList.textContent = '';
     archivedList.textContent = '';
     appendConversationGroup(activeList, '置顶', pinned, snapshot, false);
@@ -2413,6 +2660,7 @@
       pin.textContent = readPinnedConversations().has(snapshot.activeConversationId) ? '取消置顶' : '置顶当前对话';
     }
     renderInboxFilterChip(snapshot);
+    syncRowMenu(all);
     text('conversation-directory-note', query
       ? `找到 ${visible.length + archived.length} 个匹配的对话（含当前工作区已归档）`
       : controls.canSwitch
@@ -2420,6 +2668,24 @@
         : `当前工作区已锁定：${controls.reason || '当前任务尚未结束'}`);
     const current = conversations.find((item) => item.sessionId === snapshot.activeConversationId);
     if (current) text('workbench-title', current.title || '和工作区一起完成任务');
+    if (focusedKey) focusDirectoryRow(focusedKey);
+    if (state.browse) applyBrowseChrome();
+  }
+
+  /** 按工作区 + 对话身份在两张列表中找回行；禁用行回到可聚焦的 <li>。 */
+  function focusDirectoryRow(target) {
+    for (const listId of ['conversation-list', 'conversation-archive-list']) {
+      const list = el(listId);
+      for (const li of Array.from((list && list.children) || [])) {
+        const button = li.children && li.children[0];
+        if (!button || !button.dataset || button.dataset.conversationId !== target.conversationId
+          || (target.workspaceId && button.dataset.workspaceId !== target.workspaceId)) continue;
+        if (!button.disabled) { button.focus(); return true; }
+        if (li.getAttribute && li.getAttribute('tabindex') === '0') { li.focus(); return true; }
+        return false;
+      }
+    }
+    return false;
   }
 
   function renderInboxFilterChip(snapshot) {
@@ -2448,22 +2714,9 @@
     chip.appendChild(clear);
   }
 
-  /** 输入框旁固定显示执行目录；有工作区后隐藏左上角的选择卡片，把高度让给对话列表。 */
+  /** A9-56（ADR-0324）：输入框内不再显示执行目录条；有工作区后仍隐藏左上角选择卡片，目录看顶部入口。 */
   function renderComposerWorkspace(snapshot) {
     const workspace = snapshot && snapshot.workspaceRoot;
-    const chip = el('composer-workspace');
-    if (chip) {
-      chip.hidden = !workspace;
-      chip.title = workspace ? `执行目录：${workspace}` : '';
-      const badge = el('composer-workspace-badge');
-      if (badge && workspace) {
-        const id = (snapshot.scope && snapshot.scope.workspaceId) || 'current';
-        badge.className = `ws-badge ${workspaceColor(id)}`;
-        badge.textContent = workspaceBadge(pathName(workspace));
-      }
-      // Name first so truncation keeps the recognisable part; the full path follows and stays in the title.
-      text('composer-workspace-path', workspace ? `${pathName(workspace)} · ${workspace}` : '');
-    }
     const card = el('workspace-select');
     if (card) card.hidden = Boolean(workspace);
   }
@@ -2473,7 +2726,8 @@
     state.draftHydratedConversationId = snapshot.activeConversationId;
     const draft = snapshot.draft || { text: '', persistence: 'memory' };
     el('task-prompt').value = draft.text || '';
-    text('draft-status', draft.note || (draft.persistence === 'dpapi' ? '草稿已由 Windows DPAPI 为当前用户保护。' : '草稿仅在当前进程保留。'));
+    // A9-56：DPAPI 保护成功不再常驻提示；仅内存、恢复说明和失败仍显示。
+    text('draft-status', draft.note || (draft.persistence === 'dpapi' ? '' : '草稿仅在当前进程保留。'));
     resizeComposer();
   }
 
@@ -2567,6 +2821,8 @@
   }
 
   function renderSnapshot(snapshot) {
+    // A9-57：执行对话或工作区真实变化即退出浏览；旧浏览代次的迟到回复随之失效。
+    if (state.browse && !browseScopeMatches(state.browse, snapshot)) exitBrowse({ rerender: false });
     syncCheckpointScope(snapshot);
     state.activeConversationId = snapshot.activeConversationId || null;
     if (state.renderedConversationId !== state.activeConversationId) {
@@ -2669,6 +2925,7 @@
     modeButton.hidden = !ready || !workspace;
     modeButton.disabled = !ready || !workspace;
     modeButton.textContent = `权限：${modeLabel(snapshot.mode)}`;
+    modeButton.title = '';
     renderManagedProcesses(snapshot);
     renderApproval(snapshot);
     renderQuestion(snapshot);
@@ -2698,6 +2955,10 @@
     else if (managedActive > 0) setTaskState(`后台运行 ${managedActive}`, 'running', '托管后台进程可通过下方停止按钮回收。');
     else setTaskState('空闲', 'idle');
     syncComposer();
+    if (state.browse) {
+      applyBrowseChrome();
+      renderBrowseExecution(snapshot);
+    }
   }
 
   async function refreshSnapshot(isCurrent = () => true) {
@@ -2729,6 +2990,7 @@
         if (!response || response.ok !== true) {
           const code = response && response.error && response.error.code;
           if (code === 'A9_WORKSPACE_REQUIRED') {
+            if (state.browse) exitBrowse({ rerender: false });
             state.snapshot = null;
             state.activeConversationId = null;
             state.renderedConversationId = null;
@@ -2797,6 +3059,7 @@
   }
 
   async function saveDraftNow() {
+    if (state.browse) return null;
     if (state.defaultConversationPending) return null;
     if (!a9 || !state.activeConversationId) return null;
     if (state.draftTimer) {
@@ -2813,7 +3076,8 @@
         el('draft-status').dataset.tone = !response || response.ok !== true ? 'error' : 'info';
         if (!response || response.ok !== true) text('draft-status', '草稿保存失败，当前输入仍保留，请稍后重试。');
         else if (response.note) text('draft-status', response.note);
-        else if (response.persistence === 'dpapi') text('draft-status', '草稿已由 Windows DPAPI 为当前用户保护。');
+        else if (response.persistence === 'dpapi') text('draft-status', '');
+        else if (response.persistence === 'memory') text('draft-status', '草稿仅在当前进程保留。');
       }
       return response;
     } catch (_error) {
@@ -2828,6 +3092,7 @@
   }
 
   function scheduleDraftSave() {
+    if (state.browse) return;
     if (state.defaultConversationPending) return;
     if (state.draftTimer) root.clearTimeout(state.draftTimer);
     text('draft-status', '正在保存当前对话草稿…');
@@ -2836,6 +3101,7 @@
   }
 
   async function runConversationOperation(operation) {
+    if (state.browse && browseBlocked('切换、新建、归档或恢复对话')) return null;
     if (state.workspaceOperation) return null;
     state.snapshotGeneration += 1;
     state.snapshotPollingPauses += 1;
@@ -2981,6 +3247,7 @@
   }
 
   function createConversation() {
+    if (state.browse && browseBlocked('新建对话')) return null;
     if (typeof api.a9.activateWorkspace !== 'function') return runConversationOperation(() => a9.createConversation());
     setFieldError('conversation-new-error', '');
     setWorkspaceMenu(false);
@@ -3072,6 +3339,8 @@
 
   async function activateWorkspace(values) {
     if (state.workspaceOperation) return null;
+    // A9-57：跨工作区沿用原流程，先退出浏览，旧浏览代次的回复随之作废。
+    if (state.browse) exitBrowse({ restoreFocus: false });
     state.workspaceOperation = true;
     state.workspaceSelectionGeneration += 1;
     state.snapshotGeneration += 1;
@@ -3117,6 +3386,7 @@
   }
 
   async function chooseWorkspaceFromPicker(value) {
+    if (state.browse && browseBlocked('新建对话')) return;
     if (value === '__default__') return prepareDefaultConversation();
     const dialog = el('conversation-new-dialog');
     const items = dialog.querySelectorAll('.project-picker-item');
@@ -3131,6 +3401,7 @@
   }
 
   function openWorkspaceClose(workspace) {
+    if (state.browse && browseBlocked('关闭工作区')) return;
     if (!workspace) return;
     el('workspace-close-dialog').dataset.workspaceId = workspace.workspaceId;
     text('workspace-close-path', workspace.workspaceRoot);
@@ -3138,6 +3409,7 @@
   }
 
   async function confirmWorkspaceClose() {
+    if (state.browse && browseBlocked('关闭工作区')) return;
     const workspaceId = el('workspace-close-dialog').dataset.workspaceId;
     const scope = state.snapshot && state.snapshot.scope;
     if (!workspaceId || state.workspaceOperation) return;
@@ -3178,6 +3450,7 @@
   }
 
   function openRenameConversation() {
+    if (state.browse && browseBlocked('重命名对话')) return;
     const current = ((state.snapshot && state.snapshot.conversations) || [])
       .find((item) => item.sessionId === state.activeConversationId);
     if (!current) return;
@@ -3189,6 +3462,7 @@
   }
 
   async function applyConversationRename() {
+    if (state.browse && browseBlocked('重命名对话')) return;
     const title = el('conversation-rename-input').value.trim();
     if (!title) {
       setFieldError('conversation-rename-error', '对话名称不能为空。');
@@ -3216,6 +3490,7 @@
   }
 
   async function chooseWorkspace() {
+    if (state.browse && browseBlocked('切换工作区')) return null;
     if (typeof api.a9.activateWorkspace === 'function') return activateWorkspace({ chooseDirectory: true });
     const selectionGeneration = ++state.workspaceSelectionGeneration;
     state.snapshotGeneration += 1;
@@ -3391,6 +3666,7 @@
   }
 
   async function updateQueue(operation, fields = {}) {
+    if (state.browse && browseBlocked('修改队列')) return;
     const snapshot = state.snapshot;
     if (state.queueBusy || !snapshot || !snapshot.activeConversationId) return;
     const conversationId = snapshot.activeConversationId;
@@ -3417,6 +3693,7 @@
   }
 
   async function submitPrompt() {
+    if (state.browse && browseBlocked('发送消息')) return null;
     if (state.defaultConversationPending) return submitDefaultPrompt();
     const requestConversationId = state.activeConversationId;
     const requestGeneration = state.snapshotGeneration;
@@ -3476,6 +3753,8 @@
    * 等待审批）时也不接管，避免把焦点塞进不可用控件。
    */
   function restoreComposerFocus() {
+    // A9-57：执行对话完成时不把用户从只读查看拉回。
+    if (state.browse) return;
     const prompt = el('task-prompt');
     if (!prompt || prompt.disabled) return;
     const active = document.activeElement;
@@ -3491,6 +3770,7 @@
   }
 
   async function continueInterruptedTask(recovery, block) {
+    if (state.browse && browseBlocked('继续执行任务')) return null;
     if (!recovery || !recovery.canContinue || state.running || state.continuingTaskId) return null;
     const requestGeneration = state.snapshotGeneration;
     const isCurrent = () => state.activeConversationId === recovery.conversationId && state.snapshotGeneration === requestGeneration;
@@ -3532,6 +3812,7 @@
   }
 
   async function stopTurn() {
+    if (state.browse && browseBlocked('停止任务或后台进程')) return;
     const canStop = state.running || activeManagedProcesses(state.snapshot).length > 0 ||
       Boolean(state.snapshot && state.snapshot.controls && state.snapshot.controls.canStop);
     if (!canStop) return;
@@ -3614,6 +3895,7 @@
   }
 
   function configureModeDialog(snapshot, forceOpen) {
+    if (state.browse) { if (forceOpen) browseBlocked('修改权限模式'); return; }
     const dialog = el('a9-mode-dialog');
     if (!dialog || !snapshot || snapshot.status !== 'ready') return;
     const supported = SUPPORTED_MODES.has(snapshot.mode);
@@ -3663,6 +3945,7 @@
   }
 
   async function chooseMode() {
+    if (state.browse && browseBlocked('修改权限模式')) return;
     const checked = document.querySelector('input[name="a9-mode-choice"]:checked');
     if (!checked || !SUPPORTED_MODES.has(checked.value)) return;
     const button = el('a9-mode-apply');
@@ -3715,6 +3998,7 @@
   }
 
   async function decideApproval(decision) {
+    if (state.browse && browseBlocked('处理审批')) return null;
     if (state.approvalDecision) return state.approvalDecision;
     const card = el('a9-approval-card');
     if (card.hidden || !card.dataset.approvalId) return null;
@@ -3787,6 +4071,7 @@
   }
 
   async function replyQuestion(reply) {
+    if (state.browse && browseBlocked('回答问题')) return null;
     if (state.questionReply) return state.questionReply;
     const pending = state.snapshot && state.snapshot.pendingQuestion;
     if (!pending) return null;
@@ -3833,6 +4118,7 @@
   }
 
   async function getReview(turnId) {
+    if (state.browse) return null;
     const generation = state.checkpointGeneration;
     const epoch = state.reviewEpoch;
     const response = await a9.getDiff(turnId);
@@ -3846,6 +4132,7 @@
   }
 
   async function showDiff(turnId, filePath) {
+    if (state.browse && browseBlocked('查看执行改动')) return;
     const generation = state.checkpointGeneration;
     state.reviewOpenTurn = turnId;
     state.reviewOpenFile = filePath || null;
@@ -3877,6 +4164,7 @@
   }
 
   function queueUndo(kind, turnId, path) {
+    if (state.browse && browseBlocked('撤销改动')) return;
     if (state.pendingUndo || state.undoInFlight) return;
     state.reviewOpenTurn = turnId;
     const request = { kind, turnId, path: path || null, conversationId: state.activeConversationId };
@@ -3933,6 +4221,7 @@
   }
 
   async function executeUndo(request) {
+    if (state.browse && browseBlocked('撤销改动')) return;
     if (!request || request.conversationId !== state.activeConversationId || state.undoInFlight) return;
     state.undoInFlight = request;
     if (state.snapshot) renderCheckpoints(state.snapshot);
@@ -4035,6 +4324,7 @@
   }
 
   async function applyProvider() {
+    if (state.browse && browseBlocked('修改模型设置')) return null;
     const values = providerValues();
     setFieldError('a9-provider-error', '');
     if (!values.baseUrl || !values.model) {
@@ -4078,6 +4368,7 @@
   }
 
   async function probeProvider() {
+    if (state.browse && browseBlocked('修改模型设置')) return null;
     const button = el('a9-provider-probe');
     button.disabled = true;
     try {
@@ -4107,6 +4398,7 @@
   }
 
   async function applyShell() {
+    if (state.browse && browseBlocked('修改 Shell 设置')) return null;
     setFieldError('a9-shell-settings-error', '');
     const button = el('a9-shell-apply');
     button.disabled = true;
@@ -4272,6 +4564,8 @@
   function openDrawer(id) {
     const drawer = el(id);
     if (!drawer) return;
+    // 设置为全应用操作；只读查看期间暂时关闭入口，返回执行对话后恢复。
+    if (id === 'settings-drawer' && state.browse && browseBlocked('打开设置')) return;
     state.lastFocused = document.activeElement;
     drawer.hidden = false;
     el('navigation-rail').classList.remove('open');
@@ -4415,7 +4709,11 @@
     renderWorkdir(state.snapshot);
   }
 
+  // A9-56（ADR-0324）：只用于“不选目录，直接开始”的新对话首轮；其他工作区的已保存模式不受影响。
+  const DEFAULT_CONVERSATION_MODE = 'full_access';
+
   async function prepareDefaultConversation() {
+    if (state.browse && browseBlocked('新建对话')) return;
     if (state.workspaceOperation) return;
     state.workspaceOperation = true;
     try {
@@ -4438,7 +4736,13 @@
       clearGlobalError();
       closeDialog(el('conversation-new-dialog'));
       closeDialog(el('a9-mode-dialog'));
-      ['a9-managed-processes', 'a9-approval-card', 'a9-question-host', 'a9-empty-state', 'viewer-panel', 'a9-mode-open'].forEach((id) => { el(id).hidden = true; });
+      ['a9-managed-processes', 'a9-approval-card', 'a9-question-host', 'a9-empty-state', 'viewer-panel'].forEach((id) => { el(id).hidden = true; });
+      // A9-56（ADR-0324）：本入口的新对话首轮使用 Full Access，发送前即在权限标签可见；创建后可照常切换。
+      const modeButton = el('a9-mode-open');
+      modeButton.hidden = false;
+      modeButton.disabled = true;
+      modeButton.textContent = '权限：Full Access';
+      modeButton.title = '新对话首条消息以 Full Access 启动；创建后可在此切换权限。';
       el('workspace-tree').textContent = '';
       el('task-prompt').value = '';
       text('draft-status', '');
@@ -4455,6 +4759,7 @@
   }
 
   async function submitDefaultPrompt() {
+    if (state.browse && browseBlocked('发送消息')) return null;
     const prompt = el('task-prompt').value.trim();
     if (!prompt || !canSubmit()) return null;
     state.workspaceOperation = true;
@@ -4465,8 +4770,8 @@
     clearGlobalError();
     let response;
     try {
-      // 不沿用旧工作区的权限，也不自动授予 Full Access。
-      response = await api.a9.startDefaultConversation(prompt);
+      // A9-56（ADR-0324）：不沿用旧工作区的权限；本入口显式以 Full Access 提交首轮，不再发送后补选。
+      response = await api.a9.startDefaultConversation(prompt, DEFAULT_CONVERSATION_MODE);
       if (response?.scope) {
         bindWorkdirScope(response);
         if (response.ok === true) el('task-prompt').value = '';
@@ -4491,6 +4796,7 @@
   }
 
   function openWorkdirRename() {
+    if (state.browse && browseBlocked('修改工作目录')) return;
     if (el('workdir-rename').disabled) return;
     state.workdirRenameScope = state.snapshot.scope;
     el('workdir-rename-input').value = pathName(state.snapshot.workdir.path);
@@ -4502,6 +4808,7 @@
   }
 
   async function runWorkdirAction(action) {
+    if (state.browse && browseBlocked('修改或打开工作目录')) return null;
     const scope = action === 'rename' ? state.workdirRenameScope : state.snapshot?.scope;
     if (!scope || state.workspaceOperation || state.workdirBusy) return null;
     if (scope.workspaceId !== state.snapshot?.scope?.workspaceId || scope.conversationId !== state.activeConversationId) {
@@ -4596,8 +4903,641 @@
     return copied;
   }
 
+  // ------------------------------------------------------------------
+  // A9-57（ADR-0325）：运行中只读浏览同工作区其他对话。
+  // 执行快照、state.activeConversationId、scoped API、事件缓存、草稿、模型与队列继续绑定执行对话 A；
+  // state.browse 只保存捕获的 A scope、目标 B、分页、错误与代次，内容放在独立只读容器 #browse-panel。
+  // 请求统一经 api.a9.forScope(A scope).browseConversation；B 从不成为任何写 API 的 scope。
+  // ------------------------------------------------------------------
+  const BROWSE_FACT_PAGE = 20;
+  const BROWSE_FACT_WINDOW = 100;
+  const BROWSE_EVENT_PAGE = 150;
+  const BROWSE_EVENT_WINDOW = 600;
+  // 执行侧区域：A 的正文、输入/队列/审批/回答、后台进程处置、目录与权限菜单、检查器。返回后恢复并按快照重绘。
+  const BROWSE_HIDDEN_IDS = ['conversation', 'composer-wrap', 'a9-managed-processes', 'conversation-find', 'workdir-control',
+    'a9-mode-open', 'a9-provider-open', 'a9-surface', 'conversation-current-actions', 'workspace-menu', 'conversation-row-menu'];
+  const BROWSE_DISABLED_IDS = ['conversation-new', 'conversation-more', 'conversation-filter', 'conversation-find-open',
+    'open-settings', 'workspace-select'];
+  const BROWSE_ERROR_TEXT = Object.freeze({
+    A9_CONVERSATION_MISMATCH: '该对话不属于当前工作区或已不存在',
+    A9_SCOPE_STALE: '执行对话或工作区已变化，请返回后重新打开',
+    A9_SCOPE_REQUIRED: '当前没有可用的执行对话，无法只读查看',
+    A9_SCOPE_INVALID: '查看目标与执行对话不一致，请返回后重新打开',
+    A9_PAYLOAD_INVALID: '分页参数无效，请回到最新后再试',
+    A9_ACTION_UNAVAILABLE: '当前运行时不提供只读查看',
+    ELECTRON_SQLITE_UNAVAILABLE: '当前运行时不提供只读查看',
+    A9_DIAGNOSTICS_MODE: '诊断模式不提供只读查看',
+  });
+
+  function browseScopeMatches(browse, snapshot) {
+    const scope = snapshot && snapshot.scope;
+    return Boolean(browse && scope && scope.workspaceId === browse.scope.workspaceId
+      && scope.conversationId === browse.scope.conversationId
+      && snapshot.activeConversationId === browse.scope.conversationId);
+  }
+
+  /** 入口守卫：浏览期间所有写入口（含快捷键与旧 DOM）在此停下，只留可见说明，不派发任何请求。 */
+  function browseBlocked(label) {
+    if (!state.browse) return false;
+    const note = el('browse-guard-note');
+    if (note) {
+      note.textContent = `只读查看中不能${label}。请先“返回执行对话”。`;
+      note.hidden = false;
+    }
+    return true;
+  }
+
+  function newBrowseSection() {
+    return { items: [], cursor: null, hasMore: false, loading: false, loaded: false, error: '', failedMode: null, newerReleased: false };
+  }
+
+  function applyBrowseChrome() {
+    const browsing = Boolean(state.browse);
+    setWorkbenchPaneClass('browsing', browsing);
+    el('browse-panel').hidden = !browsing;
+    el('browse-inspector-note').hidden = !browsing;
+    const searching = Boolean(state.browse && state.browse.search);
+    if (el('history-search')) el('history-search').hidden = !searching;
+    ['browse-facts-section', 'browse-events-section'].forEach(id => { if (el(id)) el(id).hidden = searching; });
+    if (!browsing) return;
+    BROWSE_HIDDEN_IDS.forEach((id) => { const node = el(id); if (node) node.hidden = true; });
+    BROWSE_DISABLED_IDS.forEach((id) => { const node = el(id); if (node) node.disabled = true; });
+  }
+
+  function enterBrowseChrome() {
+    const prompt = el('task-prompt');
+    state.browseReturn = {
+      value: prompt.value,
+      draftSavePending: Boolean(state.draftTimer),
+      selectionStart: prompt.selectionStart,
+      selectionEnd: prompt.selectionEnd,
+      selectionDirection: prompt.selectionDirection || 'none',
+      scrollTop: el('conversation').scrollTop,
+      follow: state.streamFollow,
+    };
+    if (state.draftTimer) {
+      root.clearTimeout(state.draftTimer);
+      state.draftTimer = null;
+    }
+    // 菜单与查找属于执行视图；先收起，再记录各入口原值供返回时恢复。
+    if (!el('conversation-find').hidden) {
+      el('conversation-find').hidden = true;
+      el('conversation-find-open').setAttribute('aria-expanded', 'false');
+      state.findMatches = [];
+      state.findIndex = -1;
+    }
+    setWorkspaceMenu(false);
+    setConversationMenu(false);
+    setWorkdirMenu(false);
+    closeRowMenu(false);
+    cancelPendingUndo();
+    state.browseSaved = BROWSE_HIDDEN_IDS.concat(BROWSE_DISABLED_IDS)
+      .map((id) => { const node = el(id); return node ? [id, node.hidden, node.disabled] : null; })
+      .filter(Boolean);
+  }
+
+  /** 打开或切换只读查看。只在执行 scope 与当前快照一致、目标属于当前工作区时生效。 */
+  function openBrowse(targetId, options = {}) {
+    const snapshot = state.snapshot;
+    const scope = snapshot && snapshot.scope;
+    if (!scope || typeof scope.workspaceId !== 'string' || typeof scope.conversationId !== 'string'
+      || scope.conversationId !== snapshot.activeConversationId) return false;
+    if (!api || !api.a9 || typeof api.a9.forScope !== 'function') return false;
+    if (state.workspaceOperation || state.defaultConversationPending) return false;
+    if (!targetId || (targetId === scope.conversationId && !options.search)) return false;
+    const target = (snapshot.conversations || []).find((item) => item.sessionId === targetId);
+    if (!target) return false;
+    if (state.browse && state.browse.targetId === targetId && Boolean(state.browse.search) === Boolean(options.search) && browseScopeMatches(state.browse, snapshot)) return true;
+    const focused = document.activeElement;
+    const fromDirectory = Boolean(focused && ['conversation-list', 'conversation-archive-list']
+      .some((id) => el(id) && typeof el(id).contains === 'function' && el(id).contains(focused)));
+    if (!state.browse) enterBrowseChrome();
+    state.browseGeneration += 1;
+    state.browse = {
+      generation: state.browseGeneration,
+      scope: { workspaceId: scope.workspaceId, conversationId: scope.conversationId },
+      targetId,
+      title: target.title || '新对话',
+      archived: target.state === 'archived',
+      executionSignature: null,
+      facts: newBrowseSection(),
+      events: newBrowseSection(),
+      search: options.search ? { generation: 0, query: '', results: [], loading: false, nextBefore: null, error: '', navigation: 0 } : null,
+    };
+    el('browse-guard-note').hidden = true;
+    applyBrowseChrome();
+    renderBrowseHeader();
+    renderBrowseExecution(snapshot);
+    renderBrowseSection('facts');
+    renderBrowseSection('events');
+    el('browse-stream').scrollTop = 0;
+    renderConversationDirectory(snapshot);
+    if (fromDirectory) focusDirectoryRow({ workspaceId: scope.workspaceId, conversationId: targetId });
+    else el('browse-return').focus();
+    if (options.search) { renderHistorySearch(); el('history-query').value = ''; el('history-query').focus(); }
+    else { void loadBrowsePage('facts', 'initial'); void loadBrowsePage('events', 'initial'); }
+    return true;
+  }
+
+  /** 退出浏览：作废代次、释放只读 DOM、恢复执行视图入口；用户主动返回时恢复输入草稿的焦点与选区。 */
+  function exitBrowse(options = {}) {
+    if (!state.browse) return false;
+    state.browse = null;
+    state.browseGeneration += 1;
+    (state.browseSaved || []).forEach(([id, hidden, disabled]) => {
+      const node = el(id);
+      if (node) { node.hidden = hidden; node.disabled = disabled; }
+    });
+    state.browseSaved = null;
+    ['facts', 'events'].forEach((kind) => renderBrowseSection(kind));
+    text('browse-execution-status', '');
+    el('browse-guard-note').hidden = true;
+    applyBrowseChrome();
+    const back = state.browseReturn;
+    state.browseReturn = null;
+    if (options.rerender !== false && state.snapshot) renderSnapshot(state.snapshot);
+    if (options.restoreFocus && back) {
+      restoreBrowseReturn(back);
+      if (back.draftSavePending && el('task-prompt').value === back.value) scheduleDraftSave();
+    }
+    return true;
+  }
+
+  function restoreBrowseReturn(back) {
+    state.streamFollow = back.follow;
+    if (back.follow) scrollToLatest();
+    else el('conversation').scrollTop = back.scrollTop;
+    const prompt = el('task-prompt');
+    if (prompt && !prompt.disabled && typeof prompt.focus === 'function') {
+      prompt.focus({ preventScroll: true });
+      if (prompt.value === back.value && typeof prompt.setSelectionRange === 'function'
+        && Number.isInteger(back.selectionStart) && Number.isInteger(back.selectionEnd)) {
+        prompt.setSelectionRange(back.selectionStart, back.selectionEnd, back.selectionDirection);
+      }
+      return;
+    }
+    const scope = state.snapshot && state.snapshot.scope;
+    if (scope) focusDirectoryRow({ workspaceId: scope.workspaceId, conversationId: scope.conversationId });
+  }
+
+  function renderBrowseHeader() {
+    const browse = state.browse;
+    if (!browse) return;
+    text('browse-title', browse.search ? '只读历史搜索' : `只读查看：${browse.title}${browse.archived ? '（已归档）' : ''}`);
+  }
+
+  function browseExecutionState(snapshot) {
+    const managed = activeManagedProcesses(snapshot).length;
+    if (snapshot.pendingApproval || snapshot.agentStatus === 'needs_approval') {
+      return { label: '等待批准', kind: 'attention', hint: '执行对话有待批准的操作，请返回执行对话处理；此处不显示也不能处理审批。' };
+    }
+    if (snapshot.pendingQuestion || snapshot.agentStatus === 'needs_input') {
+      return { label: '等待回答', kind: 'attention', hint: '执行对话在等待你的回答，请返回执行对话处理。' };
+    }
+    if (snapshot.agentStatus === 'cancelling') return { label: '正在停止', kind: 'running', hint: '' };
+    if (snapshot.agentStatus === 'running') return { label: '运行中', kind: 'running', hint: '继续执行，完成后不会自动切回。' };
+    if (managed > 0) return { label: `后台进程运行中 ${managed}`, kind: 'running', hint: '停止后台进程需返回执行对话。' };
+    if (snapshot.agentStatus === 'failed') return { label: '失败', kind: 'error', hint: '返回执行对话查看详情。' };
+    return { label: '空闲', kind: 'idle', hint: '返回后可继续正常操作。' };
+  }
+
+  /** 轮询时只更新执行状态摘要；内容不变时不改 DOM，避免读屏重复播报或打断选区。 */
+  function renderBrowseExecution(snapshot) {
+    const browse = state.browse;
+    const node = el('browse-execution-status');
+    if (!browse || !node || !snapshot) return;
+    const current = (snapshot.conversations || []).find((item) => item.sessionId === browse.scope.conversationId);
+    const status = browseExecutionState(snapshot);
+    const title = (current && current.title) || '当前对话';
+    const signature = JSON.stringify([title, status.label, status.hint]);
+    if (browse.executionSignature === signature) return;
+    browse.executionSignature = signature;
+    node.textContent = '';
+    node.dataset.state = status.kind;
+    const label = document.createElement('span');
+    label.textContent = '执行对话';
+    const name = document.createElement('strong');
+    name.textContent = title;
+    const tag = document.createElement('span');
+    tag.className = `status-tag ${status.kind === 'attention' ? 'denied' : status.kind === 'running' ? 'running' : status.kind === 'error' ? 'failed' : 'stopped'}`;
+    tag.textContent = status.label;
+    node.appendChild(label);
+    node.appendChild(name);
+    node.appendChild(tag);
+    if (status.hint) {
+      const hint = document.createElement('span');
+      hint.className = 'browse-execution-hint';
+      hint.textContent = status.hint;
+      node.appendChild(hint);
+    }
+  }
+
+  function browseErrorText(error) {
+    const code = error && error.error ? error.error.code : error && error.code;
+    const safe = typeof code === 'string' && /^[A-Z0-9_]{1,64}$/.test(code) ? code : '';
+    // 传输层 message 未必经过脱敏，只显示固定中文与错误码。
+    return `${BROWSE_ERROR_TEXT[safe] || '读取失败'}${safe ? `（${safe}）` : ''}，可重试。`;
+  }
+
+  function mergeBrowsePage(section, kind, response, mode) {
+    if (kind === 'facts') {
+      const page = (Array.isArray(response.facts) ? response.facts : [])
+        .filter((fact) => fact && typeof fact.taskId === 'string');
+      const known = new Set(section.items.map((fact) => fact.taskId));
+      section.items = mode === 'older' ? page.filter((fact) => !known.has(fact.taskId)).concat(section.items) : page;
+      section.hasMore = response.hasMore === true && Boolean(response.nextBefore);
+      section.cursor = section.hasMore ? response.nextBefore : null;
+    } else {
+      const page = (Array.isArray(response.events) ? response.events : []).map(normalizeQueriedEvent).filter(Boolean);
+      const known = new Set(section.items.map((event) => event.eventId));
+      section.items = (mode === 'older' ? page.filter((event) => !known.has(event.eventId)).concat(section.items) : page)
+        .sort((a, b) => a.eventId - b.eventId);
+      section.hasMore = response.hasMore === true && section.items.length > 0;
+      section.cursor = section.items.length ? section.items[0].eventId : null;
+    }
+    // 窗口上限：继续向更早翻页时释放最新一端，保持 DOM 与内存有界；“回到最新”重新读取首页。
+    const windowSize = kind === 'facts' ? BROWSE_FACT_WINDOW : BROWSE_EVENT_WINDOW;
+    if (section.items.length > windowSize) {
+      section.items = section.items.slice(0, windowSize);
+      section.newerReleased = true;
+    }
+  }
+
+  async function loadBrowsePage(kind, mode) {
+    const browse = state.browse;
+    if (!browse || !browse[kind]) return null;
+    const section = browse[kind];
+    if (section.loading || (mode === 'older' && (!section.hasMore || section.cursor === null))) return null;
+    if (!browseScopeMatches(browse, state.snapshot)) { exitBrowse({ restoreFocus: false }); return null; }
+    const generation = browse.generation;
+    const isCurrent = () => state.browse === browse && state.browseGeneration === generation
+      && browseScopeMatches(browse, state.snapshot);
+    const payload = { conversationId: browse.targetId, kind, limit: kind === 'facts' ? BROWSE_FACT_PAGE : BROWSE_EVENT_PAGE };
+    if (mode === 'older' && kind === 'facts') payload.before = { createdAt: section.cursor.createdAt, taskId: section.cursor.taskId };
+    if (mode === 'older' && kind === 'events') payload.beforeEventId = section.cursor;
+    if (mode === 'initial') Object.assign(section, newBrowseSection());
+    section.loading = true;
+    section.error = '';
+    section.failedMode = null;
+    renderBrowseSection(kind);
+    try {
+      const target = api.a9.forScope({ workspaceId: browse.scope.workspaceId, conversationId: browse.scope.conversationId });
+      const response = await target.browseConversation(payload);
+      if (!isCurrent()) return null;
+      if (!response || response.ok !== true || response.conversationId !== browse.targetId) throw response || new Error('A9_BROWSE_FAILED');
+      if (typeof response.title === 'string' && response.title) {
+        browse.title = response.title.slice(0, 200);
+        renderBrowseHeader();
+      }
+      mergeBrowsePage(section, kind, response, mode);
+      section.loaded = true;
+      return response;
+    } catch (error) {
+      if (!isCurrent()) return null;
+      section.error = browseErrorText(error);
+      section.failedMode = mode;
+      return null;
+    } finally {
+      // 迟到回复（含错误）不改动新目标或执行视图。
+      if (isCurrent()) {
+        section.loading = false;
+        renderBrowseSection(kind);
+      }
+    }
+  }
+
+  function buildBrowseFact(fact) {
+    const item = document.createElement('li');
+    item.className = 'turn-block browse-fact';
+    item.dataset.taskId = fact.taskId;
+    const request = document.createElement('div');
+    request.className = 'turn-request';
+    const head = document.createElement('div');
+    head.className = 'turn-request-head';
+    const label = document.createElement('strong');
+    label.textContent = '请求';
+    const time = document.createElement('span');
+    time.textContent = fact.createdAt ? new Date(fact.createdAt).toLocaleString() : '';
+    head.appendChild(label);
+    head.appendChild(time);
+    const body = document.createElement('div');
+    body.className = 'turn-request-body';
+    body.textContent = fact.requestPrompt ? clampText(fact.requestPrompt, NOTE_LIMIT) : '（继续执行的轮次，没有新的请求文本）';
+    request.appendChild(head);
+    request.appendChild(body);
+    const outcome = document.createElement('div');
+    const tone = ['failed', 'blocked'].includes(fact.outcome) ? ' fail'
+      : ['completed_with_warnings', 'cancelled', 'interrupted'].includes(fact.outcome) ? ' warn' : '';
+    outcome.className = `outcome-card${tone}`;
+    const outcomeHead = document.createElement('div');
+    outcomeHead.className = 'outcome-head';
+    const outcomeLabel = document.createElement('strong');
+    outcomeLabel.textContent = '最终答复';
+    const outcomeState = document.createElement('span');
+    outcomeState.textContent = OUTCOME_LABELS[fact.outcome] || String(fact.outcome || '状态未知').slice(0, 40);
+    outcomeHead.appendChild(outcomeLabel);
+    outcomeHead.appendChild(outcomeState);
+    const outcomeBody = document.createElement('div');
+    outcomeBody.className = 'outcome-body';
+    outcomeBody.textContent = fact.finalMessage ? clampText(fact.finalMessage, NOTE_LIMIT)
+      : TERMINAL_OUTCOMES.has(fact.outcome) ? '（没有保存最终答复）' : '（尚未完成，没有最终答复）';
+    outcome.appendChild(outcomeHead);
+    outcome.appendChild(outcomeBody);
+    item.appendChild(request);
+    item.appendChild(outcome);
+    if (fact.turnId && state.browse) item.appendChild(buildDeliveryCard(state.browse.targetId, fact.turnId, true));
+    return item;
+  }
+
+  /** 已保存过程记录：只读文本与既有的计划/审批留痕样式，不复用可触发执行、撤销或恢复的卡片。 */
+  function buildBrowseEvent(event) {
+    const item = document.createElement('li');
+    item.className = 'browse-event';
+    item.dataset.eventId = String(event.eventId);
+    const data = event.data || {};
+    if (event.type === 'plan_updated') {
+      const card = buildPlanCard(data);
+      if (typeof data.plan === 'string') {
+        const body = document.createElement('p');
+        body.className = 'note-line';
+        body.textContent = clampText(data.plan, NOTE_LIMIT);
+        card.insertBefore(body, card.children[1] || null);
+      }
+      item.appendChild(card);
+      return item;
+    }
+    if (event.type === 'approval_required' || event.type === 'approval_resolved') {
+      const approved = data.decision === 'approved';
+      item.appendChild(event.type === 'approval_required'
+        ? buildApprovalRecord('pending', `当时请求批准：${String(data.toolName || 'operation').slice(0, 80)}`,
+          clampText(data.summary || data.reason || '', 2000))
+        : buildApprovalRecord(approved ? 'approved' : 'denied', `${approved ? '已批准' : '已拒绝'}：${String(data.toolName || 'operation').slice(0, 80)}`,
+          data.decidedAt ? new Date(data.decidedAt).toLocaleString() : ''));
+      return item;
+    }
+    const head = document.createElement('div');
+    head.className = 'browse-event-head';
+    const label = document.createElement('span');
+    label.className = 'browse-event-label';
+    label.textContent = String(event.type === 'tool_start' ? `开始${toolHeadline(data)}`
+      : event.type === 'tool_output' ? `${data.stream === 'stderr' ? 'stderr' : 'stdout'} 输出片段` : timelineEntryLabel(event)).slice(0, 300);
+    head.appendChild(label);
+    if (event.type === 'tool_end' && data.toolName) {
+      const [status, statusLabel] = toolEndStatus(data);
+      const tag = document.createElement('span');
+      tag.className = `status-tag ${status}`;
+      tag.textContent = statusLabel;
+      head.appendChild(tag);
+    }
+    const time = document.createElement('time');
+    time.textContent = event.timestamp ? new Date(event.timestamp).toLocaleString() : '';
+    head.appendChild(time);
+    item.appendChild(head);
+    const detail = event.type === 'model_note' ? clampText(data.content, NOTE_LIMIT)
+      : event.type === 'tool_end' ? clampText(toolDetailText(data), TOOL_OUTPUT_LIMIT)
+        : event.type === 'tool_output' && typeof data.text === 'string' ? clampText(data.text, TOOL_OUTPUT_LIMIT) : '';
+    if (detail) {
+      const pre = document.createElement(event.type === 'model_note' ? 'p' : 'pre');
+      pre.className = event.type === 'model_note' ? 'note-line' : 'activity-detail';
+      pre.textContent = detail;
+      item.appendChild(pre);
+    }
+    return item;
+  }
+
+  function renderBrowseSection(kind) {
+    const browse = state.browse;
+    const section = browse ? browse[kind] : null;
+    const list = el(`browse-${kind}`);
+    const older = el(`browse-${kind}-older`);
+    const retry = el(`browse-${kind}-retry`);
+    const latest = el(`browse-${kind}-latest`);
+    if (!list) return;
+    if (!section) {
+      list.textContent = '';
+      list.dataset.signature = '';
+      [older, retry, latest].forEach((button) => { button.hidden = true; });
+      text(`browse-${kind}-status`, '');
+      text(`browse-${kind}-count`, '');
+      return;
+    }
+    const facts = kind === 'facts';
+    const items = section.items;
+    const key = (entry) => (facts ? entry.taskId : entry.eventId);
+    const signature = items.length ? `${browse.generation}:${items.length}:${key(items[0])}:${key(items[items.length - 1])}` : `${browse.generation}:0`;
+    // 只在数据真正变化时重建列表；仅加载状态变化不打断用户的文本选择。
+    if (list.dataset.signature !== signature) {
+      list.dataset.signature = signature;
+      list.textContent = '';
+      items.forEach((entry) => list.appendChild(facts ? buildBrowseFact(entry) : buildBrowseEvent(entry)));
+    }
+    retry.hidden = !section.error;
+    retry.disabled = section.loading;
+    older.hidden = !section.hasMore || Boolean(section.error);
+    older.disabled = section.loading;
+    older.textContent = section.loading ? '正在加载…' : facts ? '加载更早请求' : '加载更早记录';
+    latest.hidden = !section.newerReleased || Boolean(section.error);
+    latest.disabled = section.loading;
+    const windowSize = facts ? BROWSE_FACT_WINDOW : BROWSE_EVENT_WINDOW;
+    text(`browse-${kind}-count`, items.length ? `${items.length}${section.hasMore ? '+' : ''}` : '');
+    text(`browse-${kind}-status`, section.error
+      || (section.loading && !section.loaded ? '正在读取已保存历史…'
+        : section.loaded && !items.length ? (facts ? '这个对话还没有已保存的请求。' : '这个对话没有已保存的过程记录。')
+          : section.newerReleased ? `为控制内存只保留 ${windowSize} 条；较新的条目已释放，可“回到最新”重新读取。`
+            : section.hasMore ? '只显示最近部分；更早内容仍完整保存在本机，可逐页加载。' : ''));
+  }
+
+  // Search lives inside the A9-57 read-only chrome, including for the current
+  // conversation. Execution scope and composer state never become search state.
+  function openHistorySearch() {
+    const snapshot = state.snapshot;
+    if (!snapshot || !snapshot.scope) return;
+    if (openBrowse(snapshot.activeConversationId, { search: true })) {
+      el('history-query').focus();
+    }
+  }
+  function currentHistorySearch() { return state.browse && state.browse.search; }
+  function invalidateHistorySearch() {
+    const search = currentHistorySearch();
+    if (!search) return;
+    search.generation += 1; search.navigation += 1; search.loading = false;
+    search.results = []; search.nextBefore = null; search.error = ''; search.query = '';
+    search.page = 0; search.failedNext = false;
+    el('history-source').hidden = true; el('history-source').textContent = '';
+    renderHistorySearch();
+  }
+  function renderHistorySearch() {
+    const search = currentHistorySearch();
+    if (!search) return;
+    text('history-status', search.error || (search.loading ? '正在查询本机保留历史…'
+      : search.query ? search.results.length ? `第 ${search.page || 1} 页 · ${search.results.length} 条结果` : '没有匹配的保留历史。'
+        : '输入原文后按 Enter 搜索。'));
+    el('history-submit').disabled = search.loading;
+    el('history-retry').hidden = !search.error;
+    el('history-retry').disabled = search.loading;
+    el('history-next').hidden = !search.nextBefore || Boolean(search.error);
+    el('history-next').disabled = search.loading;
+    el('history-first').hidden = !(search.page > 1);
+    el('history-first').disabled = search.loading;
+    // A loading/error state alone must not replace focused result buttons.
+    Array.from(el('history-results').children).forEach(item => { if (item.children[0]) item.children[0].disabled = search.loading; });
+    if (search.renderedResults === search.results) return;
+    search.renderedResults = search.results;
+    const list = el('history-results'); list.textContent = '';
+    search.results.forEach(result => {
+      const li = document.createElement('li'), button = document.createElement('button');
+      button.type = 'button'; button.className = 'history-result'; button.disabled = search.loading;
+      button.dataset.source = result.source; button.dataset.id = result.id;
+      const head = document.createElement('strong');
+      head.textContent = `${result.title || '新对话'}${result.conversationState === 'archived' ? '（已归档）' : ''} · ${result.kind === 'reply' ? '请求 / 答复' : result.kind === 'conversation.request' ? '请求' : '工具 / 错误'}`;
+      const time = document.createElement('time'); time.textContent = String(result.createdAt || '');
+      const snippet = document.createElement('span'); snippet.textContent = result.snippet;
+      button.appendChild(head); button.appendChild(time); button.appendChild(snippet);
+      button.addEventListener('click', () => { void locateHistoryResult(result, button); });
+      li.appendChild(button); list.appendChild(li);
+    });
+  }
+  async function searchHistoryPage(next) {
+    const browse = state.browse, search = currentHistorySearch();
+    if (!browse || !search || search.loading || !browseScopeMatches(browse, state.snapshot)) return;
+    const query = el('history-query').value;
+    if (!query.trim()) { invalidateHistorySearch(); return; }
+    const before = next ? search.nextBefore : null;
+    if (next && !before) return;
+    const generation = ++search.generation; search.navigation += 1;
+    const isCurrent = () => state.browse === browse && search.generation === generation && browseScopeMatches(browse, state.snapshot);
+    search.query = query; search.loading = true; search.error = ''; search.failedNext = next;
+    el('history-source').hidden = true; el('history-source').textContent = '';
+    renderHistorySearch();
+    try {
+      const response = await api.a9.forScope(browse.scope).searchHistory({ query, limit: 20, ...(before ? { before } : {}) });
+      if (!isCurrent()) return;
+      if (!response || response.ok !== true || !Array.isArray(response.results)) throw response;
+      search.results = response.results; search.nextBefore = response.nextBefore || null;
+      search.page = next ? (search.page || 1) + 1 : 1;
+      el('browse-stream').scrollTop = 0;
+    } catch (error) { if (isCurrent()) search.error = browseErrorText(error); }
+    finally { if (isCurrent()) { search.loading = false; renderHistorySearch(); } }
+  }
+  async function locateHistoryResult(result, returnButton) {
+    const browse = state.browse, search = currentHistorySearch();
+    if (!browse || !search || search.loading || !search.query || !search.results.includes(result) || !browseScopeMatches(browse, state.snapshot)) return;
+    const navigation = ++search.navigation, generation = search.generation;
+    const isCurrent = () => state.browse === browse && search.generation === generation && search.navigation === navigation && browseScopeMatches(browse, state.snapshot);
+    const source = el('history-source'), scrollTop = el('browse-stream').scrollTop;
+    source.hidden = false; source.textContent = '正在定位原始消息…';
+    source.focus({ preventScroll: true });
+    if (typeof source.scrollIntoView === 'function') source.scrollIntoView({ block: 'start' });
+    try {
+      const response = await api.a9.forScope(browse.scope).locateHistory({ conversationId: result.conversationId, source: result.source, id: result.id, query: search.query });
+      if (!isCurrent()) return;
+      if (!response || response.ok !== true || response.conversationId !== result.conversationId || !response.message) throw response;
+      const message = response.message; source.textContent = '';
+      const back = document.createElement('button'); back.type = 'button'; back.textContent = '返回搜索结果';
+      back.addEventListener('click', () => { if (!isCurrent()) return; source.hidden = true; search.navigation += 1; el('browse-stream').scrollTop = scrollTop; if (returnButton.isConnected) returnButton.focus({ preventScroll: true }); });
+      source.appendChild(back);
+      const heading = document.createElement('h3'); heading.textContent = `${message.title || '新对话'} · 原始保留消息（只读）`; source.appendChild(heading);
+      const identity = document.createElement('p'); identity.className = 'quiet';
+      identity.textContent = `${message.createdAt} · ${message.kind} · task=${message.taskId || 'UNKNOWN'} · turn=${message.turnId || 'UNKNOWN'} · ${message.source}:${message.id}`;
+      source.appendChild(identity);
+      const body = document.createElement('pre'); body.className = 'history-source-text'; body.textContent = message.text; source.appendChild(body);
+      if (message.textOffset > 1 || message.textLength > 24000) {
+        const note = document.createElement('p'); note.className = 'quiet'; note.textContent = `原文有界显示：从字符 ${message.textOffset} 起，最多 24000 字符；已截断。`; source.appendChild(note);
+      }
+      if (message.turnId) source.appendChild(buildDeliveryCard(result.conversationId, message.turnId, true));
+      source.focus({ preventScroll: true });
+      if (typeof source.scrollIntoView === 'function') source.scrollIntoView({ block: 'start' });
+    } catch (error) {
+      if (!isCurrent()) return;
+      source.textContent = browseErrorText(error);
+      source.focus({ preventScroll: true });
+      const retry = document.createElement('button'); retry.type = 'button'; retry.textContent = '重试定位';
+      retry.addEventListener('click', () => { void locateHistoryResult(result, returnButton); }); source.appendChild(retry);
+    }
+  }
+
+  function buildDeliveryCard(conversationId, turnId, readOnly, initialOutcome) {
+    const card = document.createElement('details'); card.className = 'delivery-card'; card.dataset.turnId = turnId;
+    const summary = document.createElement('summary'); summary.textContent = `本轮交付 · ${OUTCOME_LABELS[initialOutcome] || '改动 / 检查 / 未解决 / 撤销'}`; card.appendChild(summary);
+    const body = document.createElement('div'); body.className = 'delivery-body'; card.appendChild(body);
+    const scope = state.snapshot && state.snapshot.scope, browse = readOnly ? state.browse : null;
+    const search = browse && browse.search, searchGeneration = search && search.generation, searchNavigation = search && search.navigation;
+    let loading = false, loaded = false, revision = 0;
+    card.deliveryStale = true;
+    const isCurrent = () => scope && state.snapshot && state.snapshot.scope
+      && scope.workspaceId === state.snapshot.scope.workspaceId && scope.conversationId === state.snapshot.scope.conversationId
+      && (readOnly ? state.browse === browse && (!search || (search.generation === searchGeneration && search.navigation === searchNavigation)) : !state.browse);
+    function line(value, className = '') { const node = document.createElement('p'); node.className = className; node.textContent = value; body.appendChild(node); }
+    function button(label, handler) { const node = document.createElement('button'); node.type = 'button'; node.textContent = label; node.addEventListener('click', handler); body.appendChild(node); return node; }
+    card.loadDelivery = async () => {
+      if (loading || !isCurrent() || (loaded && !card.deliveryStale)) return;
+      loading = true; const request = ++revision; const stamp = card.dataset.stamp;
+      if (!loaded) { body.textContent = ''; line('正在读取持久化交付事实…', 'quiet'); }
+      try {
+        const response = await api.a9.forScope(scope).getDelivery({ conversationId, turnId });
+        if (!isCurrent() || revision !== request) return;
+        if (!response || response.ok !== true || !response.card || response.card.turnId !== turnId || response.card.conversationId !== conversationId) throw response;
+        const value = response.card;
+        // Polling does not replace details/summary or focus. Unchanged facts do
+        // not rebuild even the inner body (expanded state and selection survive).
+        const signature = JSON.stringify(value);
+        loaded = true; card.deliveryStale = card.dataset.stamp !== stamp;
+        if (card.dataset.signature === signature) { if (card.syncDeliveryActions) card.syncDeliveryActions(); return; }
+        const focused = document.activeElement;
+        const focusLabel = focused && body.contains(focused) ? focused.textContent : null;
+        const scroller = el(readOnly ? 'browse-stream' : 'conversation'), scrollTop = scroller.scrollTop;
+        card.dataset.signature = signature; body.textContent = '';
+        summary.textContent = `本轮交付 · ${OUTCOME_LABELS[value.outcome] || value.outcome || 'UNKNOWN'}`;
+        if (value.liveOutcome) line(`当前执行状态：${OUTCOME_LABELS[value.liveOutcome] || value.liveOutcome}；以下为已保存事实。`);
+        line(`已保存结果：${OUTCOME_LABELS[value.outcome] || value.outcome || 'UNKNOWN'} · 验证：${value.verification || 'UNKNOWN'}`);
+        const changes = value.changes || { evidence: 'UNKNOWN' };
+        if (changes.evidence !== 'checkpoint_metadata') line(`改动：UNKNOWN · checkpoint 证据不可用（${changes.diagnostic || 'UNKNOWN'}）。`, 'quiet');
+        else {
+          line(`改动：checkpoint 记录 ${changes.total} 项${changes.incomplete ? '；轮后收集未完成，清单不完整' : ''}。`);
+          (changes.files || []).forEach(file => line(`${file.action} · ${file.path}${file.undone ? ' · 已记录撤销' : ''}${file.warning ? ` · ${file.warning}` : ''}${file.textTruncated ? ' · 文本已截断' : ''}`));
+          if (changes.remaining) line(`另有 ${changes.remaining} 项未展开。`, 'quiet');
+        }
+        line('检查：以下是实际命令观察；退出 0 本身不表示测试已验证。');
+        if (!(value.checks || []).length) line('命令观察：UNKNOWN / NOT_PERFORMED（没有保留的执行观察）。', 'quiet');
+        (value.checks || []).forEach(check => line(`${check.command}\nexit=${check.exitCode === null ? 'UNKNOWN' : check.exitCode} · ${check.status}${check.timedOut ? ' · 超时' : ''}${check.commandTruncated ? ' · 命令文本已截断' : ''} · event=${check.eventId}`, 'delivery-command'));
+        if (value.checksRemaining) line(`另有 ${value.checksRemaining} 条命令观察未展开。`, 'quiet');
+        if (value.verificationEvidence) line(`精确验证证据：${value.verificationEvidence.command}\nexit=${value.verificationEvidence.exitCode}${value.verificationEvidence.commandTruncated ? ' · 命令文本已截断' : ''} · event=${value.verificationEvidence.eventId}`, 'delivery-command');
+        else line('精确验证证据：UNKNOWN / NOT_PERFORMED（未保留）。', 'quiet');
+        const outstanding = ['failed', 'blocked', 'cancelled', 'interrupted', 'completed_with_warnings', 'needs_input', 'needs_approval'].includes(value.outcome);
+        line(`未解决：${outstanding ? (OUTCOME_LABELS[value.outcome] || value.outcome) + '；请核对本轮原始过程。' : 'UNKNOWN（没有独立的问题关闭清单）。'}`);
+        (value.issues || []).forEach(issue => line(`event=${issue.eventId} · ${issue.text}${issue.textTruncated ? ' · 问题文本已截断' : ''}`));
+        if (value.auditTruncated || value.issueLimitReached) line('审计摘要已截断：最多最近 100 条终态 / 工具记录和 20 个问题；更早观察未纳入。', 'quiet');
+        if (readOnly) line('撤销 / Diff：只读历史不可操作。请返回执行对话使用原有入口。', 'quiet');
+        else {
+          line('撤销：沿用当前执行对话的 Diff、倒计时与确认守卫。', 'quiet');
+          const canAct = () => isCurrent() && !state.running && !state.snapshot.pendingApproval && !state.snapshot.pendingQuestion
+            && value.checkpointAvailable === true && TERMINAL_OUTCOMES.has(value.outcome)
+            && activeManagedProcesses(state.snapshot).length === 0;
+          const diff = button('查看 Diff', () => { if (canAct()) void showDiff(turnId); });
+          const undo = button('撤销入口（先审阅 Diff）', () => { if (canAct()) void showDiff(turnId); });
+          card.syncDeliveryActions = () => { diff.disabled = undo.disabled = !canAct(); };
+          card.syncDeliveryActions();
+          if (!canAct()) line('当前轮次仍在执行、等待处理或缺少当前 checkpoint；入口不可用。', 'quiet');
+        }
+        button('重新读取交付事实', () => { card.deliveryStale = true; void card.loadDelivery(); });
+        if (focusLabel) {
+          const replacement = Array.from(body.children).find(node => node.tagName.toLowerCase() === 'button' && node.textContent === focusLabel);
+          if (replacement) replacement.focus({ preventScroll: true });
+        }
+        scroller.scrollTop = scrollTop;
+      } catch (error) {
+        if (!isCurrent() || revision !== request) return;
+        card.deliveryStale = true; body.textContent = ''; line(`交付事实读取失败：${browseErrorText(error)}`, 'quiet');
+        button('重试交付摘要', () => { void card.loadDelivery(); });
+      } finally { loading = false; }
+    };
+    card.addEventListener('toggle', () => { if (card.open) void card.loadDelivery(); });
+    return card;
+  }
+
   function bind() {
     if (typeof root.addEventListener === 'function') root.addEventListener('beforeunload', () => {
+      state.browseGeneration += 1;
       state.snapshotPollingClosed = true;
       state.snapshotGeneration += 1;
       syncSnapshotPolling();
@@ -4630,8 +5570,36 @@
       if (!el('workdir-menu').hidden && !el('workdir-control').contains(event.target)) setWorkdirMenu(false);
     });
     el('workspace-select').addEventListener('click', () => { void chooseWorkspace(); });
+    if (el('history-open')) {
+      // Keep the composer's selection until browse guards are installed.
+      // Native mouse focus normally blurs the composer before click runs.
+      el('history-open').addEventListener('mousedown', event => event.preventDefault());
+      el('history-open').addEventListener('click', openHistorySearch);
+    }
+    if (el('history-form')) el('history-form').addEventListener('submit', event => { event.preventDefault(); void searchHistoryPage(false); });
+    if (el('history-query')) el('history-query').addEventListener('input', invalidateHistorySearch);
+    if (el('history-clear')) el('history-clear').addEventListener('click', () => { el('history-query').value = ''; invalidateHistorySearch(); el('history-query').focus(); });
+    if (el('history-next')) el('history-next').addEventListener('click', () => { void searchHistoryPage(true); });
+    if (el('history-first')) el('history-first').addEventListener('click', () => { void searchHistoryPage(false); });
+    if (el('history-retry')) el('history-retry').addEventListener('click', () => { void searchHistoryPage(Boolean(state.browse && state.browse.search && state.browse.search.failedNext)); });
+    if (el('history-search')) el('history-search').addEventListener('keydown', event => {
+      if (event.key === 'Escape') { event.preventDefault(); exitBrowse({ restoreFocus: true }); }
+    });
+    // A9-57：只读查看的返回、分页与重试。
+    el('browse-return').addEventListener('click', () => { exitBrowse({ restoreFocus: true }); });
+    ['facts', 'events'].forEach((kind) => {
+      el(`browse-${kind}-older`).addEventListener('click', () => { void loadBrowsePage(kind, 'older'); });
+      el(`browse-${kind}-latest`).addEventListener('click', () => { void loadBrowsePage(kind, 'initial'); });
+      el(`browse-${kind}-retry`).addEventListener('click', () => {
+        const section = state.browse && state.browse[kind];
+        if (section) void loadBrowsePage(kind, section.failedMode || 'initial');
+      });
+    });
     el('task-prompt').addEventListener('input', () => { resizeComposer(); scheduleDraftSave(); });
-    el('task-prompt').addEventListener('blur', () => { void saveDraftNow(); });
+    el('task-prompt').addEventListener('blur', event => {
+      if (event.relatedTarget === el('history-open')) return;
+      void saveDraftNow();
+    });
     el('task-prompt').addEventListener('keydown', (event) => {
       if (!state.running && event.key === 'Enter' && !event.shiftKey && event.isComposing !== true && event.keyCode !== 229) {
         event.preventDefault();
@@ -4815,7 +5783,7 @@
         return;
       }
       if (event.ctrlKey && !event.altKey && !event.shiftKey && key === 'n'
-        && !document.querySelector('.drawer:not([hidden]), dialog[open]') && !el('conversation-new').disabled) {
+        && !document.querySelector('.drawer:not([hidden]), dialog[open]') && (state.browse || !el('conversation-new').disabled)) {
         event.preventDefault();
         openNavigation();
         void createConversation();

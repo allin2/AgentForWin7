@@ -30,7 +30,7 @@ function a8Request(action, sessionId, payload) {
 
 function a9Request(action, payload, scope) {
   return ipcRenderer.invoke('product:a9-request', {
-    schemaVersion: scope || ['a9.workspace.list', 'a9.workspace.activate', 'a9.workspace.close', 'a9.workdir.start'].includes(action) || action === 'a9.snapshot.get' ? 9 : action === 'a9.queue.update' ? 8 : 7,
+    schemaVersion: scope || ['a9.workspace.list', 'a9.workspace.activate', 'a9.workspace.close', 'a9.workdir.start', 'a9.conversation.browse', 'a9.history.search', 'a9.history.locate', 'a9.delivery.get'].includes(action) || action === 'a9.snapshot.get' ? 9 : action === 'a9.queue.update' ? 8 : 7,
     action,
     payload: payload || {},
     ...(scope ? { scope } : {}),
@@ -63,6 +63,10 @@ function createA9Api(scope) {
     linkWorkdir: () => boundRequest('a9.workdir.link', {}),
     listWorkspaceDirectory: path => boundRequest('a9.workspace.browse', { path: path || '' }),
     queryConversation: (values) => boundRequest('a9.conversation.query', values || {}),
+    browseConversation: (values) => boundRequest('a9.conversation.browse', values),
+    searchHistory: values => boundRequest('a9.history.search', values),
+    locateHistory: values => boundRequest('a9.history.locate', values),
+    getDelivery: values => boundRequest('a9.delivery.get', values),
     setMode: (mode) => boundRequest('a9.mode.set', { mode }),
     configureProvider: (values) => boundRequest('a9.provider.configure', values),
     probeProvider: () => boundRequest('a9.provider.probe', {}),

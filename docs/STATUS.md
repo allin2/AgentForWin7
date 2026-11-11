@@ -15,6 +15,8 @@
 
 ## 当前交付、进行中的工作与授权
 
+- [A9-59](tasks/A9_59_ALPHA8_CLOSEOUT.md)：`A9_59_IMPLEMENTATION_AUTHORIZED`。负责人要求收口 alpha.8；已核查 A9-58 四项疑点并修复合法路径别名与旧时间游标两项，旧实现各失败1项、修复后通过。新 alpha.8 开发锁及包内身份已实现。开发机 State408、Shell日常1607、打包定向4项和真实Electron两阶段10项通过；发布必需检查仍在执行。干净源码构建依赖本地提交授权，尚未提交/打包；新包Win7/Win10、正式门A/B与发布NOT_PERFORMED。原main及无关dirty保留，详见任务书§4。
+
 - [A9-55](tasks/A9_55_DEFAULT_WORKDIR.md#95-win7-只读前检与准确窗口提案待负责人确认)：`A9_55_DEVELOPER_VERIFIED`。最终 Opus 复审 P0/P1 0、Linux Shell G0 1545 PASS / 12 跳过、Mac G1 九项、真实 Electron 22 十项、合并补验758项均 PASS；本地 main 已整合并记录 A9-54。开发构建源 `4c9adbcc…` / ZIP `6f3578f4…`，3261 文件与八个JS入口校验通过，无正式候选。Win7仅只读前检完成：旧锁inactive、进程/任务0；开发根21.265GB超过20GB，目标写入BLOCKED。60分钟、23GB本run例外及系统Documents新目录例外待负责人确认；Win7产品为NOT_PERFORMED。公开推送按本轮既有批准执行，准确回执在任务书后继记录。
 
 - [A9-53](tasks/A9_53_ALPHA7_MULTIWORKSPACE_RELEASE.md#7-同字节公开与回下载核验2026-11-08-utc)：COMPLETE，`A9_53_WIN7_60_PASS_WITH_KNOWN_LIMITS`。负责人按 ADR-0320 甲限定接受并授权发布 alpha.7 / WIN7-60：源码 `22b575cc…`、ZIP `5b8ae87f…`、manifest `e39b88f0…`。同 ZIP Win7 DEV_CHANNEL 证据：多工作区 run `7949d383…` PASS（候选外驱动 `0a1f81c4…`），alpha.6 队列与 A9-49 可靠性回归 run `a25a26db…` PASS；前三次失败与根因保留。UTC `2026-11-08T11:45:00Z` 公开内部试用预发布，[下载与说明](https://github.com/allin2/AgentForWin7/releases/tag/v0.3.0-alpha.7-win7-60)；4 个附件草稿与公开后各回下载一次，大小/SHA 与本地原件及 GitHub digest 一致。公开 CI run `42476340351` success。Win7 开发根 21.27 GB，高于默认 20 GB。已知限制 5 项见任务书 §6；门 A/B 未执行。准确接受与发布证据在本机 `outputs/alpha7-r1/publish/`。

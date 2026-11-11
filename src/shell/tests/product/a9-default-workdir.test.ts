@@ -39,7 +39,7 @@ describe('A9-55 default workdir real State/runtime/IPC', () => {
       getA9Runtime: () => registry.getActive()?.runtime, chooseWorkspace: async () => chosen, openWorkdir: async (value: string) => { opened.push(value); } });
   };
   beforeEach(() => {
-    root = fs.mkdtempSync(path.join(os.tmpdir(), 'w7ca-a9-55-'));
+    root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'w7ca-a9-55-')));
     documents = path.join(root, '我的 文档'); dataRoot = path.join(root, 'data'); fs.mkdirSync(documents);
     databases = []; steps = []; chosen = null; opened = []; make();
   });

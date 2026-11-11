@@ -7,6 +7,7 @@
  */
 
 const { serializeError } = require('./desktop-host');
+const { validateHistoryInput } = require('./a9-history');
 
 const A9_ACTIONS = Object.freeze({
   SNAPSHOT_GET: 'a9.snapshot.get',
@@ -48,6 +49,10 @@ const A9_ACTIONS = Object.freeze({
   WORKSPACE_READ: 'a9.workspace.read',
   EVENTS_QUERY: 'a9.events.query',
   CONVERSATION_QUERY: 'a9.conversation.query',
+  CONVERSATION_BROWSE: 'a9.conversation.browse',
+  HISTORY_SEARCH: 'a9.history.search',
+  HISTORY_LOCATE: 'a9.history.locate',
+  DELIVERY_GET: 'a9.delivery.get',
 });
 
 /**
@@ -99,6 +104,10 @@ function createA9ProductRequestHandler(options) {
         throw Object.assign(new Error(`A9_ACTION_UNAVAILABLE:${request.action}`), { code: 'A9_ACTION_UNAVAILABLE' });
       }
       const registry = config.workspaceRegistry;
+      if ([A9_ACTIONS.CONVERSATION_BROWSE, A9_ACTIONS.HISTORY_SEARCH, A9_ACTIONS.HISTORY_LOCATE, A9_ACTIONS.DELIVERY_GET].includes(request.action) &&
+          (request.schemaVersion !== 9 || !request.scope || !registry)) {
+        throw Object.assign(new Error('A9_SCOPE_REQUIRED'), { code: 'A9_SCOPE_REQUIRED' });
+      }
       const inboxAction = [A9_ACTIONS.CONVERSATION_SETTLE, A9_ACTIONS.CONVERSATION_REOPEN, A9_ACTIONS.CONVERSATION_VISIT].includes(request.action);
       if (inboxAction && (request.schemaVersion !== 9 || !request.scope)) {
         throw Object.assign(new Error('A9_SCOPE_REQUIRED'), { code: 'A9_SCOPE_REQUIRED' });
@@ -249,6 +258,36 @@ function createA9ProductRequestHandler(options) {
               workspaces: registry.directory(), accounting: registry.accounting(),
             } : {}) } };
           }
+        case A9_ACTIONS.HISTORY_SEARCH:
+          validateHistoryInput('search', request.payload);
+          return await runtime.searchHistory(request.payload);
+        case A9_ACTIONS.HISTORY_LOCATE:
+          validateHistoryInput('locate', request.payload);
+          return await runtime.locateHistory(request.payload);
+        case A9_ACTIONS.DELIVERY_GET:
+          validateHistoryInput('delivery', request.payload);
+          return await runtime.getDelivery(request.payload);
+        case A9_ACTIONS.CONVERSATION_BROWSE: {
+          const values = request.payload;
+          exactObject(values, ['conversationId', 'kind'], 'A9_PAYLOAD_INVALID',
+            values && values.kind === 'facts' ? ['before', 'limit'] : ['beforeEventId', 'limit']);
+          if (typeof values.conversationId !== 'string' || !values.conversationId.trim() || values.conversationId.length > 256 ||
+              !['facts', 'events'].includes(values.kind) ||
+              ('limit' in values && (!Number.isSafeInteger(values.limit) || values.limit < 1 || values.limit > (values.kind === 'facts' ? 100 : 300)))) {
+            throw Object.assign(new Error('A9_PAYLOAD_INVALID: invalid browse page'), { code: 'A9_PAYLOAD_INVALID' });
+          }
+          if ('before' in values) {
+            exactObject(values.before, ['createdAt', 'taskId'], 'A9_PAYLOAD_INVALID');
+            if (typeof values.before.createdAt !== 'string' || values.before.createdAt.length > 64 ||
+                typeof values.before.taskId !== 'string' || !values.before.taskId || values.before.taskId.length > 256) {
+              throw Object.assign(new Error('A9_PAYLOAD_INVALID: invalid cursor'), { code: 'A9_PAYLOAD_INVALID' });
+            }
+          }
+          if ('beforeEventId' in values && (!Number.isSafeInteger(values.beforeEventId) || values.beforeEventId < 1)) {
+            throw Object.assign(new Error('A9_PAYLOAD_INVALID: invalid event cursor'), { code: 'A9_PAYLOAD_INVALID' });
+          }
+          return await runtime.browseConversation(values);
+        }
         case A9_ACTIONS.CONVERSATION_QUERY:
           exactObject(payload, ['conversationId'], 'A9_PAYLOAD_INVALID', ['before', 'limit']);
           if (request.schemaVersion < 7 || typeof payload.conversationId !== 'string' || !payload.conversationId ||

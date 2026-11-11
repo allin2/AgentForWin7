@@ -457,6 +457,92 @@ describe('A9 unified desktop workbench contract', () => {
     expect(node('composer-draft-guidance').hidden).toBe(true);
   });
 
+  it('A9-56 hides the routine ready and DPAPI notes but keeps blocks, running-draft, memory-only and failure notes visible', async () => {
+    const nodes: any = new Map();
+    const node = (id: string) => {
+      if (!nodes.has(id)) nodes.set(id, { value: '', dataset: {}, hidden: false, disabled: false, textContent: '',
+        classList: { toggle: jest.fn() }, setAttribute: jest.fn(), style: {}, scrollHeight: 20 });
+      return nodes.get(id);
+    };
+    const ready = { status: 'ready', mode: 'full_access', agentStatus: 'idle', activeConversationId: 'c1',
+      provider: { configured: true, probe: { classification: 'tool_calling' } } };
+    const context: any = { root: { win7AgentComposerController: require('../../product/renderer/a9-composer-controller') }, renderQueue: () => {},
+      state: { snapshot: ready, running: false, activeConversationId: 'c1', draftTimer: null }, el: node,
+      text: (id: string, value: string) => { node(id).textContent = value; }, a9: { saveDraft: jest.fn() }, resizeComposer: () => {},
+      SUPPORTED_MODES: new Set(['read_only', 'full_access']), activeManagedProcesses: () => [], runtimeDiagnostic: () => 'restricted' };
+    const next = (marker: string) => { const start = script.indexOf(marker); return script.slice(start, script.indexOf('\n  function ', start + marker.length) + 1); };
+    const source = script.slice(script.indexOf('  function canSubmit('), script.indexOf('  function activeManagedProcesses('))
+      + script.slice(script.indexOf('  function syncComposer('), script.indexOf('  function resizeComposer('))
+      + next('  function hydrateDraft(')
+      + script.slice(script.indexOf('  async function saveDraftNow('), script.indexOf('  function scheduleDraftSave('));
+    vm.runInNewContext(source + ';this.sync = syncComposer;this.hydrate = hydrateDraft;this.save = saveDraftNow;', context);
+    context.sync();
+    // 就绪：不再常驻“当前工作区已就绪。高影响操作…”；空文本由 CSS 收起，元素与 aria-live 保留。
+    expect(node('session-status').textContent).toBe('');
+    expect(node('session-status').dataset.tone).toBe('info');
+    expect(script).not.toContain('当前工作区已就绪。高影响操作会在执行前显示精确目标并请求批准。');
+    for (const [patch, message] of [
+      [{ provider: { configured: false } }, 'Provider 尚未配置'],
+      [{ pendingApproval: {} }, '先处理当前绑定审批'],
+      [{ pendingQuestion: {} }, '先回答或取消当前问题'],
+      [{ status: 'diagnostics' }, 'Runtime 初始化受限'],
+      [{ mode: 'needs_selection' }, '先为当前工作区明确选择'],
+    ] as Array<[any, string]>) {
+      context.state.snapshot = { ...ready, ...patch };
+      context.sync();
+      expect(node('session-status').textContent).toContain(message);
+      expect(node('session-status').dataset.tone).toBe('block');
+    }
+    context.state.snapshot = { ...ready, agentStatus: 'running' };
+    context.state.running = true;
+    context.sync();
+    expect(node('session-status').textContent).toBe('任务正在执行；可起草下一条消息，Enter 换行，结束后手动发送。');
+    expect(node('composer-draft-guidance').hidden).toBe(false);
+    // 默认对话待发送：说明首轮使用 Full Access。
+    context.state.defaultConversationPending = true;
+    context.state.workspaceOperation = false;
+    context.sync();
+    expect(node('session-status').textContent).toBe('发送首条消息后以 Full Access 创建对话；需要文件或命令工具时才创建默认目录。');
+    context.state.defaultConversationPending = false;
+    context.state.running = false;
+
+    // 草稿：DPAPI 成功不再显示；仅内存、恢复说明与失败保留。
+    context.hydrate({ activeConversationId: 'c1', draft: { text: '草稿', persistence: 'dpapi' } });
+    expect(node('draft-status').textContent).toBe('');
+    expect(node('task-prompt').value).toBe('草稿');
+    context.state.draftHydratedConversationId = null;
+    context.hydrate({ activeConversationId: 'c1', draft: { text: '', persistence: 'memory' } });
+    expect(node('draft-status').textContent).toBe('草稿仅在当前进程保留。');
+    context.state.draftHydratedConversationId = null;
+    context.hydrate({ activeConversationId: 'c1', draft: { text: '', persistence: 'memory', note: 'DPAPI 不可用，草稿仅在当前进程保留。' } });
+    expect(node('draft-status').textContent).toBe('DPAPI 不可用，草稿仅在当前进程保留。');
+    node('task-prompt').value = 'x';
+    for (const [response, message, tone] of [
+      [{ ok: true, persistence: 'dpapi' }, '', 'info'],
+      [{ ok: true, persistence: 'memory' }, '草稿仅在当前进程保留。', 'info'],
+      [{ ok: true, persistence: 'memory', note: '草稿已恢复为仅内存。' }, '草稿已恢复为仅内存。', 'info'],
+      [{ ok: false }, '草稿保存失败，当前输入仍保留，请稍后重试。', 'error'],
+    ] as Array<[any, string, string]>) {
+      context.a9.saveDraft.mockResolvedValueOnce(response);
+      await context.save();
+      expect(node('draft-status').textContent).toBe(message);
+      expect(node('draft-status').dataset.tone).toBe(tone);
+    }
+    expect(script).not.toContain('草稿已由 Windows DPAPI 为当前用户保护。');
+    // 空文本只收起间距，不用 display:none 隐藏异常；live region 保留。
+    expect(css).toContain('.status-line:empty, .draft-status:empty { min-height: 0; margin: 0; padding: 0; border: 0; }');
+    expect(css).not.toMatch(/\.status-line\[data-tone="block"\][^}]*display:\s*none/);
+    expect(css).toContain('.draft-status[data-tone="error"] { display: block; color: var(--red); }');
+    expect(html).toContain('<p id="session-status" class="status-line" aria-live="polite">');
+    expect(html).toContain('<p id="draft-status" class="draft-status" aria-live="polite"></p>');
+    // 输入框内执行目录条移除；顶部目录入口与权限标签保留。
+    expect(html).not.toContain('composer-workspace');
+    expect(css).not.toContain('.composer-workspace');
+    expect(html).toContain('id="workdir-control"');
+    expect(html).toContain('id="a9-mode-open"');
+    expect(html).toContain('<b>Enter</b> 发送 <i>·</i> <b>Shift+Enter</b> 换行');
+  });
+
   it('A9-47 reports a rejected draft save without clearing input or applying a stale acknowledgement', async () => {
     const nodes: any = { 'task-prompt': { value: 'first' }, 'draft-status': { dataset: {}, textContent: '' } };
     let finish: (value: any) => void = () => {};
@@ -783,7 +869,7 @@ describe('A9 unified desktop workbench contract', () => {
       parentNode: PaneNode | null = null;
       attrs = new Map<string, string>();
       classes = new Set<string>();
-      nodeListeners = new Map<string, Array<() => void>>();
+      nodeListeners = new Map<string, Array<(event?: any) => void>>();
       dataset: Record<string, string> = {};
       style: Record<string, string> = {};
       hidden = false;
@@ -814,12 +900,13 @@ describe('A9 unified desktop workbench contract', () => {
       appendChild(child: PaneNode) { child.parentNode = this; this.children.push(child); return child; }
       setAttribute(name: string, value: string) { this.attrs.set(name, String(value)); }
       getAttribute(name: string) { return this.attrs.has(name) ? String(this.attrs.get(name)) : null; }
-      addEventListener(type: string, handler: () => void) {
+      addEventListener(type: string, handler: (event?: any) => void) {
         const list = this.nodeListeners.get(type) || [];
         list.push(handler);
         this.nodeListeners.set(type, list);
       }
-      fire(type: string) { (this.nodeListeners.get(type) || []).forEach((h) => h()); }
+      // A9-56：可选事件对象，供 contextmenu/keydown 夹具传入坐标、按键与 preventDefault。
+      fire(type: string, event?: any) { (this.nodeListeners.get(type) || []).forEach((h) => h(event)); }
       focus() { this.attrs.set('data-focused', 'true'); documentStub.activeElement = this; }
       select() { this.attrs.set('data-selected', 'true'); }
       contains(node: PaneNode | null) {
@@ -1313,7 +1400,7 @@ describe('A9 unified desktop workbench contract', () => {
     expect(h.nodes.get('conversation-archive-count')!.textContent).toBe('1');
   });
 
-  // A9-54 §3.4 / §5 第 4 行：分组、7 天边界、“已完成”提示、按钮可用性、悬停置顶与记录查看。
+  // A9-54 §3.4 / §5 第 4 行：分组、7 天边界、“已完成”提示与记录查看；A9-56（ADR-0324）：置顶/结束/恢复改为行右键菜单。
   const DAY = 24 * 60 * 60 * 1000;
   // 收件箱自动结束重绘定时器：调用时取全局（假时钟生效时即为假定时器）；真实定时器不阻止 Jest 退出。
   function inboxTimers() {
@@ -1345,6 +1432,11 @@ describe('A9 unified desktop workbench contract', () => {
       visitConversation: method('visit', scope),
     }));
     const warn = jest.fn();
+    const rootListeners: Record<string, Array<(event?: any) => void>> = {};
+    // A9-56：右键菜单节点按 HTML 结构挂在菜单下，contains() 才能区分菜单内外的 mousedown。
+    const menuNode = el('conversation-row-menu');
+    menuNode.hidden = true;
+    ['conversation-row-menu-pin', 'conversation-row-menu-lifecycle', 'conversation-row-menu-note'].forEach((id) => menuNode.appendChild(el(id)));
     const context: any = {
       Date, document: h.document, state: { searchQuery: '' }, el,
       text: (id: string, value: unknown) => { const node = el(id); if (node) node.textContent = String(value); },
@@ -1358,6 +1450,8 @@ describe('A9 unified desktop workbench contract', () => {
           setItem: (key: string, value: string) => { storage.set(key, String(value)); },
         },
         console: { warn },
+        innerWidth: 1366, innerHeight: 768,
+        addEventListener: (type: string, handler: (event?: any) => void) => { (rootListeners[type] ||= []).push(handler); },
         ...inboxTimers(),
       },
     };
@@ -1381,7 +1475,17 @@ describe('A9 unified desktop workbench contract', () => {
     const action = (id: string, name: string) => actions(id).find((button: any) => button.dataset.action === name);
     const rowError = (id: string) => row(id).children.find((child: any) => child.className === 'conversation-action-error');
     const flush = async () => { for (let i = 0; i < 6; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
-    return { h, context, storage, calls, responses, forScope, warn, render, groups, row, actions, action, rowError, flush };
+    // A9-56：真实 <li> 上派发 contextmenu / keydown；菜单状态从产品节点读取。
+    const event = (fields: any = {}) => ({ prevented: false, preventDefault() { this.prevented = true; }, stopPropagation() {}, ...fields });
+    const openMenu = (id: string, point: any = { clientX: 300, clientY: 200 }) => { const e = event(point); row(id).fire('contextmenu', e); return e; };
+    const menu = () => el('conversation-row-menu');
+    const pinItem = () => el('conversation-row-menu-pin');
+    const lifecycleItem = () => el('conversation-row-menu-lifecycle');
+    const menuItems = () => [pinItem(), lifecycleItem()].filter((node: any) => !node.hidden).map((node: any) => node.textContent);
+    const docFire = (type: string, e: any) => (h.listeners[`document:${type}`] || []).forEach((handler) => handler(e));
+    const rootFire = (type: string, e?: any) => (rootListeners[type] || []).forEach((handler) => handler(e));
+    return { h, el, context, storage, calls, responses, forScope, warn, render, groups, row, actions, action, rowError, flush,
+      event, openMenu, menu, pinItem, lifecycleItem, menuItems, docFire, rootFire };
   }
 
   function inboxSnapshot() {
@@ -1500,30 +1604,52 @@ describe('A9 unified desktop workbench contract', () => {
     });
   });
 
-  it('A9-54 row actions: no 结束对话 on live rows, background rows use their own scope, rejection shows a Chinese reason', async () => {
+  it('A9-56 row context menu replaces hover actions: live rows cannot settle, background rows use their own scope, rejection shows a Chinese reason', async () => {
     const t = createInboxHarness();
     const { a, b, snapshot } = inboxSnapshot();
     t.context.state.inboxSettledOpen = true;
     t.render(snapshot);
     expect(t.groups()).toEqual({ 活跃: ['b1', 'a1', 'b2', 'a2'], 已结束: ['a3', 'b3'] });
-    // 运行中、待回答：只有置顶，没有“结束对话”。
-    for (const id of ['a1', 'b1']) expect(t.actions(id).map((x: any) => x.textContent)).toEqual(['置顶']);
-    expect(t.actions('a2').map((x: any) => x.textContent)).toEqual(['结束对话', '置顶']);
-    expect(t.actions('b3').map((x: any) => x.textContent)).toEqual(['恢复到活跃', '置顶']);
-    expect(t.action('a2', 'settle').getAttribute('aria-label')).toBe('结束对话：空闲');
+    // ADR-0324 替代 A9-54 §3.4 悬停入口：行内不再有快捷按钮，左键只切换。
+    for (const id of ['b1', 'a1', 'b2', 'a2', 'a3', 'b3']) expect(t.actions(id)).toEqual([]);
+    expect(script).not.toContain('conversation-row-actions');
+    expect(css).not.toContain('.conversation-row-actions');
     // 活跃组空闲行显示剩余天数；后台完成未查看显示“已完成”。
     expect(t.row('a2').children[0].textContent).toContain('3 天后结束');
     expect(t.row('a2').children[0].getAttribute('aria-label')).toContain('3 天后结束');
     expect(t.row('b2').children[0].getAttribute('aria-label')).toContain('，已完成');
-    // 操作按钮是 <li> 内行按钮的兄弟节点，不嵌套在行按钮里。
-    expect(t.row('a2').children[0].children.some((child: any) => child.className === 'conversation-row-actions')).toBe(false);
 
-    t.action('b2', 'settle').fire('click');
-    await t.flush();
-    t.action('b3', 'reopen').fire('click');
-    await t.flush();
-    t.action('a3', 'reopen').fire('click');
-    await t.flush();
+    // 运行中（当前行，禁用按钮）与待回答（后台行）：菜单可打开，“结束对话”不可用并说明原因，点击不调用后端。
+    for (const [id, status] of [['a1', '运行中'], ['b1', '待回答']]) {
+      const opened = t.openMenu(id);
+      expect(opened.prevented).toBe(true);
+      expect(t.menu().hidden).toBe(false);
+      expect(t.context.state.rowMenu.key).toBe(`${id === 'a1' ? a : b}:${id}`);
+      expect(t.menuItems()).toEqual(['置顶', '结束对话']);
+      expect(t.lifecycleItem().getAttribute('aria-disabled')).toBe('true');
+      expect(t.el('conversation-row-menu-note').textContent).toContain(status);
+      expect(t.el('conversation-row-menu-note').hidden).toBe(false);
+      t.lifecycleItem().fire('click');
+      await t.flush();
+      expect(t.menu().hidden).toBe(false);
+    }
+    expect(t.calls.filter(([name]) => name !== 'visit')).toEqual([]);
+    t.openMenu('a2');
+    expect(t.menuItems()).toEqual(['置顶', '结束对话']);
+    expect(t.lifecycleItem().getAttribute('aria-disabled')).toBe('false');
+    expect(t.lifecycleItem().getAttribute('aria-label')).toBe('结束对话：空闲');
+    expect(t.el('conversation-row-menu-note').hidden).toBe(true);
+    t.openMenu('b3');
+    expect(t.menuItems()).toEqual(['置顶', '恢复到活跃']);
+
+    // 每个动作绑定被右键行自己的 scope；不先激活或切换该行。
+    for (const [id] of [['b2'], ['b3'], ['a3']]) {
+      t.openMenu(id);
+      t.lifecycleItem().fire('click');
+      await t.flush();
+      expect(t.menu().hidden).toBe(true);
+      expect(t.context.state.rowMenu).toBeNull();
+    }
     const actionCalls = t.calls.filter(([name]) => name !== 'visit');
     expect(actionCalls).toEqual([
       ['settle', { workspaceId: b, conversationId: 'b2' }, 'b2'],
@@ -1532,42 +1658,201 @@ describe('A9 unified desktop workbench contract', () => {
     ]);
     actionCalls.forEach(([, scope, conversationId]) => expect(scope.conversationId).toBe(conversationId));
     expect(t.context.refreshSnapshot).toHaveBeenCalledTimes(3);
+    expect(t.context.activateWorkspace).not.toHaveBeenCalled();
+    expect(t.context.switchConversation).not.toHaveBeenCalled();
 
+    // 旧后端拒绝仍按原中文原因显示在被操作的行下。
     t.responses.settle = { ok: false, error: { code: 'A9_CONVERSATION_BUSY' } };
-    t.action('a2', 'settle').fire('click');
+    t.openMenu('a2');
+    t.lifecycleItem().fire('click');
     await t.flush();
     expect(t.rowError('a2').textContent).toBe('对话正在运行、待审批或待回答，暂不能结束。');
     expect(t.rowError('a2').getAttribute('role')).toBe('alert');
     t.responses.reopen = new Error('transport closed');
-    t.action('b3', 'reopen').fire('click');
+    t.openMenu('b3');
+    t.lifecycleItem().fire('click');
     await t.flush();
     expect(t.rowError('a2')).toBeUndefined();
     expect(t.rowError('b3').textContent).toBe('恢复到活跃失败，请刷新后重试。');
 
-    // 没有 snapshot.scope：当前工作区的行不显示结束、恢复，置顶仍在；后台工作区仍有自己的 scope。
+    // 左键只切换：当前工作区行走 switchConversation、后台绑定行走 activateWorkspace，都不打开菜单。
+    t.row('a2').children[0].fire('click');
+    expect(t.context.switchConversation).toHaveBeenCalledWith('a2');
+    t.row('b1').children[0].fire('click');
+    expect(t.context.activateWorkspace).toHaveBeenCalledWith({ workspaceId: b, conversationId: 'b1' });
+    expect(t.menu().hidden).toBe(true);
+
+    // 没有 snapshot.scope：当前工作区的行只有置顶；后台工作区仍有自己的 scope。
     const bare = createInboxHarness();
     bare.context.state.inboxSettledOpen = true;
     bare.render({ ...snapshot, scope: undefined, workspaces: [snapshot.workspaces[1]] });
-    expect(bare.actions('a2').map((x: any) => x.textContent)).toEqual(['置顶']);
-    expect(bare.actions('a3').map((x: any) => x.textContent)).toEqual(['置顶']);
-    expect(bare.actions('b2').map((x: any) => x.textContent)).toEqual(['结束对话', '置顶']);
+    bare.openMenu('a2');
+    expect(bare.menuItems()).toEqual(['置顶']);
+    bare.openMenu('a3');
+    expect(bare.menuItems()).toEqual(['置顶']);
+    bare.openMenu('b2');
+    expect(bare.menuItems()).toEqual(['置顶', '结束对话']);
     expect(bare.calls.filter(([name]) => name === 'visit')).toEqual([]);
   });
 
-  it('A9-54 hover pin writes a9.pinnedConversations.v1 and moves the row to the pinned group', () => {
+  it('A9-56 row menu pin writes a9.pinnedConversations.v1 for the right-clicked row and moves it to the pinned group', () => {
     const t = createInboxHarness();
     const { snapshot } = inboxSnapshot();
     t.render(snapshot);
-    t.action('b2', 'pin').fire('click');
+    t.openMenu('b2');
+    t.pinItem().fire('click');
+    expect(t.menu().hidden).toBe(true);
     expect(JSON.parse(t.storage.get('a9.pinnedConversations.v1')!)).toEqual(['b2']);
     expect(t.groups().置顶).toEqual(['b2']);
     expect(t.groups().活跃).not.toContain('b2');
-    expect(t.actions('b2').map((x: any) => x.textContent)).toEqual(['取消置顶']);
-    t.action('b2', 'pin').fire('click');
+    // 置顶行：菜单只给“取消置顶”（分组与结束/恢复语义不变）。
+    t.openMenu('b2');
+    expect(t.menuItems()).toEqual(['取消置顶']);
+    expect(t.pinItem().getAttribute('aria-label')).toBe('取消置顶：后台空闲');
+    t.pinItem().fire('click');
     expect(JSON.parse(t.storage.get('a9.pinnedConversations.v1')!)).toEqual([]);
     expect(t.groups().活跃).toContain('b2');
+    expect(t.context.activateWorkspace).not.toHaveBeenCalled();
     // “…”菜单里的置顶入口保留，写同一个键。
     expect(script).toContain("el('conversation-pin').addEventListener('click', () => { setConversationMenu(false); togglePinnedConversation(state.activeConversationId); });");
+  });
+
+  it('A9-56 row menu stays bound to the right-clicked row across refreshes, re-checks facts before acting and closes when the target leaves', async () => {
+    const t = createInboxHarness();
+    const { a, b, snapshot } = inboxSnapshot();
+    t.render(snapshot);
+    t.openMenu('b2');
+    expect(t.h.document.activeElement).toBe(t.pinItem());
+    // 500ms 刷新：同一快照、以及当前对话换成 a2，菜单都保持对 b2 的绑定，焦点不丢。
+    t.render(snapshot);
+    t.render({ ...snapshot, activeConversationId: 'a2', scope: { workspaceId: a, conversationId: 'a2' } });
+    expect(t.menu().hidden).toBe(false);
+    expect(t.context.state.rowMenu).toEqual({ key: `${b}:b2`, workspaceId: b, conversationId: 'b2' });
+    expect(t.lifecycleItem().getAttribute('aria-label')).toBe('结束对话：后台空闲');
+    expect(t.h.document.activeElement).toBe(t.pinItem());
+    // 刷新显示 b2 已开始运行：菜单就地改为不可结束。
+    const running = (value: any) => ({ ...value, workspaces: [value.workspaces[0], { ...value.workspaces[1],
+      conversations: value.workspaces[1].conversations.map((item: any) => (item.sessionId === 'b2' ? { ...item, activity: 'running' } : item)) }] });
+    t.render(running(snapshot));
+    expect(t.lifecycleItem().getAttribute('aria-disabled')).toBe('true');
+    t.render(snapshot);
+    expect(t.lifecycleItem().getAttribute('aria-disabled')).toBe('false');
+    // 菜单仍显示可结束，但点击前的最新快照已是运行中：按当前事实复核，不调用后端，只更新菜单。
+    t.context.state.snapshot = running(snapshot);
+    t.lifecycleItem().fire('click');
+    await t.flush();
+    expect(t.calls.filter(([name]) => name !== 'visit')).toEqual([]);
+    expect(t.menu().hidden).toBe(false);
+    expect(t.lifecycleItem().getAttribute('aria-disabled')).toBe('true');
+    // 目标离开驻留列表（后台工作区关闭）：刷新即关闭，旧点击不再作用于任何行。
+    t.render(snapshot);
+    t.render({ ...snapshot, workspaces: [snapshot.workspaces[0]] });
+    expect(t.menu().hidden).toBe(true);
+    expect(t.context.state.rowMenu).toBeNull();
+    t.lifecycleItem().fire('click');
+    t.pinItem().fire('click');
+    await t.flush();
+    expect(t.storage.get('a9.pinnedConversations.v1')).toBeUndefined();
+    expect(t.calls.filter(([name]) => name !== 'visit')).toEqual([]);
+    // 快照已切走（未及重绘）时点击：目标解析失败即关闭，不改绑到当前对话。
+    t.render(snapshot);
+    t.openMenu('b2');
+    t.context.state.snapshot = { ...snapshot, workspaces: [snapshot.workspaces[0]] };
+    t.lifecycleItem().fire('click');
+    await t.flush();
+    expect(t.menu().hidden).toBe(true);
+    expect(t.calls.filter(([name]) => name !== 'visit')).toEqual([]);
+  });
+
+  it('A9-56 row menu stays inside the viewport, closes on outside press, Escape, scroll and resize, and supports Shift+F10 / ContextMenu with focus return', () => {
+    const t = createInboxHarness();
+    const { snapshot } = inboxSnapshot();
+    t.render(snapshot);
+    Object.assign(t.context.root, { innerWidth: 400, innerHeight: 300 });
+    Object.assign(t.menu(), { offsetWidth: 180, offsetHeight: 76 });
+    // 靠近右下角：向左、向上翻转，留在视口内。
+    t.openMenu('a2', { clientX: 390, clientY: 290 });
+    expect(t.menu().style).toEqual(expect.objectContaining({ left: '216px', top: '214px' }));
+    t.openMenu('a2', { clientX: 20, clientY: 30 });
+    expect(t.menu().style).toEqual(expect.objectContaining({ left: '20px', top: '30px' }));
+    // 菜单内按下不关闭；外点关闭且不抢焦点。
+    t.docFire('mousedown', { target: t.pinItem() });
+    expect(t.menu().hidden).toBe(false);
+    t.docFire('mousedown', { target: t.el('conversation-search') });
+    expect(t.menu().hidden).toBe(true);
+    // 滚动（捕获阶段）：列表或其祖先滚动关闭；运行中对话流的自动滚动不关闭。窗口尺寸变化关闭。
+    t.openMenu('a2');
+    t.docFire('scroll', { target: t.el('a9-task-stream') });
+    expect(t.menu().hidden).toBe(false);
+    t.docFire('scroll', { target: t.el('conversation-list') });
+    expect(t.menu().hidden).toBe(true);
+    const rail = t.h.document.createElement('div');
+    rail.appendChild(t.el('conversation-list'));
+    t.openMenu('a2');
+    t.docFire('scroll', { target: rail });
+    expect(t.menu().hidden).toBe(true);
+    t.openMenu('a2');
+    t.docFire('scroll', { target: t.h.document });
+    expect(t.menu().hidden).toBe(true);
+    t.openMenu('a2');
+    t.rootFire('resize');
+    expect(t.menu().hidden).toBe(true);
+
+    // 键盘：Shift+F10 与菜单键在行上打开，定位到行附近；方向键循环；Escape 关闭并回到该行。
+    const button = t.row('a2').children[0];
+    button.getBoundingClientRect = () => ({ left: 12, bottom: 64 });
+    const shiftF10 = t.event({ key: 'F10', shiftKey: true });
+    t.row('a2').fire('keydown', shiftF10);
+    expect(shiftF10.prevented).toBe(true);
+    expect(t.menu().hidden).toBe(false);
+    expect(t.menu().style).toEqual(expect.objectContaining({ left: '28px', top: '60px' }));
+    expect(t.h.document.activeElement).toBe(t.pinItem());
+    const key = (name: string) => t.menu().fire('keydown', t.event({ key: name }));
+    key('ArrowDown');
+    expect(t.h.document.activeElement).toBe(t.lifecycleItem());
+    key('ArrowDown');
+    expect(t.h.document.activeElement).toBe(t.pinItem());
+    key('End');
+    expect(t.h.document.activeElement).toBe(t.lifecycleItem());
+    key('Home');
+    expect(t.h.document.activeElement).toBe(t.pinItem());
+    key('Escape');
+    expect(t.menu().hidden).toBe(true);
+    expect(t.h.document.activeElement).toBe(button);
+    // 其他按键（普通 F10、字母）不打开。
+    t.row('a2').fire('keydown', t.event({ key: 'F10' }));
+    t.row('a2').fire('keydown', t.event({ key: 'a' }));
+    expect(t.menu().hidden).toBe(true);
+    // 菜单键；中途列表重绘替换了行节点，Escape 回到同一 workspace+conversation 的新行。
+    t.row('a2').fire('keydown', t.event({ key: 'ContextMenu' }));
+    expect(t.menu().hidden).toBe(false);
+    t.render(snapshot);
+    const fresh = t.row('a2').children[0];
+    expect(fresh).not.toBe(button);
+    key('Escape');
+    expect(t.h.document.activeElement).toBe(fresh);
+    // 当前行按钮禁用：父行进入 Tab 顺序，菜单关闭后返回同一目标的新行。
+    expect(t.row('a1').getAttribute('tabindex')).toBe('0');
+    expect(t.row('a1').getAttribute('aria-label')).toBe(t.row('a1').children[0].getAttribute('aria-label'));
+    expect(t.row('a1').getAttribute('aria-haspopup')).toBe('menu');
+    expect(t.row('a1').getAttribute('aria-keyshortcuts')).toBe('Shift+F10 ContextMenu');
+    expect(t.row('a2').getAttribute('tabindex')).toBeNull();
+    t.row('a1').focus();
+    t.row('a1').fire('keydown', t.event({ key: 'F10', shiftKey: true }));
+    expect(t.menu().hidden).toBe(false);
+    t.render(snapshot);
+    key('Tab');
+    expect(t.menu().hidden).toBe(true);
+    expect(t.h.document.activeElement).toBe(t.row('a1'));
+    // 禁用行把提示同步到 <li>；CSS 让禁用行按钮不接收指针，右键才能落到 <li>。
+    expect(t.row('a1').children[0].disabled).toBe(true);
+    expect(t.row('a1').title).toBe(t.row('a1').children[0].title);
+    expect(css).toContain('.conversation-list li.conversation-item > .conversation-row:disabled { pointer-events: none; }');
+    expect(css).toMatch(/\.conversation-row-menu \{ position: fixed; z-index: calc\(var\(--z-drawer\) \+ 5\);/);
+    expect(html).toContain('<div id="conversation-row-menu" class="conversation-row-menu" role="menu" aria-label="对话操作" hidden>');
+    expect(html).toContain('role="menuitem"');
+    // 打开与动作都不新增后台请求：除记录查看外没有调用。
+    expect(t.calls.filter(([name]) => name !== 'visit')).toEqual([]);
   });
 
   it('A9-54 records a visit when a conversation is opened and when the viewed run completes; failures only leave diagnostics', async () => {
@@ -1642,9 +1927,10 @@ describe('A9 unified desktop workbench contract', () => {
     const methods = { renameWorkdir: jest.fn(), linkWorkdir: jest.fn(), openWorkdir: jest.fn() };
     const forScope = jest.fn(() => methods);
     const startDefaultConversation = jest.fn();
+    const setMode = jest.fn();
     const errors: string[] = [];
     const refreshSnapshot = jest.fn(async () => null);
-    const context: any = { state, document: h.document, el, api: { a9: { forScope, startDefaultConversation } },
+    const context: any = { state, document: h.document, el, api: { a9: { forScope, startDefaultConversation, setMode } },
       root: {}, refreshSnapshot, loadConversationEvents: jest.fn(async () => {}),
       saveDraftNow: jest.fn(async () => ({ ok: true })), syncSnapshotPolling: jest.fn(),
       syncComposer: jest.fn(), resizeComposer: jest.fn(), stopLiveTracking: jest.fn(), resetConversationEvents: jest.fn(),
@@ -1658,7 +1944,7 @@ describe('A9 unified desktop workbench contract', () => {
     };
     const source = script.slice(script.indexOf('  function workdirError('), script.indexOf('  function copyOutput('));
     vm.runInNewContext(source + ';this.workdir = { renderWorkdir, prepareDefaultConversation, submitDefaultPrompt, runWorkdirAction, openWorkdirRename, appendWorkdirBoundaryAction };', context);
-    return { h, el, state, methods, forScope, startDefaultConversation, refreshSnapshot, context, errors, ...context.workdir };
+    return { h, el, state, methods, forScope, startDefaultConversation, setMode, refreshSnapshot, context, errors, ...context.workdir };
   }
 
   it('A9-55 offers no-directory before all workspace sections and selecting it only prepares the composer', async () => {
@@ -1685,7 +1971,11 @@ describe('A9 unified desktop workbench contract', () => {
     expect(t.startDefaultConversation).not.toHaveBeenCalled();
     expect(t.el('task-prompt').value).toBe('');
     expect(t.el('a9-empty-state').hidden).toBe(true);
-    expect(t.el('a9-mode-open').hidden).toBe(true);
+    // A9-56（ADR-0324 替代 A9-55 §3.2）：发送前权限标签即显示 Full Access；创建前不可切换到其他工作区的模式。
+    expect(t.el('a9-mode-open').hidden).toBe(false);
+    expect(t.el('a9-mode-open').disabled).toBe(true);
+    expect(t.el('a9-mode-open').textContent).toBe('权限：Full Access');
+    expect(t.el('a9-mode-open').title).toContain('Full Access');
     expect(t.el('conversation-new-dialog').hidden).toBe(true);
   });
 
@@ -1708,7 +1998,10 @@ describe('A9 unified desktop workbench contract', () => {
     vm.runInNewContext(submit + ';this.send = submitPrompt;', t.context);
     await t.context.send();
     expect(t.startDefaultConversation).toHaveBeenCalledTimes(1);
-    expect(t.startDefaultConversation).toHaveBeenCalledWith('分析日志'); // 不自动传 Full Access
+    // A9-56（ADR-0324）：本入口显式传 full_access，直接提交首轮，不再发送后补选权限。
+    expect(t.startDefaultConversation).toHaveBeenCalledWith('分析日志', 'full_access');
+    expect(t.setMode).not.toHaveBeenCalled();
+    expect(t.forScope).not.toHaveBeenCalled();
     expect(t.state.defaultConversationPending).toBe(false);
     expect(t.state.snapshot.workdir).toEqual(workdir);
     expect(t.refreshSnapshot).toHaveBeenCalledTimes(1);
@@ -1756,6 +2049,30 @@ describe('A9 unified desktop workbench contract', () => {
     await pending;
     expect(t.state.snapshot.scope).toEqual(scope);
     expect(t.el('task-prompt').value).toBe('首条消息');
+  });
+
+  it('A9-56 default entry starts with full_access from a Read Only workspace without touching that workspace mode', async () => {
+    const t = createWorkdirHarness();
+    // 之前查看的是已保存 Read Only 的普通工作区。
+    t.state.snapshot = { ...t.state.snapshot, mode: 'read_only', workdir: undefined, workspaceRoot: 'C:\\只读 项目' };
+    t.el('a9-mode-open').textContent = '权限：Read Only';
+    await t.prepareDefaultConversation();
+    expect(t.state.defaultPreviousScope).toEqual({ workspaceId: 'old', conversationId: 'c' });
+    expect(t.el('a9-mode-open').textContent).toBe('权限：Full Access');
+    t.el('task-prompt').value = '只问一个问题';
+    const scope = { workspaceId: 'new', conversationId: 'new-c' };
+    t.startDefaultConversation.mockResolvedValue({ ok: true, accepted: true, scope, workdir: { path: 'C:\\我的文档\\问题_1109', origin: 'auto', created: false } });
+    await t.submitDefaultPrompt();
+    expect(t.startDefaultConversation.mock.calls).toEqual([['只问一个问题', 'full_access']]);
+    // 只读工作区既没有被 setMode，也没有任何 forScope 绑定请求；首次普通问答不创建目录（created=false 原样绑定）。
+    expect(t.setMode).not.toHaveBeenCalled();
+    expect(t.forScope).not.toHaveBeenCalled();
+    expect(t.state.snapshot.scope).toEqual(scope);
+    expect(t.state.snapshot.workdir.created).toBe(false);
+    expect(script).toContain("response = await api.a9.startDefaultConversation(prompt, DEFAULT_CONVERSATION_MODE);");
+    expect(script).toContain("const DEFAULT_CONVERSATION_MODE = 'full_access';");
+    // 常规快照渲染仍按各工作区自己的模式显示，并清掉发送前提示。
+    expect(script).toContain("modeButton.textContent = `权限：${modeLabel(snapshot.mode)}`;\n    modeButton.title = '';");
   });
 
   it('A9-55 ordinary workspace without workdir metadata hides directory management', () => {

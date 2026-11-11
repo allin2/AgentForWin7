@@ -177,7 +177,7 @@ describe('A9-32 developer and A9-43 alpha.3 batch-2 package binding', () => {
   const BATCH2 = 'A9-BATCH2-INPUTS-D013-V26-MANAGED';
   const AUTHORITY = { formal_input_lock_sha256: 'b'.repeat(64), approval_registry_commit: 'c'.repeat(40), approval_registry_sha256: 'd'.repeat(64) };
 
-  function managed(kind: 'a9-32' | 'batch2' | 'alpha4' | 'alpha5' | 'alpha6' | 'alpha7' | 'a9-31') {
+  function managed(kind: 'a9-32' | 'batch2' | 'alpha4' | 'alpha5' | 'alpha6' | 'alpha7' | 'alpha8-dev' | 'a9-31') {
     const env = fixture();
     const descriptorFile = path.join(env.productRoot, '..', 'a9-runtime.json');
     const manifestFile = path.join(env.releaseRoot, 'release-manifest.json');
@@ -188,6 +188,12 @@ describe('A9-32 developer and A9-43 alpha.3 batch-2 package binding', () => {
     descriptor.runner_helper_profile = manifest.required_native.runner_helper_profile = MANAGED;
     if (kind === 'a9-31') {
       manifest.status = 'A9_31_DEVELOPER_CHECK_NOT_WIN7_CANDIDATE';
+      manifest.external_acceptance_eligible = false;
+    } else if (kind === 'alpha8-dev') {
+      descriptor.lock_id = manifest.lock_id = 'A9-ALPHA8-DEVELOPER-INPUTS-D013-V26-MANAGED';
+      descriptor.version = manifest.version = '0.3.0-alpha.8';
+      descriptor.release_id = manifest.release_id = 'WIN7-CODING-AGENT-A9-ALPHA8';
+      manifest.status = 'A9_59_DEVELOPER_CHECK_NOT_WIN7_CANDIDATE';
       manifest.external_acceptance_eligible = false;
     } else if (kind === 'a9-32') {
       descriptor.lock_id = manifest.lock_id = A9_32;
@@ -210,6 +216,26 @@ describe('A9-32 developer and A9-43 alpha.3 batch-2 package binding', () => {
     return { ...env, descriptor, manifest, save };
   }
   const load = (productRoot: string) => loadA9PackageRuntime({ productRoot, platform: 'linux' });
+
+  it('accepts alpha.8 development identity and refuses stale versions, formal claims and unmanaged inputs', () => {
+    const env = managed('alpha8-dev');
+    try {
+      expect(load(env.productRoot)).toMatchObject({ version: '0.3.0-alpha.8', releaseId: 'WIN7-CODING-AGENT-A9-ALPHA8', runnerHelperProtocol: 3, runnerHelperProfile: MANAGED });
+    } finally { env.cleanup(); }
+    for (const mutate of [
+      (e: any) => { e.descriptor.version = e.manifest.version = '0.3.0-alpha.2'; },
+      (e: any) => { e.descriptor.release_id = e.manifest.release_id = 'WIN7-CODING-AGENT-A9-ALPHA7'; },
+      (e: any) => { e.descriptor.lock_id = e.manifest.lock_id = A9_32; },
+      (e: any) => { e.descriptor.candidate = e.manifest.candidate = 'WIN7-61'; },
+      (e: any) => { e.manifest.release_authority = { ...AUTHORITY }; },
+      (e: any) => { e.manifest.external_acceptance_eligible = true; },
+      (e: any) => { e.descriptor.runner_helper_profile = e.manifest.required_native.runner_helper_profile = 'D-013-v26-a9-trusted-shell-current-user'; },
+    ]) {
+      const crossed = managed('alpha8-dev');
+      try { mutate(crossed); crossed.save(); expect(() => load(crossed.productRoot)).toThrow(/A9_PACKAGE_/); }
+      finally { crossed.cleanup(); }
+    }
+  });
 
   it('accepts the A9-32 developer package and the formal batch-2 package, each only with its own identity', () => {
     const dev = managed('a9-32');

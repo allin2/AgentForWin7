@@ -18,6 +18,7 @@ const { serializeError } = require('./desktop-host');
 const { createDpapiCredentialVault } = require('./credential-vault');
 const { createComposerState } = require('./a9-composer-state');
 const { verifyWorkdir } = require('./a9-default-workdir');
+const { validateHistoryInput, visibleHistoryText, deliveryProjection } = require('./a9-history');
 
 function requireModule(relativeName) {
   const candidates = [
@@ -2922,6 +2923,118 @@ function createA9AgentRuntime(options) {
       ...persistence.listConversationFactPage(a9SessionId, { limit: input.limit, before: input.before }) };
   }
 
+  // ADR-0325: browse identity never replaces the execution conversation. Confirm
+  // workspace membership before using the globally unique session ID to read.
+  function browseConversation(input) {
+    if (!input || !['facts', 'events'].includes(input.kind)) {
+      throw Object.assign(new Error('A9_PAYLOAD_INVALID'), { code: 'A9_PAYLOAD_INVALID' });
+    }
+    const conversation = persistence.listConversations(canonicalWorkspace)
+      .find(item => item.sessionId === input.conversationId);
+    if (!conversation) {
+      throw Object.assign(new Error('A9_CONVERSATION_MISMATCH'), { code: 'A9_CONVERSATION_MISMATCH' });
+    }
+    const conversationId = conversation.sessionId;
+    const title = redactSecrets(conversation.title);
+    const limit = input.limit === undefined ? (input.kind === 'facts' ? 30 : 300) : input.limit;
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > (input.kind === 'facts' ? 100 : 300)) {
+      throw Object.assign(new Error('A9_PAYLOAD_INVALID'), { code: 'A9_PAYLOAD_INVALID' });
+    }
+    if (input.kind === 'facts') {
+      const page = persistence.listConversationFactPage(conversationId, { limit, before: input.before });
+      return { ok: true, conversationId, title, ...redactForProjection(page) };
+    }
+    const events = persistence.listSessionEvents(conversationId, { limit, beforeEventId: input.beforeEventId });
+    const hasMore = events.length > 0 && persistence.listSessionEvents(conversationId,
+      { limit: 1, beforeEventId: events[0].eventId }).length > 0;
+    return { ok: true, conversationId, title, events: redactForProjection(events), hasMore };
+  }
+
+  function redactHistoryText(value) {
+    return redactSecrets(value)
+      .replace(/((?:authorization|api[-_]?key|password|secret|access[-_]?token|refresh[-_]?token)["']?\s*[:=]\s*["']?)(?:bearer\s+)?[^\s,;&"'}]+/gi, '$1***redacted***');
+  }
+
+  function historyConversation(conversationId) {
+    // SQL ownership check, including archived conversations. Never activate.
+    const conversation = persistence.db.prepare('SELECT session_id,title,state FROM a9_sessions WHERE workspace_path=? AND session_id=?')
+      .get(canonicalWorkspace, conversationId);
+    if (!conversation) throw Object.assign(new Error('A9_CONVERSATION_MISMATCH'), { code: 'A9_CONVERSATION_MISMATCH' });
+    return conversation;
+  }
+
+  function searchHistory(input) {
+    validateHistoryInput('search', input);
+    const page = persistence.searchRetainedHistory(canonicalWorkspace, input,
+      (json, type) => visibleHistoryText(json, type, redactHistoryText));
+    return { ok: true, ...redactForProjection(page) };
+  }
+
+  function locateHistory(input) {
+    validateHistoryInput('locate', input);
+    historyConversation(input.conversationId);
+    const message = persistence.locateRetainedHistory(canonicalWorkspace, input,
+      (json, type) => visibleHistoryText(json, type, redactHistoryText));
+    if (!message || !message.text) throw Object.assign(new Error('A9_HISTORY_SOURCE_UNAVAILABLE'), { code: 'A9_HISTORY_SOURCE_UNAVAILABLE' });
+    return { ok: true, conversationId: input.conversationId,
+      message: redactForProjection({ ...message, source: input.source, id: input.id }) };
+  }
+
+  function deliveryChanges(turnId) {
+    // Only bounded checkpoint metadata. No workspace scan, blob/Diff reads,
+    // external-baseline reconciliation, cache restore, or undo authorization.
+    let fd;
+    try {
+      if (!/^[a-zA-Z0-9._-]{1,128}$/.test(turnId)) return { evidence: 'UNKNOWN', diagnostic: 'A9_CHECKPOINT_ID_UNSUPPORTED', files: [] };
+      const recovery = workspaceServiceForState().getCheckpointManager().getRecoveryRoot();
+      const parent = path.join(recovery, 'checkpoints');
+      const target = path.join(parent, `${turnId}.json`);
+      const expectedParent = path.join(fs.realpathSync(canonicalWorkspace), '.agent_recovery', 'checkpoints');
+      if (path.relative(expectedParent, fs.realpathSync(parent)) !== '' || fs.lstatSync(target).isSymbolicLink())
+        throw Object.assign(new Error('unsafe checkpoint metadata'), { code: 'A9_CHECKPOINT_PATH_INVALID' });
+      fd = fs.openSync(target, 'r');
+      const stat = fs.fstatSync(fd);
+      if (!stat.isFile() || stat.size > 2 * 1024 * 1024) throw Object.assign(new Error('checkpoint metadata limit'), { code: 'A9_CHECKPOINT_METADATA_LIMIT' });
+      const bytes = Buffer.alloc(stat.size + 1);
+      const count = fs.readSync(fd, bytes, 0, bytes.length, 0);
+      if (count !== stat.size) throw Object.assign(new Error('checkpoint changed'), { code: 'A9_CHECKPOINT_METADATA_CHANGED' });
+      const data = JSON.parse(bytes.subarray(0, count).toString('utf8'));
+      if (data.schemaVersion !== 4 || data.turnId !== turnId || !data.changes || Array.isArray(data.changes)
+        || typeof data.changes !== 'object' || !data.unrecoverable || typeof data.unrecoverable !== 'object' || Array.isArray(data.unrecoverable))
+        throw Object.assign(new Error('invalid checkpoint metadata'), { code: 'A9_CHECKPOINT_METADATA_INVALID' });
+      const files = [], keys = Object.keys(data.changes), unrecoverable = Object.keys(data.unrecoverable);
+      for (const key of keys.slice(0, 50)) {
+        const entry = data.changes[key];
+        if (!entry || entry.filePath !== key || !['create', 'modify', 'delete'].includes(entry.action))
+          throw Object.assign(new Error('invalid checkpoint change'), { code: 'A9_CHECKPOINT_METADATA_INVALID' });
+        files.push({ path: redactHistoryText(key).slice(0, 1024), action: entry.action, undone: Boolean(entry.undoAppliedAt), textTruncated: key.length > 1024 });
+      }
+      for (const key of unrecoverable.slice(0, Math.max(0, 50 - files.length))) {
+        const entry = data.unrecoverable[key];
+        files.push({ path: redactHistoryText(String(entry.path || key)).slice(0, 1024), action: String(entry.kind || 'UNKNOWN').slice(0, 40),
+          warning: redactHistoryText(String(entry.reason || '无法撤销')).slice(0, 500),
+          textTruncated: String(entry.path || key).length > 1024 || String(entry.reason || '').length > 500 });
+      }
+      return { evidence: 'checkpoint_metadata', files, total: keys.length + unrecoverable.length,
+        remaining: keys.length + unrecoverable.length - files.length,
+        incomplete: Boolean(data.externalBaseline && data.externalBaseline.collectionStatus !== 'complete') };
+    } catch (error) {
+      return { evidence: 'UNKNOWN', files: [], diagnostic: error.code === 'ENOENT' ? 'A9_CHECKPOINT_EVIDENCE_UNAVAILABLE'
+        : /^A9_[A-Z_]+$/.test(error.code || '') ? error.code : 'A9_CHECKPOINT_METADATA_INVALID' };
+    } finally { if (fd !== undefined) fs.closeSync(fd); }
+  }
+
+  function getDelivery(input) {
+    validateHistoryInput('delivery', input);
+    historyConversation(input.conversationId);
+    const facts = persistence.getTurnDeliveryFacts(input.conversationId, input.turnId);
+    if (!facts) throw Object.assign(new Error('A9_HISTORY_SOURCE_UNAVAILABLE'), { code: 'A9_HISTORY_SOURCE_UNAVAILABLE' });
+    const card = deliveryProjection({ ...facts, conversationId: input.conversationId }, redactHistoryText);
+    return { ok: true, conversationId: input.conversationId,
+      card: { ...card, ...(input.conversationId === a9SessionId && activeLifecycle && activeLifecycle.turnId === input.turnId
+        ? { liveOutcome: agentStatus } : {}), changes: deliveryChanges(input.turnId) } };
+  }
+
   function workspaceServiceForState() {
     return loopWorkspaceService || standaloneWorkspaceService;
   }
@@ -3215,6 +3328,10 @@ function createA9AgentRuntime(options) {
     listCheckpoints,
     queryEvents,
     queryConversation,
+    browseConversation,
+    searchHistory,
+    locateHistory,
+    getDelivery,
     undoTurn,
     undoFile,
     getDiff,
@@ -3348,6 +3465,10 @@ function createSqliteUnavailableRuntime(reason) {
     listCheckpoints() { return { ok: false, error: { code: 'ELECTRON_SQLITE_UNAVAILABLE' } }; },
     queryEvents() { return { ok: false, error: { code: 'ELECTRON_SQLITE_UNAVAILABLE' } }; },
     queryConversation() { return { ok: false, error: { code: 'ELECTRON_SQLITE_UNAVAILABLE' } }; },
+    browseConversation() { return { ok: false, error: { code: 'ELECTRON_SQLITE_UNAVAILABLE' } }; },
+    searchHistory() { return { ok: false, error: { code: 'ELECTRON_SQLITE_UNAVAILABLE' } }; },
+    locateHistory() { return { ok: false, error: { code: 'ELECTRON_SQLITE_UNAVAILABLE' } }; },
+    getDelivery() { return { ok: false, error: { code: 'ELECTRON_SQLITE_UNAVAILABLE' } }; },
     readWorkspaceFile() { return { ok: false, error: { code: 'ELECTRON_SQLITE_UNAVAILABLE' } }; },
     previewImage() { return { ok: false, error: { code: 'ELECTRON_SQLITE_UNAVAILABLE' } }; },
     undoTurn() { throw new Error('ELECTRON_SQLITE_UNAVAILABLE'); },
@@ -3401,6 +3522,10 @@ function createDiagnosticsRuntime(outcome) {
     listCheckpoints() { return { ok: false, error: { code: 'A9_DIAGNOSTICS_MODE' } }; },
     queryEvents() { return { ok: false, error: { code: 'A9_DIAGNOSTICS_MODE' } }; },
     queryConversation() { return { ok: false, error: { code: 'A9_DIAGNOSTICS_MODE' } }; },
+    browseConversation() { return { ok: false, error: { code: 'A9_DIAGNOSTICS_MODE' } }; },
+    searchHistory() { return { ok: false, error: { code: 'A9_DIAGNOSTICS_MODE' } }; },
+    locateHistory() { return { ok: false, error: { code: 'A9_DIAGNOSTICS_MODE' } }; },
+    getDelivery() { return { ok: false, error: { code: 'A9_DIAGNOSTICS_MODE' } }; },
     readWorkspaceFile() { return { ok: false, error: { code: 'A9_DIAGNOSTICS_MODE' } }; },
     previewImage() { return { ok: false, error: { code: 'A9_DIAGNOSTICS_MODE' } }; },
     undoTurn() { throw new Error('A9_DIAGNOSTICS_MODE'); },

@@ -6044,6 +6044,28 @@ function a932DeveloperFixture(root,repositoryRoot){
   const inputs=v26DeveloperFixture(root,repositoryRoot,true);const lock=JSON.parse(fs.readFileSync(inputs.lockPath));
   lock.lock_id='A9-32-DEVELOPER-INPUTS-D013-V26-MANAGED';lock.provenance.task='A9-32';writeJson(inputs.lockPath,lock);return {...inputs,lock};
 }
+test('alpha.8 developer assembly stamps one identity and refuses stale lock identity and formal claims',()=>{
+  const root=tempRoot('a9-alpha8-developer-TEST_ONLY-'),repositoryRoot=cleanSourceFixture(root),inputs=a932DeveloperFixture(root,repositoryRoot);
+  const lock=JSON.parse(JSON.stringify(inputs.lock));
+  Object.assign(lock,{lock_id:'A9-ALPHA8-DEVELOPER-INPUTS-D013-V26-MANAGED',release_id:'WIN7-CODING-AGENT-A9-ALPHA8',version:'0.3.0-alpha.8'});
+  lock.provenance.task='A9-59';writeJson(inputs.lockPath,lock);
+  const built=buildA9ProductCandidate({repositoryRoot,...inputs,outputRoot:path.join(root,'alpha8')});
+  assert.equal(built.manifest.status,'A9_59_DEVELOPER_CHECK_NOT_WIN7_CANDIDATE');
+  assert.equal(built.manifest.version,lock.version);assert.equal(built.manifest.release_id,lock.release_id);
+  assert.equal(built.manifest.lock_id,lock.lock_id);assert.equal(built.manifest.external_acceptance_eligible,false);
+  assert.equal(built.manifest.candidate,undefined);assert.equal(built.manifest.release_authority,undefined);
+  const app=path.join(built.stage,'resources/app');
+  const pkg=JSON.parse(fs.readFileSync(path.join(app,'package.json')));
+  const runtime=JSON.parse(fs.readFileSync(path.join(app,'a9-runtime.json')));
+  assert.equal(pkg.name,'win7-coding-agent-a9-alpha8-developer');assert.equal(pkg.version,lock.version);
+  assert.equal(runtime.version,lock.version);assert.equal(runtime.release_id,lock.release_id);assert.equal(runtime.lock_id,lock.lock_id);
+  assert.ok(fs.existsSync(path.join(built.stage,'A9_59_DEVELOPER_CHECK.json')));
+  assert.equal(fs.existsSync(path.join(built.stage,'A9_32_DEVELOPER_CHECK.json')),false);
+  for(const mutate of [v=>{v.version='0.3.0-alpha.2'},v=>{v.release_id='WIN7-CODING-AGENT-A9-ALPHA7'},v=>{v.provenance.task='A9-32'},v=>{v.provenance.development_only=false},v=>{v.gates.win7='PASS'}]){
+    const changed=JSON.parse(JSON.stringify(lock));mutate(changed);writeJson(inputs.lockPath,changed);
+    assert.throws(()=>buildA9ProductCandidate({repositoryRoot,...inputs,outputRoot:path.join(root,'not-written')}),/A9_V26_/);
+  }
+});
 test('A9-32 developer package is its own noncandidate profile with reproducible closure and no validation suite',()=>{
   const root=tempRoot('a9-32-developer-TEST_ONLY-'), repositoryRoot=cleanSourceFixture(root), inputs=a932DeveloperFixture(root,repositoryRoot);
   const first=buildA9ProductCandidate({repositoryRoot,...inputs,outputRoot:path.join(root,'first')});

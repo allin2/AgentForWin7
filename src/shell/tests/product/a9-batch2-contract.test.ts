@@ -3027,6 +3027,10 @@ describe('A9-33 batch-2 smoke pieces', () => {
         // A9-52 inbox helpers are outside this slice; this test only exercises the new-conversation control.
         inboxConversations: () => [], classifyInbox: (items: any[]) => items, inboxRank: () => 0,
         syncInboxVisit: () => undefined, scheduleInboxSettleRedraw: () => undefined,
+        // A9-56 row context menu re-check is also outside this slice; the control under test does not open it.
+        syncRowMenu: () => undefined,
+        // A9-57：目录重绘会读取当前焦点以便回到同一行；此桩没有焦点。
+        document: { activeElement: null },
         pathName: String, readPinnedConversations: () => new Set() };
       vm.runInNewContext(`${slice(rendererSource, 'function renderConversationDirectory(snapshot)', '  function hydrateDraft(snapshot)')}\nthis.render = renderConversationDirectory;`, box);
       const render = (stale = false) => box.render({ conversations: [{ sessionId: activeId, state: 'active' }], activeConversationId: activeId,

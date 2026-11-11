@@ -33,6 +33,11 @@ const repositoryRoot = path.resolve(scriptDirectory, '..', '..');
 const RUNTIME_MODULES = ['core', 'gateway', 'git-adapter', 'runner', 'shell', 'state', 'workspace'];
 
 const RELEASE_PROFILES = {
+  'A9-ALPHA8-DEVELOPER-INPUTS-D013-V26-MANAGED': {
+    task: 'A9-59', candidate: 'A9-59-DEVELOPER', developmentOnly: true,
+    releaseId: 'WIN7-CODING-AGENT-A9-ALPHA8', version: '0.3.0-alpha.8',
+    lockFile: 'a9-alpha8-dev-input-lock.json', kitFile: 'A9_59_DEVELOPER_CHECK.json',
+  },
   'A9-ALPHA7-INPUTS-D013-V26-MANAGED': {
     task: 'A9-53', candidate: 'WIN7-60', candidateTentative: true, batch2: true,
     releaseId: 'WIN7-CODING-AGENT-A9-ALPHA7', version: '0.3.0-alpha.7',
@@ -310,8 +315,9 @@ function manifestStatus(profile) {
 // 协议 v3 流式 helper 的包：A9-30/31/32 开发包与正式 batch2 候选。
 function usesStreamingProtocol(profile) { return Boolean(profile.developmentOnly || profile.batch2); }
 // 新 Profile 在描述符与 manifest 中写入锁身份，运行时据此区分开发包与正式 batch2；旧 Profile 的字节不变。
-function stampsLockIdentity(profile) { return profile.task === 'A9-32' || Boolean(profile.batch2); }
+function stampsLockIdentity(profile) { return profile.task === 'A9-32' || profile.task === 'A9-59' || Boolean(profile.batch2); }
 function developerCases(profile) {
+  if (profile.task === 'A9-59') return ['HISTORY-PAGING', 'DELIVERY-METADATA', 'CHAT-ENTRY', 'BROWSE-ISOLATION', 'RESTART-NO-REPLAY'];
   return profile.task === 'A9-32' ? ['CONT-01', 'CONT-02', 'CONT-03'] : ['S01', 'S02', 'S03', 'S04', 'S05', 'S06'];
 }
 function helperDeliveryNote(profile) {
@@ -699,7 +705,7 @@ export function buildA9ProductCandidate(options) {
       : licenseInventory(lock);
     fs.writeFileSync(path.join(stage, 'THIRD_PARTY_LICENSES.md'), licenses, 'utf8');
     fs.writeFileSync(path.join(stage, 'INSTALLATION.md'), profile.developmentOnly
-      ? '# ' + profile.task + ' developer check package\n\nOffline Windows x64 / Electron 22 / protocol v3. Extract to a new directory and use an isolated test data root. This package has no formal candidate identity or authority. Win7, Alpha 2 and RC are NOT_PERFORMED.\n'
+      ? '# ' + profile.task + ' developer check package\n\nOffline Windows x64 / Electron 22 / protocol v3. Extract to a new directory and use an isolated test data root. This package has no formal candidate identity or authority. Win7, Alpha ' + (profile.version ? profile.version.split('alpha.')[1] : '2') + ' and RC are NOT_PERFORMED.\n'
       : profile.batch2 ? batch2InstallationGuide(lock, profile) : installationGuide(lock), 'utf8');
     fs.copyFileSync(lockPath, path.join(stage, profile.lockFile));
     if (profile.developmentOnly) {
@@ -936,6 +942,7 @@ function batch2InstallationGuide(lock, profile) {
 }
 
 export function packageApplicationName(profile) {
+  if (profile.task === 'A9-59') return 'win7-coding-agent-a9-alpha8-developer';
   return profile.developmentOnly ? 'win7-coding-agent-a9-alpha2-developer'
     : profile.batch2 ? `win7-coding-agent-a9-alpha${profile.version.split('alpha.')[1]}` : 'win7-coding-agent-a9-alpha1';
 }
@@ -2464,7 +2471,7 @@ function scanSensitivePayload(stage) {
 }
 
 export function validateA9Lock(lock) {
-  if (['A9-30-DEVELOPER-INPUTS-D013-V26','A9-31-DEVELOPER-INPUTS-D013-V26-MANAGED','A9-32-DEVELOPER-INPUTS-D013-V26-MANAGED'].includes(lock?.lock_id)) return validateV26DeveloperLock(lock);
+  if (['A9-30-DEVELOPER-INPUTS-D013-V26','A9-31-DEVELOPER-INPUTS-D013-V26-MANAGED','A9-32-DEVELOPER-INPUTS-D013-V26-MANAGED','A9-ALPHA8-DEVELOPER-INPUTS-D013-V26-MANAGED'].includes(lock?.lock_id)) return validateV26DeveloperLock(lock);
   if (RELEASE_PROFILES[lock?.lock_id]?.batch2) return validateBatch2Lock(lock);
   const profile = lock && RELEASE_PROFILES[lock.lock_id];
   if (!profile || lock.schema_version !== 1
@@ -2672,9 +2679,10 @@ function parseArguments(argv) {
 
 
 function validateV26DeveloperLock(lock) {
-  const managed = ['A9-31-DEVELOPER-INPUTS-D013-V26-MANAGED', 'A9-32-DEVELOPER-INPUTS-D013-V26-MANAGED'].includes(lock.lock_id);
-  const expectedTask = lock.lock_id === 'A9-32-DEVELOPER-INPUTS-D013-V26-MANAGED' ? 'A9-32' : managed ? 'A9-31' : 'A9-30';
-  if (lock.release_id !== 'WIN7-CODING-AGENT-A9-ALPHA2' || lock.version !== '0.3.0-alpha.2'
+  const alpha8 = lock.lock_id === 'A9-ALPHA8-DEVELOPER-INPUTS-D013-V26-MANAGED';
+  const managed = alpha8 || ['A9-31-DEVELOPER-INPUTS-D013-V26-MANAGED', 'A9-32-DEVELOPER-INPUTS-D013-V26-MANAGED'].includes(lock.lock_id);
+  const expectedTask = alpha8 ? 'A9-59' : lock.lock_id === 'A9-32-DEVELOPER-INPUTS-D013-V26-MANAGED' ? 'A9-32' : managed ? 'A9-31' : 'A9-30';
+  if (lock.release_id !== (alpha8 ? 'WIN7-CODING-AGENT-A9-ALPHA8' : 'WIN7-CODING-AGENT-A9-ALPHA2') || lock.version !== (alpha8 ? '0.3.0-alpha.8' : '0.3.0-alpha.2')
     || lock.provenance?.task !== expectedTask || lock.provenance?.development_only !== true
     || lock.gates?.win10 !== 'PASS_D013_V26_RETURN_REVIEWED' || lock.gates?.win7 !== 'NOT_PERFORMED' || lock.gates?.alpha !== 'NOT_PERFORMED') {
     throw new Error('A9_V26_DEVELOPER_INPUT_LOCK_INVALID');

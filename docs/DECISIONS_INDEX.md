@@ -325,3 +325,7 @@
 | ADR-0321 | A9-54 收件箱“已结束”状态的保存格式与接口 | Accepted |
 | ADR-0322 | A9-54 收件箱动作可指向驻留的后台工作区 | Accepted |
 | ADR-0323 | A9-55 不选目录的对话按需创建默认工作目录 | Accepted |
+| ADR-0324 | A9-56 新默认对话使用Full Access与行右键操作 | Accepted |
+| ADR-0325 | A9-57 浏览身份与执行身份分离 | Accepted |
+| ADR-0326 | A9-58 只读历史搜索、稳定定位与事实交付卡片 | Accepted |
+| ADR-0327 | A9-59 alpha.8 开发装配身份与保留历史兼容修复 | Accepted |

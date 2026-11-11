@@ -160,7 +160,8 @@ async function child() {
               // One group head stays visible above the rows; each row also has a 2px list-item margin.
               rowCapacity: rowHeight ? Math.floor((list.clientHeight - 8 - (list.querySelector('.conversation-group-head, .conversation-group-toggle')?.getBoundingClientRect().height || 0)) / (rowHeight + 2)) : 0,
               filterHit: hit(filter), newHit: hit(add), rowsHit: rows.every(row => { row.scrollIntoView({ block: 'nearest' }); return hit(row); }),
-              composerWorkspace: !document.getElementById('composer-workspace').hidden && document.getElementById('composer-workspace-path').textContent };
+              // A9-56 (ADR-0324): the in-composer directory bar is removed; the header entry carries the directory.
+              composerWorkspace: !document.getElementById('composer-workspace') };
           });
           assert(detail.filterHit && detail.newHit && detail.rowsHit && detail.scrollWidth <= width && detail.composerWorkspace, JSON.stringify(detail));
           // U02 budget: at least four conversation rows fit at 1366x768 and at the 125% DPI equivalent 1079x540.

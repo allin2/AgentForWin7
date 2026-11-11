@@ -69,6 +69,7 @@ function loadA9PackageRuntime(options) {
 const STREAMING_PROFILE = 'D-013-v26-a9-trusted-shell-current-user';
 const MANAGED_PROFILE = 'D-013-v26-managed-a9-trusted-shell-current-user';
 const A9_32_LOCK_ID = 'A9-32-DEVELOPER-INPUTS-D013-V26-MANAGED';
+const ALPHA8_DEV_LOCK_ID = 'A9-ALPHA8-DEVELOPER-INPUTS-D013-V26-MANAGED';
 // Formal batch-2 locks and the exact release identity each one may carry (alpha.3 WIN7-56, alpha.4 WIN7-57).
 const FORMAL_IDENTITIES = Object.freeze({
   'A9-ALPHA7-INPUTS-D013-V26-MANAGED': Object.freeze({ version: '0.3.0-alpha.7', releaseId: 'WIN7-CODING-AGENT-A9-ALPHA7', candidate: 'WIN7-60' }),
@@ -99,7 +100,11 @@ function manifestContract(descriptor) {
     if (hasCandidate) throw new Error('A9_PACKAGE_RUNTIME_CONFIG_INVALID');
     return { kind: 'DEVELOPER', version: '0.3.0-alpha.2', status: managed ? 'A9_31_DEVELOPER_CHECK_NOT_WIN7_CANDIDATE' : 'A9_30_DEVELOPER_CHECK_NOT_WIN7_CANDIDATE', lockId: undefined };
   }
-  if (!managed || (lockId !== A9_32_LOCK_ID && !formalIdentity(lockId))) throw new Error('A9_PACKAGE_RUNTIME_CONFIG_INVALID');
+  if (!managed || (lockId !== A9_32_LOCK_ID && lockId !== ALPHA8_DEV_LOCK_ID && !formalIdentity(lockId))) throw new Error('A9_PACKAGE_RUNTIME_CONFIG_INVALID');
+  if (lockId === ALPHA8_DEV_LOCK_ID) {
+    if (hasCandidate || descriptor.release_id !== 'WIN7-CODING-AGENT-A9-ALPHA8') throw new Error('A9_PACKAGE_RUNTIME_CONFIG_INVALID');
+    return { kind: 'DEVELOPER', version: '0.3.0-alpha.8', status: 'A9_59_DEVELOPER_CHECK_NOT_WIN7_CANDIDATE', lockId };
+  }
   if (lockId === A9_32_LOCK_ID) {
     if (hasCandidate) throw new Error('A9_PACKAGE_RUNTIME_CONFIG_INVALID');
     return { kind: 'DEVELOPER', version: '0.3.0-alpha.2', status: 'A9_32_DEVELOPER_CHECK_NOT_WIN7_CANDIDATE', lockId };

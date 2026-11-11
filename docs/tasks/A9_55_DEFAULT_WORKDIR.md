@@ -6,7 +6,7 @@ Task Type: PRODUCT_EXPERIENCE
 Target Branch: main（实现与修复分支保留在私有 staging）
 Source Baseline: 0e78202398159b27803270a8b0e80ad09713cd82（A9-54 尖端，staging box/a9-54-fe2）
 Phase-Gate: A9_55_DEVELOPER_VERIFIED
-Win7-Validation: NOT_PERFORMED
+Win7-Validation: DEV_CHANNEL
 Decision: ADR-0323（Accepted）
 Revision: r1（2026-11-09 UTC，负责人回复“甲、批准”批准原稿）
 ```
@@ -218,3 +218,31 @@ Mac 直接证据为定向测试 101/101 和 Electron 22 真实产品交互十项
 阶段为：重新准入和同ZIP部署 → 普通问答不建目录/首文件工具创建/目录管理与普通工作区切换 → 正常退出和同profile恢复、A9-54受影响侧栏 → 原始证据回收与真实收尾。外部模型0次；回环夹具每次最多40、窗口总计80；最多2次开发尝试，总计60分钟内，结束前10分钟停止新场景。身份、完整性、安全、审计或未知生命周期立即停止。r2至2026-11-28的截止及其他边界保持，正式门A/B、发布和历史删除未授权。
 
 准确提案为本机 `outputs/a9-55-wp/WIN7_PLAN.md` 与 `WIN7_PROPOSAL.json`。本次仅提交可审阅方案；窗口及两项例外未确认，Win7产品验证保持 NOT_PERFORMED。
+
+### 9.6 Win7 开发窗口及两项例外已批准（2026-11-09 UTC）
+
+负责人对 §9.5 与本机 WIN7_PLAN.md 的准确提案回复“批准按计划执行”。执行代理记录于本机 `outputs/a9-55-wp/win7-r1/OWNER_APPROVAL.json`。本次从 main 使用 r2 通道，run `3fd90770-47ee-4235-a0b1-54617c45447b`，仅复用 inactive holder `a946lanrx`。首次目标写入起算60分钟，最后10分钟仅收尾。仅本run、该holder、该窗口将开发根上限设为23000000000字节，最低剩余50000000000字节。
+
+产品仅可在 `C:\Users\agent\Documents\Win7CodingAgent` 下创建、写入和重命名前缀 `A9553fd90770` 的新测试目录。现有内容保留，新目录及标记文件在关联后保留。系统Documents、SID或规范父路径不符时停止。源 `4c9adbcc…`、ZIP `6f3578f4…` 与manifest `2fce50f1…` 保持。最多两次开发尝试、外部模型0次、回环每次40和窗口80次上限保持。
+
+本次批准不延长r2、不授权接管锁、历史删除、系统配置、正式门A/B或发布。目标只读复核通过，窗口尚未开始；产品执行及收尾结果由后继记录给出。
+
+负责人后继回复“批准再执行一次，沿用原截止时间”，仅将本窗口最多尝试数从2增至3。UTC 13:40:07.788停止新场景、13:50:07.788截止，其他容量、目录、请求与安全边界保持。前两次夹具失败原件及已创建目录保留。准确修正版和批准绑定在本机 `outputs/a9-55-wp/win7-r1/EXTRA_ATTEMPT_APPROVAL.json`。
+
+### 9.7 Win7 开发级运行完成（2026-11-09 UTC）
+
+本轮结果为 `DEV_CHANNEL` PASS，不是正式 Win7 PASS。源码 `4c9adbcc…`、ZIP `6f3578f4…`、manifest `2fce50f1…` 保持；本地 main HEAD `1a25d593…` 未变。目标 DCCS-CHAIZL-PC / Win7 SP1 x64 build7601，普通 agent / Session1，SID尾1001、中等完整性8192、非提升。run `3fd90770-47ee-4235-a0b1-54617c45447b`。
+
+窗口UTC12:50:07.788开始，13:26:39.724收尾，实际36.53分钟。负责人另批准第三次尝试，原60分钟截止、23GB临时上限、最低剩余50GB及Documents前缀范围保持。外部模型0次；三次合计14次回环请求，未超过80次。窗口已主动结束，例外不延续。
+
+第三次由候选外锁定Electron加载新包真实main/preload/IPC/Renderer/SQLite。首次进程10组、同profile恢复6组通过：普通工作区隐藏目录菜单；默认草稿不建目录；首发选择权限并保留输入；普通问答不建子目录；首文件工具在系统Documents创建；重命名保留标记并替换scope；目录外读取以blocked及WORKSPACE_BOUNDARY_VIOLATION拒绝、保留关联入口；默认徽标；后台完成提示及查看后清除；重启恢复同对话/路径/文件且零模型重放；关联取消与成功保留原文件；手动结束/恢复；普通工作区真实激活；新run夹具中的目录身份模块拒绝。包内3261文件在运行前后逐项SHA/大小一致。
+
+前两次失败永久保留。首次夹具只等待completed，目录外拒绝实际返回blocked，前7组已通过。第二次夹具把首轮按计划保留的目录误认为草稿新建副作用，尚未发送业务消息即停止。两次均已正常退出、清理临时沙箱，后检零进程/任务、锁inactive。修正版第三次按目录基线差异检查，旧目录允许保留，新增反例仍拒绝；没有弱化产品边界。
+
+最终SQLite integrity=ok，活动task/turn/run均0；测试临时目录0；进程/任务0，锁inactive，解包状态已知。开发根21881579176字节，剩余856536543232字节。11个回收文件再次复算大小/SHA一致。保留 `C:\Users\agent\Documents\Win7CodingAgent\A9553fd90770_renamed` 与 `A9553fd90770_r3`；各有25字节note.txt，SHA均 `cd2dedda…`，首轮标记未变。
+
+证据边界：目录选择器返回值是受控夹具，真实系统选择器NOT_PERFORMED；身份变化反例直接运行包内模块，未替换真实Documents目录。手动结束/恢复经真实目标绑定IPC检查，后台完成提示及默认徽标有真实Renderer证据。原生125%DPI、同包Win10、外部模型、正式门A/B与发布均NOT_PERFORMED。原生字节未改，不重做原生构建；本轮直接验证包身份、原生闭包与实际加载。
+
+公开CI `42610841958` 的macOS日常集合后来FAIL，原始失败保留。四例共同根因是测试临时根的 `/var` 与 `/private/var` 别名。执行代理只改 `src/shell/tests/product/a9-default-workdir.test.ts` 一行，创建后realpath规范化；先重编7模块，再在 `/var` 条件复现4 FAIL/12 PASS，修复后16/16 PASS，新增临时残留0。更早未重编State的本地诊断失败单独保留，不当作产品回归。该修复未改产品字节，未重建ZIP，未提交或推送。
+
+本机摘要 `outputs/a9-55-wp/win7-r1/RESULT.json`；三次原始运行在同目录TARGET_RUN.json、ATTEMPT2.json、ATTEMPT3.json，原始回收在 `outputs/win7-dev/a9-55-3fd90770-attempt3/`。其他已有dirty文件内容保持，无暂存、提交、推送或新发布。
