@@ -231,7 +231,9 @@ function createA9ProductRequestHandler(options) {
         // Re-run the original resolver, including inbox/link/restricted scopes,
         // and never dispatch on a replacement Runtime with the same scope IDs.
         if (registry) {
-          if (registry.assertRuntimeAvailable) registry.assertRuntimeAvailable(runtime);
+          // Unscoped status polling stays readable while Provider configuration is in flight.
+          // Scoped mutations still pass the original execution gate above.
+          if (request.action !== A9_ACTIONS.SNAPSHOT_GET && registry.assertRuntimeAvailable) registry.assertRuntimeAvailable(runtime);
           if (resolveRuntime() !== runtime) throw Object.assign(new Error('A9_SCOPE_STALE'), { code: 'A9_SCOPE_STALE' });
         }
         if (runtime.assertAvailable) runtime.assertAvailable();

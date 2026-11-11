@@ -192,6 +192,24 @@ describe('A9-61 review wait boundaries', () => {
     } finally { ready.release(); provider.release(); if (configuring) await configuring; await f.close(); }
   });
 
+  it('F1 keeps unscoped snapshots readable during Provider configuration while rejecting mutations', async () => {
+    const f = environment(); const provider = deferred();
+    let configuring: Promise<any> | undefined;
+    try {
+      const entry = f.registry.activate(f.a), runtime = entry.runtime;
+      await runtime.whenReady();
+      const configure = runtime.configureProvider;
+      runtime.configureProvider = async (input: any) => { await provider.promise; return configure(input); };
+      configuring = f.registry.configureProvider(runtime, { baseUrl: 'https://fixture.invalid', model: 'fixture', skipProbe: true });
+      const handler = createA9ProductRequestHandler({ workspaceRegistry: f.registry,
+        getA9Runtime: async () => runtime, isValidRendererSender: () => true });
+      const response = await handler({}, { schemaVersion: 9, action: 'a9.snapshot.get', payload: {} });
+      expect(response).toMatchObject({ ok: true, snapshot: { status: 'ready', activeConversationId: f.scope().conversationId } });
+      expect(await f.call('a9.draft.save', { text: 'must stay blocked' })).toMatchObject({ ok: false, error: { code: 'A9_APPLICATION_BUSY' } });
+      expect(runtime.getSnapshot().draft.text).toBe('');
+    } finally { provider.release(); if (configuring) await configuring; await f.close(); }
+  });
+
   it('F1 preserves the inbox scope of an inactive conversation in a resident workspace', async () => {
     const f = environment(); const gate = deferred();
     try {
