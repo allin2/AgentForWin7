@@ -18,7 +18,7 @@ function deferred() {
 
 /** Real services and SQLite. Only readiness/validation scheduling is held by tests. */
 function environment() {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-61-review-'));
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'a9-61-review-')));
   const a = path.join(root, 'A 中文'), b = path.join(root, 'B space');
   fs.mkdirSync(a); fs.mkdirSync(b);
   for (const directory of [a, b]) fs.mkdirSync(path.join(directory, '.git'));
