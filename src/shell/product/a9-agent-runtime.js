@@ -372,6 +372,32 @@ function createA9AgentRuntime(options) {
   // F5：当前 Turn 的 task/turn/run 生命周期句柄。
   let activeLifecycle = null;
   let shutdownPromise = null;
+  let shutdownRequested = false;
+  const pendingStateOperations = new Set();
+  function assertAvailable() {
+    if (shutdownRequested || workspaceLockReleased) {
+      throw Object.assign(new Error('A9_RUNTIME_SHUTDOWN: 工作区正在关闭或已关闭'), { code: 'A9_RUNTIME_SHUTDOWN' });
+    }
+  }
+  function assertOperationScope(sessionId) {
+    assertAvailable();
+    if (sessionId !== a9SessionId) throw Object.assign(new Error('A9_SCOPE_STALE'), { code: 'A9_SCOPE_STALE' });
+  }
+  // Keep the lock until admitted async state consumers have settled. Synchronous
+  // calls retain their return/throw contract and do not delay an ordinary reopen.
+  function trackStateOperation(operation) {
+    assertAvailable();
+    const result = operation();
+    if (!result || typeof result.then !== 'function') return result;
+    const pending = result.then(value => { pendingStateOperations.delete(pending); return value; },
+      error => { pendingStateOperations.delete(pending); throw error; });
+    pendingStateOperations.add(pending);
+    return pending;
+  }
+  function trackAsyncStateOperation(operation) {
+    try { return Promise.resolve(trackStateOperation(operation)); }
+    catch (error) { return Promise.reject(error); }
+  }
   let managedStopPromise = null;
   let managedDismissInFlight = false;
   let checkpointRecoveryDiagnostics = null;
@@ -1744,6 +1770,7 @@ function createA9AgentRuntime(options) {
     // Keep the mutex observable even for skipProbe/no-DPAPI paths that would
     // otherwise complete synchronously inside an async function.
     await Promise.resolve();
+    assertAvailable();
     const values = input || {};
     if (activeController || currentPendingApproval || currentPendingQuestion || questionReplyInFlightId) {
       const error = new Error('A9_PROVIDER_RECONFIGURE_BUSY: 当前 Turn、审批或问询尚未结束，不能切换 Provider');
@@ -1917,12 +1944,15 @@ function createA9AgentRuntime(options) {
       let recoverySecretError = null;
       const managers = new Set([standaloneWorkspaceService, loopWorkspaceService].filter(Boolean)
         .map((service) => service.getCheckpointManager()));
-      for (const manager of managers) {
-        // A9-61: same complete secret revalidation, yielding between bounded slices.
-        try { await manager.revalidatePersistedTurnsAsync(); } catch (error) { recoverySecretError = recoverySecretError || error; }
+      // Each real manager revokes its cache/trust generation synchronously on
+      // entry. Start every revalidation before yielding on any of them.
+      const validations = await Promise.allSettled(Array.from(managers, manager => manager.revalidatePersistedTurnsAsync()));
+      for (const result of validations) {
+        if (result.status === 'rejected') recoverySecretError = recoverySecretError || result.reason;
       }
       if (recoverySecretError) throw recoverySecretError;
     }
+    assertAvailable();
     const nonSecretFields = [validatedBaseUrl, String(values.model), ...customHeaderNames,
       proxyConfig && proxyConfig.host, proxyConfig && proxyConfig.protocol, proxyConfig && proxyConfig.username,
       caBundle].filter((value) => value !== null && value !== undefined).map(String);
@@ -2023,7 +2053,10 @@ function createA9AgentRuntime(options) {
       providerProbe = await classifyProviderWithProbe();
     }
 
+    assertAvailable();
+
     const keyRemembered = remember === true && persistedSecret === true && (await verifyPersistedSecretsReadable());
+    assertAvailable();
     // 返回值、当前快照、审计和重启后的 JSON 必须使用同一个已验证事实。
     providerConfig.keyRemembered = keyRemembered;
     writePersistedProviderConfig({
@@ -2294,10 +2327,12 @@ function createA9AgentRuntime(options) {
   }
 
   async function continueTask(input) {
+    const sessionId = a9SessionId;
     if (checkpointRecoveryPending) await checkpointRecoveryReady;
     let ownedController = null;
     let lifecycle = null;
     try {
+      assertOperationScope(sessionId);
       if (!input || Object.keys(input).some((key) => !['conversationId', 'taskId', 'interruptedTurnId', 'recoveryRevision'].includes(key)) || input.conversationId !== a9SessionId ||
           !['taskId', 'interruptedTurnId', 'recoveryRevision'].every((key) => typeof input[key] === 'string' && input[key].length > 0)) {
         throw Object.assign(new Error('继续身份不匹配，请刷新当前中断卡。'), { code: 'A9_CONTINUE_IDENTITY_MISMATCH' });
@@ -2387,7 +2422,9 @@ function createA9AgentRuntime(options) {
   }
 
   async function submitTurn(prompt, options = {}) {
+    const sessionId = a9SessionId;
     if (checkpointRecoveryPending) await checkpointRecoveryReady;
+    try { assertOperationScope(sessionId); } catch (error) { return { ok: false, error: presentError(error) }; }
     if (activeConversation.state === 'archived') return { ok: false, error: { code: 'A9_CONVERSATION_ARCHIVED' } };
     if (managedAuditFailure) return presentAuditFailure(managedAuditFailure);
     if (auditFailureBlock) return presentAuditFailure(auditFailureBlock);
@@ -2459,10 +2496,12 @@ function createA9AgentRuntime(options) {
   }
 
   async function resumeApproval(input) {
+    const sessionId = a9SessionId;
     if (checkpointRecoveryPending) await checkpointRecoveryReady;
     let resumeProducedResult = false;
     let ownedController = null;
     try {
+      assertOperationScope(sessionId);
       if (!input || typeof input !== 'object' || !input.approvalId || !input.bindingDigest ||
           !input.conversationId || !input.taskId || !input.turnId ||
           (input.decision !== 'approved' && input.decision !== 'denied')) {
@@ -2575,12 +2614,14 @@ function createA9AgentRuntime(options) {
   }
 
   async function answerQuestion(input) {
+    const sessionId = a9SessionId;
     if (checkpointRecoveryPending) await checkpointRecoveryReady;
     let ownedController = null;
     let lifecycle = activeLifecycle;
     let producedResult = false;
     let replyCommitted = false;
     try {
+      assertOperationScope(sessionId);
       if (!input || typeof input !== 'object'
         || Object.keys(input).some((key) => !['conversationId', 'questionId', 'revision', 'decision', 'answer'].includes(key))
         || input.conversationId !== a9SessionId
@@ -3136,13 +3177,17 @@ function createA9AgentRuntime(options) {
   }
 
   async function undoTurn(turnId, confirmationId) {
+    const sessionId = a9SessionId;
     if (checkpointRecoveryPending) await checkpointRecoveryReady;
+    assertOperationScope(sessionId);
     assertCheckpointForCurrentConversation(turnId);
     const service = workspaceServiceForState();
     const reconciliation = await service.reconcilePendingExternalBaseline(String(turnId));
+    assertOperationScope(sessionId);
     if (reconciliation && confirmationId === reconciliation.confirmationId
       && service.getCheckpointManager().confirmExternalUndo(String(turnId), String(confirmationId))) {
       const manager = await prepareCheckpoint(service.getCheckpointManager(), turnId);
+      assertOperationScope(sessionId);
       return undoResponse(turnId, manager, manager.undoTurn(String(turnId)));
     }
     if (reconciliation) {
@@ -3160,17 +3205,22 @@ function createA9AgentRuntime(options) {
       };
     }
     const manager = await prepareCheckpoint(service.getCheckpointManager(), turnId);
+    assertOperationScope(sessionId);
     return undoResponse(turnId, manager, manager.undoTurn(String(turnId)));
   }
 
   async function undoFile(turnId, relPath, confirmationId) {
+    const sessionId = a9SessionId;
     if (checkpointRecoveryPending) await checkpointRecoveryReady;
+    assertOperationScope(sessionId);
     assertCheckpointForCurrentConversation(turnId);
     const service = workspaceServiceForState();
     const reconciliation = await service.reconcilePendingExternalBaseline(String(turnId));
+    assertOperationScope(sessionId);
     if (reconciliation && confirmationId === reconciliation.confirmationId
       && service.getCheckpointManager().confirmExternalUndo(String(turnId), String(confirmationId))) {
       const manager = await prepareCheckpoint(service.getCheckpointManager(), turnId);
+      assertOperationScope(sessionId);
       return undoResponse(turnId, manager, manager.undoFile(String(turnId), String(relPath)));
     }
     if (reconciliation) {
@@ -3188,12 +3238,25 @@ function createA9AgentRuntime(options) {
       };
     }
     const manager = await prepareCheckpoint(service.getCheckpointManager(), turnId);
+    assertOperationScope(sessionId);
     return undoResponse(turnId, manager, manager.undoFile(String(turnId), String(relPath)));
   }
 
   function getDiff(turnId) {
     // Preconditions keep their synchronous throws; only manifest validation and previews are cooperative.
-    if (checkpointRecoveryPending) return checkpointRecoveryReady.then(() => getDiff(turnId));
+    // Only a startup candidate can acquire its missing SQLite checkpoint after
+    // readiness. Existing/missing foreign targets still reject synchronously.
+    if (checkpointRecoveryPending) {
+      if (!startupCandidateTurnIds || !startupCandidateTurnIds.includes(String(turnId))) assertCheckpointForCurrentConversation(turnId);
+      else {
+        const owner = persistence.db.prepare('SELECT session_id FROM a9_turns WHERE turn_id = ?').get(String(turnId));
+        if (!owner || owner.session_id !== a9SessionId) {
+          throw Object.assign(new Error('A9_CHECKPOINT_CONVERSATION_MISMATCH: Checkpoint 不属于当前对话'), { code: 'A9_CHECKPOINT_CONVERSATION_MISMATCH' });
+        }
+      }
+      const sessionId = a9SessionId;
+      return checkpointRecoveryReady.then(() => { assertOperationScope(sessionId); return getDiff(turnId); });
+    }
     if (!ensureWorkdir(false)) return { ok: true, diff: [], review: { files: [] } };
     assertCheckpointForCurrentConversation(turnId);
     const manager = workspaceServiceForState().getCheckpointManager();
@@ -3251,6 +3314,7 @@ function createA9AgentRuntime(options) {
   }
 
   function shutdown(options = {}) {
+    shutdownRequested = true;
     queueClosed = true;
     pauseQueue();
     if (imageService) imageService.clear();
@@ -3264,7 +3328,8 @@ function createA9AgentRuntime(options) {
         workspaceLockReleased = true;
       }
     };
-    if (!activeController && !(options.cancelPending && (currentPendingApproval || currentPendingQuestion)) && manager.getActiveCount() === 0) {
+    if (!checkpointRecoveryPending && pendingStateOperations.size === 0 && !officeService
+      && !activeController && !(options.cancelPending && (currentPendingApproval || currentPendingQuestion)) && manager.getActiveCount() === 0) {
       // 保留既有无负载关闭语义：无需等待时同步释放锁，紧接着切换/重开
       // 同一工作区不会短暂误报 A9_WORKSPACE_LOCKED。
       releaseWorkspaceLock();
@@ -3272,6 +3337,9 @@ function createA9AgentRuntime(options) {
       return shutdownPromise;
     }
     const attempt = (async () => {
+      // Startup recovery owns this workspace and the shared DB until its final
+      // reconciliation. Close/rebind cannot release that ownership early.
+      await checkpointRecoveryReady;
       if (activeController) {
         activeController.abort();
         agentStatus = 'cancelling';
@@ -3300,6 +3368,9 @@ function createA9AgentRuntime(options) {
           toolCallsExecuted: 0, externalChanges: [] });
       }
       await officeClose;
+      // An uncooperative active Turn still uses the existing shutdown deadline
+      // and unresolved result. Its pending promise must not bypass that limit.
+      if (!activeController) await Promise.allSettled(Array.from(pendingStateOperations));
       if (managedStopPromise) await managedStopPromise;
       const before = manager.list();
       const stopManaged = options.stopManaged !== false;
@@ -3312,7 +3383,9 @@ function createA9AgentRuntime(options) {
         result.unresolved.push('active turn cleanup did not settle before the 10 second shutdown deadline');
         if (stopManaged) result.leftToSystem.push('active turn cleanup remains unknown');
       }
-      const cleanupConfirmed = !activeController && manager.getActiveCount() === 0 && result.unresolved.length === 0;
+      if (pendingStateOperations.size > 0) result.unresolved.push('workspace state operations have not settled');
+      const cleanupConfirmed = !activeController && pendingStateOperations.size === 0
+        && manager.getActiveCount() === 0 && result.unresolved.length === 0;
       if (cleanupConfirmed) releaseWorkspaceLock();
       return result;
     })();
@@ -3347,28 +3420,32 @@ function createA9AgentRuntime(options) {
       if (providerConfig) alignConversationProviderBoundary(a9SessionId);
       providerContextRestorePending = true;
     },
-    configureProvider,
+    assertAvailable,
+    configureProvider: input => trackAsyncStateOperation(() => configureProvider(input)),
     probeProvider,
     configureShell,
     submitTurn: (prompt, options = {}) => {
+      // Preserve the independent audit blocker even after a failed close. This
+      // is a memory-only refusal and never admits work after shutdown intent.
+      if (managedAuditFailure || auditFailureBlock) return Promise.resolve(presentAuditFailure(managedAuditFailure || auditFailureBlock));
       if (queueScheduled) return Promise.resolve({ ok: false, error: { code: 'A9_QUEUE_DISPATCH_PENDING' } });
       // Main-only first-message admission. Ordinary turn.submit still waits for
       // the result; both paths use the same execution, audit and queue lifecycle.
       if (options.acceptOnly === true) return new Promise(resolve => {
-        finishQueueOperation(submitTurn(prompt, { onAccepted: resolve })).then(resolve);
+        finishQueueOperation(trackAsyncStateOperation(() => submitTurn(prompt, { onAccepted: resolve }))).then(resolve);
       });
-      return finishQueueOperation(submitTurn(prompt));
+      return finishQueueOperation(trackAsyncStateOperation(() => submitTurn(prompt)));
     },
     updateQueue,
-    continueTask,
+    continueTask: input => trackAsyncStateOperation(() => continueTask(input)),
     dismissRecovered,
     resumeApproval: input => {
       if (input && input.decision === 'denied') pauseQueue();
-      return finishQueueOperation(resumeApproval(input));
+      return finishQueueOperation(trackAsyncStateOperation(() => resumeApproval(input)));
     },
     answerQuestion: input => {
       if (input && input.decision === 'cancelled') pauseQueue();
-      return finishQueueOperation(answerQuestion(input));
+      return finishQueueOperation(trackAsyncStateOperation(() => answerQuestion(input)));
     },
     stop,
     saveDraft,
@@ -3399,9 +3476,9 @@ function createA9AgentRuntime(options) {
     searchHistory,
     locateHistory,
     getDelivery,
-    undoTurn,
-    undoFile,
-    getDiff,
+    undoTurn: (turnId, confirmationId) => trackAsyncStateOperation(() => undoTurn(turnId, confirmationId)),
+    undoFile: (turnId, relPath, confirmationId) => trackAsyncStateOperation(() => undoFile(turnId, relPath, confirmationId)),
+    getDiff: turnId => trackStateOperation(() => getDiff(turnId)),
     gitStatus,
     readWorkspaceFile,
     async previewImage(input) {
@@ -3504,6 +3581,7 @@ function createSqliteUnavailableRuntime(reason) {
     acceptProviderState() { throw Object.assign(new Error('ELECTRON_SQLITE_UNAVAILABLE'), { code: 'ELECTRON_SQLITE_UNAVAILABLE' }); },
     diagnostics: { code: 'ELECTRON_SQLITE_UNAVAILABLE', detail: safeReason },
     whenReady() { return Promise.resolve(); },
+    assertAvailable() {},
     configureProvider() { throw new Error('ELECTRON_SQLITE_UNAVAILABLE'); },
     probeProvider() { throw new Error('ELECTRON_SQLITE_UNAVAILABLE'); },
     configureShell() { throw new Error('ELECTRON_SQLITE_UNAVAILABLE'); },
@@ -3562,6 +3640,7 @@ function createDiagnosticsRuntime(outcome) {
     acceptProviderState() { throw Object.assign(new Error('A9_DIAGNOSTICS_MODE'), { code: 'A9_DIAGNOSTICS_MODE' }); },
     diagnostics: safeDiagnostics,
     whenReady() { return Promise.resolve(); },
+    assertAvailable() {},
     configureProvider() { throw new Error('A9_DIAGNOSTICS_MODE'); },
     probeProvider() { throw new Error('A9_DIAGNOSTICS_MODE'); },
     configureShell() { throw new Error('A9_DIAGNOSTICS_MODE'); },

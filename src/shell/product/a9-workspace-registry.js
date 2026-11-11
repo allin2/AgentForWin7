@@ -326,6 +326,14 @@ function createA9WorkspaceRegistry(options) {
     return entry.runtime;
   }
 
+  // Main-only readiness boundary: the captured runtime must still be resident
+  // and available, even for restricted or workdir recovery scopes.
+  function assertRuntimeAvailable(runtime) {
+    const entry = Array.from(entries.values()).find(item => item.runtime === runtime);
+    if (!entry || closing.has(entry.workspaceId) || closingAll) throw failure('A9_SCOPE_STALE', '工作区正在关闭或已被替换。');
+    assertExecutionAllowed();
+  }
+
   // Linking authorizes a new native-picker target and retains the source bytes.
   // It must remain available when the old root is absent or substituted. Only
   // this recovery action skips source filesystem identity; scope stays bound.
@@ -398,7 +406,7 @@ function createA9WorkspaceRegistry(options) {
     } finally { closingAll = false; }
   }
 
-  return { admit, open, activate, startDefaultConversation, changeWorkdir, resolve, resolveWorkdirLinkScope, resolveInboxScope, directory, configureProvider, close, shutdown,
+  return { admit, open, activate, startDefaultConversation, changeWorkdir, resolve, resolveWorkdirLinkScope, resolveInboxScope, assertRuntimeAvailable, directory, configureProvider, close, shutdown,
     getActive: () => entries.get(activeId) || null,
     getById: id => entries.get(id) || null,
     get size() { return entries.size; },

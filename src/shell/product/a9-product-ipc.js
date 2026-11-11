@@ -181,6 +181,8 @@ function createA9ProductRequestHandler(options) {
           const knownBefore = new Set(registry.directory().map(item => item.workspaceId));
           const entry = registry.open(workspace);
           await awaitRuntimeReady(entry.runtime);
+          if (registry.assertRuntimeAvailable) registry.assertRuntimeAvailable(entry.runtime);
+          if (entry.runtime.assertAvailable) entry.runtime.assertAvailable();
           const snapshot = entry.runtime.getSnapshot({ conversationPage: true });
           if (values.conversationId && values.conversationId !== snapshot.activeConversationId) {
             const response = await entry.runtime.activateConversation(values.conversationId);
@@ -204,10 +206,12 @@ function createA9ProductRequestHandler(options) {
       if (registry && request.schemaVersion === 9 && request.action !== A9_ACTIONS.SNAPSHOT_GET && !request.scope) {
         throw Object.assign(new Error('A9_SCOPE_REQUIRED'), { code: 'A9_SCOPE_REQUIRED' });
       }
-      const runtime = restrictedRuntime || (registry && request.scope
+      const resolveRuntime = () => restrictedRuntime ? restrictedScopeRuntime(registry, request) : (registry && request.scope
         ? (inboxAction ? registry.resolveInboxScope(request.scope)
           : request.action === A9_ACTIONS.WORKDIR_LINK ? registry.resolveWorkdirLinkScope(request.scope) : registry.resolve(request.scope))
-        : config.getA9Runtime ? await config.getA9Runtime() : null);
+        : registry ? (registry.getActive() || {}).runtime : null);
+      const runtime = restrictedRuntime || (registry && request.scope ? resolveRuntime()
+        : config.getA9Runtime ? await config.getA9Runtime() : registry ? resolveRuntime() : null);
       if (runtime && runtime.__a9WorkspaceRequired === true) {
         return {
           ok: false,
@@ -221,7 +225,17 @@ function createA9ProductRequestHandler(options) {
       if (!runtime) throw Object.assign(new Error('A9_RUNTIME_UNAVAILABLE'), { code: 'A9_RUNTIME_UNAVAILABLE' });
       // A9-61: serve a runtime only after its cooperative startup checkpoint
       // reconciliation settled. Stop is never held behind it.
-      if (request.action !== A9_ACTIONS.TURN_STOP) await awaitRuntimeReady(runtime);
+      if (request.action !== A9_ACTIONS.TURN_STOP) {
+        await awaitRuntimeReady(runtime);
+        // Readiness yields to workspace/conversation selection and shutdown.
+        // Re-run the original resolver, including inbox/link/restricted scopes,
+        // and never dispatch on a replacement Runtime with the same scope IDs.
+        if (registry) {
+          if (registry.assertRuntimeAvailable) registry.assertRuntimeAvailable(runtime);
+          if (resolveRuntime() !== runtime) throw Object.assign(new Error('A9_SCOPE_STALE'), { code: 'A9_SCOPE_STALE' });
+        }
+        if (runtime.assertAvailable) runtime.assertAvailable();
+      }
 
       const payload = request.payload || {};
       switch (request.action) {

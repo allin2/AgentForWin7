@@ -972,9 +972,9 @@ export class CheckpointManager {
    * 校验结果不写入缓存，避免一次全量复核让全部历史清单常驻内存；之后按需重新加载。
    */
   revalidatePersistedTurns(): void {
-    const turnIds = this.listPersistedTurns();
     this.checkpoints.clear();
     this.cacheGeneration += 1;
+    const turnIds = this.listPersistedTurns();
     for (const turnId of turnIds) {
       try {
         this.readValidatedCheckpoint(turnId);
@@ -988,9 +988,9 @@ export class CheckpointManager {
 
   /** A9-61: revalidatePersistedTurns with the same checks, yielding between bounded slices. */
   async revalidatePersistedTurnsAsync(): Promise<void> {
-    const turnIds = this.listPersistedTurns();
     this.checkpoints.clear();
     this.cacheGeneration += 1;
+    const turnIds = this.listPersistedTurns();
     for (const turnId of turnIds) {
       try {
         await this.readValidatedCheckpointCooperatively(turnId);
