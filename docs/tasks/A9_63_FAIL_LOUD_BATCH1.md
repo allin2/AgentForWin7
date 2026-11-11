@@ -125,6 +125,29 @@ Workspace 日常集合按原规则未执行 a9-19-baseline-yield.test.ts（NOT_P
 定向及日常集合均执行真实 SQLite、真实文件和真实子进程；Runner 只替换不可用 Windows 命令的可执行路径，
 不模拟 execFile/kill 的进程行为。重入用例只在真实 SQLite 返回载荷的访问边界触发另一个真实实例读取。
 
+## 2026-11-11 Git 投影返修（A9-63-FL-REV2）
+
+本轮在 `af211e723384fe54e0d4cdc8dd543dc11a9e689c` 上追加实现，仍只修改
+`src/git-adapter/src/trusted-projection.ts`、`src/git-adapter/tests/trusted-projection.test.ts` 和本任务书。
+Git 投影现在可区分以下六种失败；正常状态不产生诊断：
+
+| 诊断码 | 触发条件 |
+|---|---|
+| `A9_GIT_NOT_REPOSITORY` | 工作区不存在，或根目录探测明确返回“不是 Git 仓库” |
+| `A9_GIT_SPAWN_FAILED` | Git 进程无法启动，且错误不是超时或输出超限 |
+| `A9_GIT_TIMEOUT` | Git 命令达到 15 秒期限 |
+| `A9_GIT_EXIT_FAILED` | 非配置只读命令以非零退出，且不属于无提交的正常状态 |
+| `A9_GIT_CONFIG_UNREADABLE` | `config --get`/`--get-regexp` 非零退出且 stderr 非空 |
+| `A9_GIT_OUTPUT_TOO_LARGE` | `execFile` 因 `ERR_CHILD_PROCESS_STDIO_MAXBUFFER` 拒绝超过 4 MiB 的输出 |
+
+以下两种状态明确不产生诊断：配置项不存在时 Git 以退出码 1 且空 stderr 返回；仓库已初始化但尚无提交时，
+`rev-parse --abbrev-ref HEAD`、`rev-parse --verify --quiet HEAD` 和 `diff HEAD` 的非零结果按无提交处理。
+无提交时仍保持 `isGit`、`branch`、`head`、`entries` 和 `diffPreview` 的既有投影语义。
+
+已知限制：恢复清单损坏时，遗留页面 `index.html` 的恢复面板会显示错误但保留旧内容。该页面只在
+`--a8-review-smoke-` 或 `--a8-boundary-smoke-` 参数下加载；A9 工作台没有恢复面板；本批不改。
+已知限制：超过 4 MiB 的差异不提供预览，只返回 `A9_GIT_OUTPUT_TOO_LARGE`；预览改进留给后续“大输入”批次。
+
 文档检查失败与上一轮相同。负责人若要关闭该失败，须另行允许添加任务索引和生命周期表项；本轮无新增取舍。
 最终提交为本分支在 698b1b57 之后的追加提交，未改写历史。
 源码/测试哈希、提交及命令绑定保存在上述证据目录的 final-binding.json。

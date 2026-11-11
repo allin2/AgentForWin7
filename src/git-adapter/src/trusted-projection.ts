@@ -48,7 +48,8 @@ export type TrustedGitDiagnosticCode =
   | 'A9_GIT_SPAWN_FAILED'
   | 'A9_GIT_TIMEOUT'
   | 'A9_GIT_EXIT_FAILED'
-  | 'A9_GIT_CONFIG_UNREADABLE';
+  | 'A9_GIT_CONFIG_UNREADABLE'
+  | 'A9_GIT_OUTPUT_TOO_LARGE';
 
 export interface TrustedGitDiagnostic {
   code: TrustedGitDiagnosticCode;
@@ -63,7 +64,7 @@ interface GitCommandResult {
   code: number;
   stdout: string;
   stderr: string;
-  failure?: 'spawn_failed' | 'timeout' | 'exit_nonzero';
+  failure?: 'spawn_failed' | 'timeout' | 'exit_nonzero' | 'output_too_large';
 }
 
 function execGit(
@@ -99,10 +100,14 @@ function execGit(
         },
       }, (err, stdout, stderr) => {
         const rawCode = err && typeof (err as any).code === 'number' ? (err as any).code : err ? 1 : 0;
+        const outputTooLarge = Boolean(err && (err as any).code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER');
         const timedOut = Boolean(err && ((err as any).killed || (err as any).code === 'ETIMEDOUT'));
-        const spawnFailed = Boolean(err && typeof (err as any).code === 'string' && (err as any).code !== 'ETIMEDOUT');
+        const spawnFailed = Boolean(err && typeof (err as any).code === 'string'
+          && (err as any).code !== 'ETIMEDOUT'
+          && !outputTooLarge);
         resolve({ code: rawCode, stdout: String(stdout ?? ''), stderr: String(stderr ?? ''),
-          ...(timedOut ? { failure: 'timeout' } : spawnFailed ? { failure: 'spawn_failed' } : rawCode !== 0 ? { failure: 'exit_nonzero' } : {}) });
+          ...(outputTooLarge ? { failure: 'output_too_large' } : timedOut ? { failure: 'timeout' }
+            : spawnFailed ? { failure: 'spawn_failed' } : rawCode !== 0 ? { failure: 'exit_nonzero' } : {}) });
       });
     } catch (_err) {
       resolve({ code: 1, stdout: '', stderr: '', failure: 'spawn_failed' });
@@ -162,11 +167,12 @@ export async function projectTrustedGit(workDir: string): Promise<TrustedGitProj
     : [];
 
   const branchResult = await execGit(workDir, ['rev-parse', '--abbrev-ref', 'HEAD']);
-  addCommandDiagnostic(diagnostics, branchResult, 'rev-parse branch');
+  const headResult = await execGit(workDir, ['rev-parse', '--verify', '--quiet', 'HEAD']);
+  const noCommit = headResult.failure === 'exit_nonzero' && headResult.code === 1 && headResult.stderr.trim() === '';
+  if (!noCommit) addCommandDiagnostic(diagnostics, branchResult, 'rev-parse branch');
   projection.branch = branchResult.code === 0 ? branchResult.stdout.trim() : undefined;
 
-  const headResult = await execGit(workDir, ['rev-parse', 'HEAD']);
-  addCommandDiagnostic(diagnostics, headResult, 'rev-parse HEAD');
+  if (!noCommit) addCommandDiagnostic(diagnostics, headResult, 'rev-parse HEAD');
   projection.head = headResult.code === 0 ? headResult.stdout.trim() : undefined;
 
   const statusResult = await execGit(workDir, ['status', '--porcelain=v1', '-b'], { disabledFilters });
@@ -193,7 +199,7 @@ export async function projectTrustedGit(workDir: string): Promise<TrustedGitProj
   const diffResult = await execGit(workDir, [
     'diff', '--no-ext-diff', '--no-textconv', 'HEAD', '--stat', '--patch', `--unified=3`,
   ], { disabledFilters });
-  addCommandDiagnostic(diagnostics, diffResult, 'diff');
+  if (!noCommit) addCommandDiagnostic(diagnostics, diffResult, 'diff');
   if (diffResult.code === 0) {
     if (diffResult.stdout.length > MAX_DIFF_BYTES) {
       projection.diffPreview = diffResult.stdout.slice(0, MAX_DIFF_BYTES);
@@ -215,8 +221,11 @@ export async function projectTrustedGit(workDir: string): Promise<TrustedGitProj
 
 function commandDiagnostic(result: GitCommandResult, operation: string): TrustedGitDiagnostic {
   const code = result.failure === 'spawn_failed' ? 'A9_GIT_SPAWN_FAILED'
-    : result.failure === 'timeout' ? 'A9_GIT_TIMEOUT' : 'A9_GIT_EXIT_FAILED';
-  return { code, operation, detail: code === 'A9_GIT_TIMEOUT' ? 'Git 命令超时。' : code === 'A9_GIT_SPAWN_FAILED' ? 'Git 无法启动。' : 'Git 命令退出码非零。' };
+    : result.failure === 'timeout' ? 'A9_GIT_TIMEOUT'
+      : result.failure === 'output_too_large' ? 'A9_GIT_OUTPUT_TOO_LARGE' : 'A9_GIT_EXIT_FAILED';
+  return { code, operation, detail: code === 'A9_GIT_TIMEOUT' ? 'Git 命令超时。'
+    : code === 'A9_GIT_SPAWN_FAILED' ? 'Git 无法启动。'
+      : code === 'A9_GIT_OUTPUT_TOO_LARGE' ? 'Git 输出超过上限。' : 'Git 命令退出码非零。' };
 }
 
 function addCommandDiagnostic(diagnostics: TrustedGitDiagnostic[], result: GitCommandResult, operation: string): void {
@@ -225,8 +234,10 @@ function addCommandDiagnostic(diagnostics: TrustedGitDiagnostic[], result: GitCo
 
 function addConfigDiagnostic(diagnostics: TrustedGitDiagnostic[], result: GitCommandResult, operation: string): void {
   if (!result.failure) return;
-  if (result.failure === 'exit_nonzero' && result.stderr.trim()) {
-    diagnostics.push({ code: 'A9_GIT_CONFIG_UNREADABLE', operation, detail: 'Git 配置不可读。' });
+  if (result.failure === 'exit_nonzero') {
+    if (result.stderr.trim()) {
+      diagnostics.push({ code: 'A9_GIT_CONFIG_UNREADABLE', operation, detail: 'Git 配置不可读。' });
+    }
     return;
   }
   diagnostics.push(commandDiagnostic(result, operation));
