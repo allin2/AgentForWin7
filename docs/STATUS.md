@@ -15,6 +15,8 @@
 
 ## 当前交付、进行中的工作与授权
 
+- [A9-62](tasks/A9_62_DIAGNOSTIC_FLIGHT_RECORDER.md)：`A9_62_DEVELOPER_VERIFIED`。主进程诊断日志落盘与进程级兜底已合入 main，合并提交 `d04629a…`，分支尖端 `afbaa65f…`，决定见 ADR-0328。三轮独立复审后，末次返修由合入会话复核；仅开发机 Node 20 与 Electron 22.3.27 证据。Win7 实机和原生错误框点击为 `NOT_PERFORMED`。
+- [A9-63](tasks/A9_63_FAIL_LOUD_BATCH1.md)：`A9_63_DEVELOPER_VERIFIED`。fail-loud 批次 1 已合入 main，合并提交 `a6a3fd3…`，分支尖端 `e841523b…`；仅开发机证据。清理辅助命令的 10 秒期限待 Win7 校准，诊断字段尚无界面读取方。Win7 实机为 `NOT_PERFORMED`。
 - [A9-61](tasks/A9_61_CHECKPOINT_RESPONSIVENESS.md)：`A9_61_DEVELOPER_VERIFIED`。最终源`4ae74f32…`；产品`6c460fd9…`独审P0/P1为0，后继仅修测试清理。第6台Shell G0为76套件、1634 PASS，另12项慢项已同机补跑通过；Workspace新机271项与6000基线、Mac完整272项通过，专项25项及Mac Electron22/Node16真实入口5项通过。兄弟工作区pending秘密窗口已红绿闭环，shutdown P2按负责人决定保留。第6台已回收，凭据未漂移，短命密钥撤销。本轮授权本地main整合，保留无关dirty；Win7/Win10、门A/B、公开推送发布NOT_PERFORMED。原G0实际首FAIL及摘要纠正见任务书§11。
 - [A9-59](tasks/A9_59_ALPHA8_CLOSEOUT.md)：`A9_59_IMPLEMENTATION_AUTHORIZED`。负责人要求收口 alpha.8；已核查 A9-58 四项疑点并修复合法路径别名与旧时间游标两项，旧实现各失败1项、修复后通过。新 alpha.8 开发锁及包内身份已实现。开发机 State408、Shell日常1607、打包定向4项和真实Electron两阶段10项通过；发布必需检查仍在执行。干净源码构建依赖本地提交授权，尚未提交/打包；新包Win7/Win10、正式门A/B与发布NOT_PERFORMED。原main及无关dirty保留，详见任务书§4。
 

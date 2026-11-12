@@ -71,9 +71,9 @@ Runtime 的已知秘密脱敏函数没有公开给 main；现有验收报告正�
 | 诊断日志单元 | `env -u NODE_OPTIONS -u ELECTRON_RUN_AS_NODE /usr/local/bin/node src/shell/node_modules/jest/bin/jest.js --config src/shell/jest.config.js --runInBand --runTestsByPath src/shell/tests/product/a9-diagnostics-log.test.ts src/shell/tests/product/a9-startup-window.test.ts` | `PASS`，22/22 | 两个 Jest 套件均通过；覆盖轮转、总量、截断、队列满、写失败、假密钥、中文空格路径、阶段顺序和心跳 |
 | Shell 编译/静态/诊断测试 | `env -u NODE_OPTIONS -u ELECTRON_RUN_AS_NODE PATH=/Users/qlyf/.nvm/versions/node/v20.17.0/bin:$PATH /Users/qlyf/.nvm/versions/node/v20.17.0/bin/node scripts/verify_integration.mjs --module shell --test-file tests/product/a9-diagnostics-log.test.ts` | `PASS` | 编译依赖闭包、Shell lint/build、11/11 诊断测试 |
 | 启动顺序回归 | 同上，`--test-file tests/product/a9-startup-window.test.ts` | `PASS`，11/11 | 已批准更新现有测试夹具与等待条件 |
-| Electron 22.3.27 入口 | `env -u NODE_OPTIONS -u ELECTRON_RUN_AS_NODE /Users/qlyf/.nvm/versions/node/v20.17.0/bin/node src/shell/tests/product/run-a9-diagnostics-electron.cjs --electron=/Users/qlyf/.cache/w7-electron-22.3.27/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron --out=/tmp/a9-62-diagnostics/outputs/a9-62/entry-first` | `PASS`，8/8 | [RESULT.json](/tmp/a9-62-diagnostics/outputs/a9-62/entry-first/RESULT.json)：冒烟、启动失败、3 秒阶段/IPC 停顿、阶段/IPC 强杀、拒绝、窗口事件 |
-| 非冒烟启动错误框 | 同一入口 `--case=native-startup`，经 CUA 关闭错误框 | `PASS`，退出码 1 | [RESULT.json](/tmp/a9-62-diagnostics/outputs/a9-62/entry-native-startup/RESULT.json)，错误码 `ENOSPC` 和 diagnostics 路径可见 |
-| 未捕获异常语义 | 同一入口 `--case=native-uncaught`，经 CUA 关闭错误框 | `PASS`，退出码 0 | [RESULT.json](/tmp/a9-62-diagnostics/outputs/a9-62/entry-native-only/RESULT.json)，错误码 `EIO` 可见，关闭后进程继续并退出 |
+| Electron 22.3.27 入口 | `env -u NODE_OPTIONS -u ELECTRON_RUN_AS_NODE /Users/qlyf/.nvm/versions/node/v20.17.0/bin/node src/shell/tests/product/run-a9-diagnostics-electron.cjs --electron=/Users/qlyf/.cache/w7-electron-22.3.27/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron --out=/tmp/a9-62-diagnostics/outputs/a9-62/entry-first` | `PASS`，8/8 | `outputs/a9-62-dev-r3/entry-first/RESULT.json`（主仓库证据副本，未入库）：冒烟、启动失败、3 秒阶段/IPC 停顿、阶段/IPC 强杀、拒绝、窗口事件 |
+| 非冒烟启动错误框 | 同一入口 `--case=native-startup`，经 CUA 关闭错误框 | `PASS`，退出码 1 | `outputs/a9-62-dev-r3/entry-native-startup/RESULT.json`（主仓库证据副本，未入库），错误码 `ENOSPC` 和 diagnostics 路径可见 |
+| 未捕获异常语义 | 同一入口 `--case=native-uncaught`，经 CUA 关闭错误框 | `PASS`，退出码 0 | `outputs/a9-62-dev-r3/entry-native-only/RESULT.json`（主仓库证据副本，未入库），错误码 `EIO` 可见，关闭后进程继续并退出 |
 | Electron 原有行为基线 | Electron 22.3.27 临时入口，未安装处理器 | `PASS`，原生错误框阻塞；关闭后继续 | 观察到原始未捕获异常错误框；未处理拒绝警告后继续。探针在 `/tmp` 创建并清理 |
 | 语义区分度 | 临时副本移除 `startup-stage-begin`，运行同一阶段检查；恢复当前模块后再跑 | `PASS` | 移除版 `RC=1`（`stage begin marker missing`）；恢复版 `RC=0` |
 | Shell 日常集合 | `env -u NODE_OPTIONS -u ELECTRON_RUN_AS_NODE PATH=/Users/qlyf/.nvm/versions/node/v20.17.0/bin:$PATH /Users/qlyf/.nvm/versions/node/v20.17.0/bin/node scripts/verify_integration.mjs --daily --module shell` | `FAIL`，工作树依赖链接遗漏 | 72 套件通过、3 套件失败、1604 测试通过、12 跳过、6 失败；执行代理遗漏 office-lite/node_modules 链接，不能称为既有基线失败；本轮补链接后通过 |
@@ -325,7 +325,7 @@ Electron 路径为 `/Users/qlyf/.cache/w7-electron-22.3.27/node_modules/electron
 ### 9.2 新增已知限制
 
 - 熔断期间进程被强杀，当前这次 IPC 的开始记录会丢失。这是熔断不拖慢 IPC 的代价，不修。
-- 轮转降级时，当前段里的旧记录被清空，只保证最新记录落盘。
+- 轮转降级时，当前段里的旧记录被清空，只保证最新记录落盘。合入复核更正：改名失败之前旧 `previous` 已被删除，因此两段旧记录都会丢失（开发机 Node 20 故障注入实测，提交 `afbaa65f…`）。
 - 磁盘单次写入耗时在 30～49 ms 之间时，每次 IPC 多等一次写入时间。复审实测 40 ms 磁盘下 20 次 IPC 合计 854 ms，单次最长 50.2 ms。
 - 第 33 次及以后的未捕获异常不再落盘，但仍然走错误框路径，进程继续运行。
 
