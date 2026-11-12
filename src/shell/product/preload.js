@@ -6,9 +6,63 @@ let messageCounter = 0;
 const legacyA8ReviewEnabled = process.argv.some((item) =>
   item.indexOf('--a8-review-smoke-') === 0 || item.indexOf('--a8-boundary-smoke-') === 0);
 
+// Only observation timers: the underlying invoke is never raced or cancelled.
+// These actions deliberately await user interaction, model/tool work or cleanup.
+const intentionalWaits = new Map([
+  ['product:a9-request', new Set([
+    'a9.provider.configure', 'a9.provider.probe', 'a9.shell.configure', 'a9.workdir.link',
+    'a9.turn.submit', 'a9.task.continue', 'a9.turn.resumeApproval', 'a9.question.reply',
+    'a9.turn.stop', 'a9.workspace.close', 'a9.workdir.rename',
+  ])],
+  ['desktop:request', new Set(['workspace.select'])],
+]);
+const pendingRequests = new Map();
+const requestWaitListeners = new Set();
+let diagnosticDirectory = '';
+function requestWaitStatus() {
+  const now = Date.now();
+  let oldest = now;
+  for (const start of pendingRequests.values()) oldest = Math.min(oldest, start);
+  return now - oldest >= 8000 ? { elapsedSeconds: Math.floor((now - oldest) / 1000), directory: diagnosticDirectory } : null;
+}
+function notifyRequestWait() {
+  const status = requestWaitStatus();
+  for (const callback of requestWaitListeners) {
+    try { callback(status); }
+    catch (error) { setTimeout(() => { throw error; }, 0); }
+  }
+}
+async function invokeObserved(channel, value) {
+  const action = value && (value.action || value.type);
+  const observed = !(intentionalWaits.get(channel) || new Set()).has(action);
+  const id = Symbol();
+  let timer;
+  let interval;
+  if (observed) {
+    pendingRequests.set(id, Date.now());
+    timer = setTimeout(() => {
+      notifyRequestWait();
+      interval = setInterval(notifyRequestWait, 1000);
+    }, 8000);
+  }
+  try {
+    const result = value === undefined ? await ipcRenderer.invoke(channel) : await ipcRenderer.invoke(channel, value);
+    if (channel === 'product:get-diagnostics' && result && result.diagnosticLog) {
+      diagnosticDirectory = result.diagnosticLog.directory || '';
+    }
+    return result;
+  } finally {
+    if (observed) {
+      pendingRequests.delete(id);
+      clearTimeout(timer); clearInterval(interval);
+      notifyRequestWait();
+    }
+  }
+}
+
 function request(type, sessionId, payload) {
   messageCounter += 1;
-  return ipcRenderer.invoke('desktop:request', {
+  return invokeObserved('desktop:request', {
     protocolVersion: '1.0.0',
     id: `renderer-${Date.now()}-${messageCounter}`,
     type,
@@ -20,7 +74,7 @@ function request(type, sessionId, payload) {
 }
 
 function a8Request(action, sessionId, payload) {
-  return ipcRenderer.invoke('product:a8-request', {
+  return invokeObserved('product:a8-request', {
     schemaVersion: 1,
     action,
     sessionId,
@@ -29,7 +83,7 @@ function a8Request(action, sessionId, payload) {
 }
 
 function a9Request(action, payload, scope) {
-  return ipcRenderer.invoke('product:a9-request', {
+  return invokeObserved('product:a9-request', {
     schemaVersion: scope || ['a9.workspace.list', 'a9.workspace.activate', 'a9.workspace.close', 'a9.workdir.start', 'a9.conversation.browse', 'a9.history.search', 'a9.history.locate', 'a9.delivery.get'].includes(action) || action === 'a9.snapshot.get' ? 9 : action === 'a9.queue.update' ? 8 : 7,
     action,
     payload: payload || {},
@@ -113,7 +167,13 @@ function createA9Api(scope) {
 }
 
 const productApi = Object.freeze({
-  getDiagnostics: () => ipcRenderer.invoke('product:get-diagnostics'),
+  getDiagnostics: () => invokeObserved('product:get-diagnostics'),
+  onRequestWait: callback => {
+    if (typeof callback !== 'function') throw new TypeError('onRequestWait callback must be a function');
+    requestWaitListeners.add(callback);
+    callback(requestWaitStatus());
+    return () => requestWaitListeners.delete(callback);
+  },
   a9: createA9Api(),
   getSettings: () => request('settings.get', 'desktop', {}),
   setSettings: (values) => request('settings.set', 'desktop', { values }),

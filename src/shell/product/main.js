@@ -950,7 +950,7 @@ function createMainWindow() {
     if (a9WindowCloseInFlight) return;
     a9WindowCloseInFlight = (async () => {
       try {
-        if (!await executeA9ShutdownChoice()) return;
+        if (!await executeA9ShutdownChoice('window') || a9ShutdownComplete) return;
         a9ShutdownComplete = true;
         window.close();
       } catch (error) {
@@ -1068,6 +1068,7 @@ function workspaceRuntimeOptions() {
       ? { a8DatabasePath: path.join(app.getPath('userData'), 'state', 'agent-events-v2.db') }
       : {}),
     ownerId: `main-${process.pid}`,
+    shutdownStageRecorder: stage => flightRecorder.begin('shutdown-stage', { stage }),
     nativeImage,
     selectShellExecutable: async (kind) => {
       const result = await dialog.showOpenDialog(mainWindow, {
@@ -1118,6 +1119,7 @@ registerDiagnosticIpc('product:a9-request', withStartupBarrier(createA9ProductRe
 let a9ShutdownComplete = false;
 let a9ShutdownInFlight = null;
 let a9WindowCloseInFlight = null;
+let a9ShutdownAttempt = null;
 async function selectA9ShutdownPolicy() {
   const handles = a9Workspaces.directory().filter(item => item.opened).flatMap(item => {
     const snapshot = a9Workspaces.getById(item.workspaceId).runtime.getSnapshot({ conversationPage: true });
@@ -1132,23 +1134,67 @@ async function selectA9ShutdownPolicy() {
   if (choice.response === 2) return null;
   return choice.response === 0;
 }
-async function executeA9ShutdownChoice() {
-  const stopManaged = await selectA9ShutdownPolicy();
-  if (stopManaged === null) return false;
-  const result = stopManaged ? await a9Workspaces.shutdown() : await a9Workspaces.shutdown({ stopManaged: false });
-  const unresolved = result && Array.isArray(result.unresolved) ? result.unresolved : [];
-  const leftToSystem = result && result.leftToSystem;
-  const residueLines = [...unresolved, ...(Array.isArray(leftToSystem) && stopManaged ? leftToSystem : [])].slice(0, 20).map((item) => String(item).slice(0, 500));
-  if (residueLines.length) throw new Error('A9_SHUTDOWN_RESIDUE:' + residueLines.join('\n'));
-  return true;
+async function executeA9ShutdownChoice(intent = 'window') {
+  // One application-wide attempt, shared by window close and before-quit.
+  // In particular, reporting does not clear it or restart registry shutdown.
+  if (!a9ShutdownAttempt) {
+    const attempt = { reported: false, intent, policy: selectA9ShutdownPolicy(), promise: null };
+    a9ShutdownAttempt = attempt;
+    attempt.promise = attempt.policy.then(async stopManaged => {
+      if (stopManaged === null) return false;
+      const result = stopManaged ? await a9Workspaces.shutdown() : await a9Workspaces.shutdown({ stopManaged: false });
+      const unresolved = result && Array.isArray(result.unresolved) ? result.unresolved : [];
+      const leftToSystem = result && result.leftToSystem;
+      const residueLines = [...unresolved, ...(Array.isArray(leftToSystem) && stopManaged ? leftToSystem : [])].slice(0, 20).map((item) => String(item).slice(0, 500));
+      if (residueLines.length) throw new Error('A9_SHUTDOWN_RESIDUE:' + residueLines.join('\n'));
+      return true;
+    });
+    attempt.promise.then(completed => {
+      if (a9ShutdownAttempt === attempt) a9ShutdownAttempt = null;
+      if (completed && attempt.reported && !a9ShutdownComplete) {
+        a9ShutdownComplete = true;
+        if (attempt.intent === 'quit') app.quit();
+        else if (mainWindow && !mainWindow.isDestroyed()) mainWindow.close();
+      }
+    }, () => {
+      if (a9ShutdownAttempt === attempt) a9ShutdownAttempt = null;
+      if (attempt.reported) dialog.showErrorBox('无法确认安全退出', '清理已结束，但结果无法确认。窗口与工作区锁保持可用，请在诊断中检查残留后重试。');
+    });
+  }
+  const attempt = a9ShutdownAttempt;
+  if (intent === 'quit') attempt.intent = 'quit';
+  // A user's native policy dialog is intentionally not an unresponsive wait.
+  if (await attempt.policy === null) {
+    if (a9ShutdownAttempt === attempt) a9ShutdownAttempt = null;
+    return false;
+  }
+  let timer;
+  try {
+    const reported = Symbol('reported');
+    const result = await Promise.race([attempt.promise, new Promise(resolve => {
+      timer = setTimeout(() => resolve(reported), 30000);
+    })]);
+    if (result !== reported) return result;
+    attempt.reported = true;
+    const stages = [...new Set(a9Workspaces.directory().filter(item => item.opened).map(item => {
+      const runtime = a9Workspaces.getById(item.workspaceId).runtime;
+      return typeof runtime.getShutdownStage === 'function' ? runtime.getShutdownStage() : null;
+    }).filter(Boolean))];
+    for (const stage of stages) void diagnosticsLog.record('shutdown-wait-reported', { stage, durationMs: 30000 });
+    if (!stages.length) void diagnosticsLog.record('shutdown-wait-reported', { durationMs: 30000 });
+    flightRecorder.withoutStall('error-dialog', () => dialog.showErrorBox('无法确认安全退出',
+      `关闭等待已超过 30 秒，本次退出已取消。窗口与工作区锁保持可用，原清理继续进行。\n当前阶段：${stages.join('、') || '等待关闭结果'}\n诊断日志：${diagnosticsLog.snapshot().directory}`));
+    return false;
+  } finally { clearTimeout(timer); }
 }
+
 function beginA9ShutdownBeforeQuit(event) {
   if (a9ShutdownComplete || a9Workspaces.size === 0) return;
   event.preventDefault();
   if (a9ShutdownInFlight) return;
   a9ShutdownInFlight = (async () => {
     try {
-      if (!await executeA9ShutdownChoice()) { a9ShutdownInFlight = null; return; }
+      if (!await executeA9ShutdownChoice('quit') || a9ShutdownComplete) { a9ShutdownInFlight = null; return; }
       a9ShutdownComplete = true;
       app.quit();
     } catch (error) {

@@ -133,6 +133,7 @@ function preloadApi(handler: any) {
   let api: any;
   const requests: any[] = [];
   vm.runInNewContext(fs.readFileSync(path.resolve(__dirname, '../../product/preload.js'), 'utf8'), {
+    setTimeout, clearTimeout, setInterval, clearInterval,
     process: { argv: ['electron', 'main.js'] },
     require: (name: string) => {
       if (name !== 'electron') throw new Error(`Unexpected preload import: ${name}`);

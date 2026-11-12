@@ -15,7 +15,7 @@ const productMain = argument('main') || path.resolve(__dirname, '../../product/m
 const selected = argument('case');
 const dialogMode = argument('dialog-mode') || 'interactive';
 assert(['interactive', 'capture'].includes(dialogMode));
-const cases = selected ? selected.split(',') : ['smoke', 'startup-failure', 'stall-stage', 'stall-ipc', 'kill-stage', 'kill-ipc', 'rejection', 'window-events'];
+const cases = selected ? selected.split(',') : ['smoke', 'startup-failure', 'stall-stage', 'stall-ipc', 'kill-stage', 'kill-ipc', 'rejection', 'window-events', 'shutdown-stall'];
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 const hash = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 const results = [];
@@ -77,6 +77,17 @@ function verify(mode, runRoot, code, signal) {
     assert(has('ipc-end', 'errorCode', result.error.code));
   }
   if (mode === 'rejection') { assert(has('unhandled-rejection', 'errorCode', 'EIO')); assert.equal(read('alive.json').alive, true); }
+  if (mode === 'renderer-wait') {
+    const result = read('renderer-wait.json');
+    assert(!result.shown.hidden && result.shown.text.includes('8 秒')); assert(result.cleared && result.directoryInDrawer);
+  }
+  if (mode === 'shutdown-stall') {
+    const shutdown = read('shutdown-stall.json');
+    assert.equal(shutdown.stage, 'office_close'); assert.equal(shutdown.shutdownCalls, 1);
+    assert(shutdown.lockHeldAtReport && shutdown.windowAliveAtReport && shutdown.beganWithoutEnd && shutdown.rendererResponsive);
+    assert(has('shutdown-wait-reported', 'stage', 'office_close'));
+    assert(has('shutdown-stage-end', 'stage', 'office_close'));
+  }
   if (mode === 'normal-exit') {
     assert.equal(read('normal-exit-requested.json').requested, true);
     for (const event of ['exit-end']) {
@@ -121,7 +132,7 @@ function verify(mode, runRoot, code, signal) {
   return { rows: rows.length, stalls: rows.filter(row => row.event === 'main-thread-stall') };
 }
 async function run(mode) {
-  const runRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-62-electron-test-'));
+  const runRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-65-electron-test-'));
   const env = { ...process.env, A9_62_RUN_ROOT: runRoot, A9_62_PRODUCT_MAIN: productMain, A9_62_CASE: mode, A9_62_DIALOG_MODE: dialogMode };
   delete env.NODE_OPTIONS; delete env.ELECTRON_RUN_AS_NODE;
   for (const name of Object.keys(env)) if (name.startsWith('A9_SMOKE_') || name.startsWith('WIN7AGENT_A9_')) delete env[name];
@@ -150,7 +161,7 @@ async function run(mode) {
     try { result = { mode, dialogMode, status: 'PASS', code, signal, ...verify(mode, runRoot, code, signal) }; }
     catch (error) { result = { mode, dialogMode, status: 'FAIL', code, signal, error: error.message }; }
     const destination = path.join(output, mode); fs.mkdirSync(destination, { recursive: true });
-    for (const name of ['runtime.json', 'smoke.json', 'diagnostics.json', 'ipc-result.json', 'dialog.json', 'alive.json', 'normal-exit-requested.json', 'steady.json', 'lifecycle.json', 'driver-error.json', 'fifo-ready.json', 'cancelled.json', 'shutdown-choice.json', 'log-stats.json', 'flood.json']) {
+    for (const name of ['runtime.json', 'smoke.json', 'diagnostics.json', 'ipc-result.json', 'dialog.json', 'alive.json', 'normal-exit-requested.json', 'steady.json', 'lifecycle.json', 'driver-error.json', 'fifo-ready.json', 'cancelled.json', 'shutdown-choice.json', 'log-stats.json', 'flood.json', 'shutdown-stall.json', 'renderer-wait.json']) {
       const file = path.join(runRoot, name); if (fs.existsSync(file)) fs.copyFileSync(file, path.join(destination, name));
     }
     fs.writeFileSync(path.join(destination, 'records.json'), JSON.stringify(readRows(runRoot), null, 2) + '\n', 'utf8');
@@ -171,7 +182,7 @@ async function run(mode) {
     catch (error) { results.push({ mode, status: 'FAIL', error: error.message }); }
     console.log(JSON.stringify(results[results.length - 1]));
   }
-  const result = { schemaVersion: 1, sourceBaseline: 'd5b99b62abb8c7fe1a52875272811a1b01f8bc5d', mainSha256: hash(productMain), loggerSha256: hash(path.join(path.dirname(productMain), 'a9-diagnostics-log.js')), evidenceLevel: 'DEVELOPER_ELECTRON', results };
+  const result = { schemaVersion: 1, sourceBaseline: '4dfabf18f41b4f75dd3c910fd0149d1995c5ac93', mainSha256: hash(productMain), loggerSha256: hash(path.join(path.dirname(productMain), 'a9-diagnostics-log.js')), evidenceLevel: 'DEVELOPER_ELECTRON', results };
   fs.writeFileSync(path.join(output, 'RESULT.json'), JSON.stringify(result, null, 2) + '\n', 'utf8');
   process.exitCode = results.every(item => item.status === 'PASS') ? 0 : 1;
 })();

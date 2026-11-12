@@ -208,6 +208,7 @@ describe('A9-54 real SQLite, runtime, scoped IPC and preload', () => {
       return { contextBridge: { exposeInMainWorld: (_name: string, value: any) => { api = value; } },
         ipcRenderer: { invoke: (_channel: string, request: any) => handler({}, request) } };
     } };
+    Object.assign(context, { setTimeout, clearTimeout, setInterval, clearInterval });
     vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../../product/preload.js'), 'utf8'), context);
     const target = scope(); const scoped = api.a9.forScope(target);
     expect((await scoped.settleConversation(target.conversationId)).ok).toBe(true);

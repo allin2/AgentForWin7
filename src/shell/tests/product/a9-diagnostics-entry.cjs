@@ -17,16 +17,23 @@ app.on('before-quit', () => lifecycle.beforeQuit++);
 app.on('will-quit', () => lifecycle.willQuit++);
 app.on('quit', () => write('lifecycle.json', lifecycle));
 const ipcTimes = [];
+let holdNextSnapshot = false;
+let releaseSnapshot;
 const registerHandle = ipcMain.handle.bind(ipcMain);
 ipcMain.handle = (channel, handler) => registerHandle(channel, (event, ...args) => {
   ipcTimes.push(Date.now());
+  if (mode === 'renderer-wait' && holdNextSnapshot && channel === 'product:a9-request' && args[0]?.action === 'a9.snapshot.get') {
+    holdNextSnapshot = false;
+    return new Promise(resolve => { releaseSnapshot = async () => resolve(await handler(event, ...args)); });
+  }
   return handler(event, ...args);
 });
 write('runtime.json', { electron: process.versions.electron, node: process.versions.node, mode, dialogMode });
 const originalErrorBox = dialog.showErrorBox.bind(dialog);
 dialog.showErrorBox = (title, content) => {
   if (mode !== 'uncaught-flood' || !fs.existsSync(path.join(runRoot, 'dialog.json'))) write('dialog.json', { title, content });
-  if (!mode.startsWith('native-') && mode !== 'baseline-uncaught' && mode !== 'slow-uncaught' && mode !== 'uncaught-flood') throw new Error('UNEXPECTED_NATIVE_DIALOG');
+  if (!mode.startsWith('native-') && mode !== 'baseline-uncaught' && mode !== 'slow-uncaught' && mode !== 'uncaught-flood' && mode !== 'shutdown-stall') throw new Error('UNEXPECTED_NATIVE_DIALOG');
+  if (mode === 'shutdown-stall') return;
   if (mode === 'slow-uncaught' || mode === 'uncaught-flood' || dialogMode === 'capture') return; // Fault test observes fatal persistence without user interaction.
   return originalErrorBox(title, content);
 };
@@ -45,7 +52,35 @@ if (mode.startsWith('baseline-')) {
   });
 } else {
   let observedDiagnostics;
+  let observedRecorder;
   let registry;
+  let shutdownRelease;
+  let shutdownCalls = 0;
+  let shutdownLockHeld = true;
+  if (mode === 'shutdown-stall') {
+    // Shorten only the production report timer, never a tool/model deadline.
+    const timeout = global.setTimeout;
+    global.setTimeout = (fn, ms, ...args) => timeout(fn, ms === 30000 ? 60 : ms, ...args);
+    const registryModule = require(path.join(path.dirname(productMain), 'a9-workspace-registry.js'));
+    const createRegistry = registryModule.createA9WorkspaceRegistry;
+    registryModule.createA9WorkspaceRegistry = config => {
+      registry = createRegistry({ ...config, openPersistence: () => ({ status: 'test-unavailable' }),
+        createRuntime: () => ({
+          getSnapshot: () => ({ managedProcesses: [], lock: { held: shutdownLockHeld } }),
+          getShutdownStage: () => shutdownLockHeld ? 'office_close' : null,
+          shutdown() {
+            shutdownCalls++;
+            const operation = observedRecorder.begin('shutdown-stage', { stage: 'office_close' });
+            return new Promise(resolve => { shutdownRelease = async () => {
+              operation.end(); await observedDiagnostics.flush(); shutdownLockHeld = false;
+              resolve({ unresolved: [], leftToSystem: [], stopped: [] });
+            }; });
+          },
+        }),
+      });
+      return registry;
+    };
+  }
   if (mode.startsWith('cancel-quit')) {
     const registryModule = require(path.join(path.dirname(productMain), 'a9-workspace-registry.js'));
     const createRegistry = registryModule.createA9WorkspaceRegistry;
@@ -67,6 +102,8 @@ if (mode.startsWith('baseline-')) {
   let background;
   const loggerModule = require(path.join(path.dirname(productMain), 'a9-diagnostics-log.js'));
   const createLog = loggerModule.createDiagnosticsLog;
+  const createRecorder = loggerModule.createFlightRecorder;
+  loggerModule.createFlightRecorder = log => { observedRecorder = createRecorder(log); return observedRecorder; };
   loggerModule.createDiagnosticsLog = options => {
     const slow = ['slow-startup', 'slow-uncaught'].includes(mode);
     const pending = mode === 'early-exit' || mode === 'early-quit';
@@ -133,6 +170,55 @@ if (mode.startsWith('baseline-')) {
           execFileSync('mkfifo', [path.join(observedDiagnostics.snapshot().directory, 'main.fatal.jsonl')]);
           write('fifo-ready.json', { ready: true });
           app.quit();
+          return;
+        }
+        if (mode === 'renderer-wait') {
+          const assert = require('assert');
+          holdNextSnapshot = true;
+          await window.webContents.executeJavaScript('window.__a965pending = window.win7Agent.a9.snapshot(); true');
+          await new Promise(resolve => setTimeout(resolve, 8300));
+          const shown = await window.webContents.executeJavaScript(`(() => {
+            const node = document.getElementById('main-response-wait');
+            return { hidden: node.hidden, text: node.textContent };
+          })()`);
+          assert.equal(shown.hidden, false); assert(shown.text.includes('8 秒'));
+          assert(shown.text.includes(observedDiagnostics.snapshot().directory));
+          await releaseSnapshot();
+          await window.webContents.executeJavaScript('window.__a965pending');
+          const cleared = await window.webContents.executeJavaScript('document.getElementById("main-response-wait").hidden');
+          assert(cleared);
+          // Exercise the actual drawer interaction and existing directory rows.
+          await window.webContents.executeJavaScript('document.getElementById("open-diagnostics").click(); true');
+          await new Promise(resolve => setTimeout(resolve, 100));
+          const panel = await window.webContents.executeJavaScript('document.getElementById("diagnostics").textContent');
+          assert(panel.includes('诊断日志目录')); assert(panel.includes(observedDiagnostics.snapshot().directory));
+          write('renderer-wait.json', { shown, cleared, directoryInDrawer: true });
+        }
+        if (mode === 'shutdown-stall') {
+          const assert = require('assert');
+          const workspace = path.join(runRoot, 'shutdown workspace'); fs.mkdirSync(workspace);
+          registry.open(workspace);
+          window.close();
+          await new Promise(resolve => setTimeout(resolve, 120));
+          assert(!window.isDestroyed()); assert(shutdownLockHeld); assert.equal(shutdownCalls, 1);
+          const dialogResult = JSON.parse(fs.readFileSync(path.join(runRoot, 'dialog.json'), 'utf8'));
+          assert(dialogResult.content.includes('office_close'));
+          assert(dialogResult.content.includes(observedDiagnostics.snapshot().directory));
+          await observedDiagnostics.flush();
+          const directory = observedDiagnostics.snapshot().directory;
+          const rows = fs.readdirSync(directory).filter(name => name.endsWith('.jsonl'))
+            .flatMap(name => fs.readFileSync(path.join(directory, name), 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line)));
+          assert(rows.some(row => row.event === 'shutdown-stage-begin' && row.stage === 'office_close'));
+          assert(!rows.some(row => row.event === 'shutdown-stage-end' && row.stage === 'office_close'));
+          // The same window remains interactive; a second close reuses cleanup.
+          const title = await window.webContents.executeJavaScript('document.title'); assert(title);
+          window.close(); await new Promise(resolve => setTimeout(resolve, 15));
+          assert.equal(shutdownCalls, 1); assert(shutdownLockHeld);
+          write('shutdown-stall.json', { stage: 'office_close', shutdownCalls, lockHeldAtReport: shutdownLockHeld,
+            windowAliveAtReport: !window.isDestroyed(), beganWithoutEnd: true, rendererResponsive: true,
+            peripheral: 'controlled runtime cleanup; main/registry/preload/renderer and diagnostic log are real' });
+          shutdownRelease();
+          await observedDiagnostics.flush();
           return;
         }
         if (mode.startsWith('cancel-quit')) {

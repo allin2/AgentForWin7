@@ -249,6 +249,8 @@
     lastGitStatus = git || lastGitStatus;
     const node = el('a9-git-status');
     if (!node || !lastGitStatus) return;
+    const diagnostics = (lastGitStatus.diagnostics || []).map(item => `${item.code}: ${item.detail || ''}`).join('；');
+    if (diagnostics) { node.textContent = diagnostics; return; }
     if (lastGitStatus.isGit === false) {
       node.textContent = lastGitStatus.degradedReason || '非 Git 工作区';
       return;

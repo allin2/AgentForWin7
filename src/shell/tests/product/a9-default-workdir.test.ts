@@ -295,6 +295,7 @@ describe('A9-55 default workdir real State/runtime/IPC', () => {
   it('preload exposes only narrow version-nine requests with captured scope', async () => {
     const requests: any[] = []; let api: any;
     vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../../product/preload.js'), 'utf8'), {
+      setTimeout, clearTimeout, setInterval, clearInterval,
       require: (name: string) => { expect(name).toBe('electron'); return {
         contextBridge: { exposeInMainWorld: (_name: string, value: any) => { api = value.a9; } },
         ipcRenderer: { invoke: async (_channel: string, request: any) => { requests.push(request); }, on() {}, send() {} },

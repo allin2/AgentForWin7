@@ -2105,19 +2105,22 @@ function createA9AgentRuntime(options) {
 
   /** F4：验证 DPAPI 秘密已持久化且当前可读取（不返回明文）。 */
   async function verifyPersistedSecretsReadable() {
+    const failed = detail => {
+      providerDiagnostics = { code: 'A9_PROVIDER_SECRET_VERIFY_FAILED', detail };
+      return false;
+    };
     try {
-      if (apiKeyVault && memoryApiKey) {
-        const loaded = apiKeyVault.loadApiKey();
-        if (loaded !== memoryApiKey) return false;
-      }
+      if (apiKeyVault && memoryApiKey && apiKeyVault.loadApiKey() !== memoryApiKey) return failed('内容不一致');
       if (secretsVault && memorySecrets && Object.keys(memorySecrets.headerValues || {}).length + (memorySecrets.proxyPassword ? 1 : 0) > 0) {
-        const loaded = JSON.parse(secretsVault.loadApiKey());
-        if (JSON.stringify(loaded) !== JSON.stringify(memorySecrets)) return false;
+        // Read and parse separately: never copy exception messages or secret bytes.
+        const text = secretsVault.loadApiKey();
+        let loaded;
+        try { loaded = JSON.parse(text); }
+        catch (_error) { return failed('内容不是合法 JSON'); }
+        if (JSON.stringify(loaded) !== JSON.stringify(memorySecrets)) return failed('内容不一致');
       }
       return true;
-    } catch (_err) {
-      return false;
-    }
+    } catch (_error) { return failed('读取失败'); }
   }
 
   async function classifyProviderWithProbe() {
@@ -2892,6 +2895,8 @@ function createA9AgentRuntime(options) {
       ...(modeDiagnostics ? { modeDiagnostics } : {}),
       ...(checkpointRecoveryDiagnostics ? { checkpointRecoveryDiagnostics } : {}),
       ...(contextBudgetDiagnostics ? { contextBudgetDiagnostics } : {}),
+      persistenceDiagnostics: (typeof persistence.getDiagnostics === 'function' ? persistence.getDiagnostics() : [])
+        .slice(0, 20).map(({ code, detail }) => ({ code, detail: redactSecrets(detail) })),
       recoveryIgnoreDiagnostics: [...new Set([standaloneWorkspaceService, loopWorkspaceService].filter(Boolean)
         .flatMap((service) => service.getCheckpointManager().getRecoveryDiagnostics())
         .map((diagnostic) => JSON.stringify(diagnostic)))].map((item) => JSON.parse(item)),
@@ -3331,14 +3336,27 @@ function createA9AgentRuntime(options) {
     };
   }
 
+  let shutdownStage = null;
+  function beginShutdownStage(stage) {
+    shutdownStage = stage;
+    const operation = config.shutdownStageRecorder && config.shutdownStageRecorder(stage);
+    return error => {
+      if (operation) operation.end(error);
+      shutdownStage = null;
+    };
+  }
+  async function shutdownWait(stage, work) {
+    const end = beginShutdownStage(stage);
+    try { const result = await work(); end(); return result; }
+    catch (error) { end(error); throw error; }
+  }
+
   function shutdown(options = {}) {
+    if (shutdownPromise) return shutdownPromise;
     shutdownRequested = true;
     queueClosed = true;
     pauseQueue();
     if (imageService) imageService.clear();
-    const officeClose = officeService ? officeService.close() : Promise.resolve();
-    if (shutdownPromise && options.stopManaged !== false) return shutdownPromise;
-    if (options.stopManaged === false) shutdownPromise = null;
     const manager = loopTrustedRunner.getBackgroundManager();
     const releaseWorkspaceLock = () => {
       if (!workspaceLockReleased) {
@@ -3350,6 +3368,9 @@ function createA9AgentRuntime(options) {
       && !activeController && !(options.cancelPending && (currentPendingApproval || currentPendingQuestion)) && manager.getActiveCount() === 0) {
       // 保留既有无负载关闭语义：无需等待时同步释放锁，紧接着切换/重开
       // 同一工作区不会短暂误报 A9_WORKSPACE_LOCKED。
+      for (const stage of ['checkpoint_recovery', 'active_task_cancel', 'office_close', 'state_operations', 'managed_process_stop', 'background_manager_dispose']) {
+        const end = beginShutdownStage(stage); end();
+      }
       releaseWorkspaceLock();
       shutdownPromise = Promise.resolve({ stopped: [], leftToSystem: [], unresolved: [] });
       return shutdownPromise;
@@ -3357,42 +3378,49 @@ function createA9AgentRuntime(options) {
     const attempt = (async () => {
       // Startup recovery owns this workspace and the shared DB until its final
       // reconciliation. Close/rebind cannot release that ownership early.
-      await checkpointRecoveryReady;
-      if (activeController) {
-        activeController.abort();
-        agentStatus = 'cancelling';
-        const deadline = Date.now() + 10_000;
-        while (activeController && Date.now() < deadline) {
-          await new Promise((resolve) => setTimeout(resolve, 25));
+      // Defer peripheral invocation until the shared promise is cached.
+      await Promise.resolve();
+      const officeClose = officeService ? Promise.resolve().then(() => officeService.close()) : Promise.resolve();
+      // Observe rejection immediately while recovery/cancellation still owns the wait.
+      officeClose.catch(() => {});
+      await shutdownWait('checkpoint_recovery', () => checkpointRecoveryReady);
+      await shutdownWait('active_task_cancel', async () => {
+        if (activeController) {
+          activeController.abort();
+          agentStatus = 'cancelling';
+          const deadline = Date.now() + 10_000;
+          while (activeController && Date.now() < deadline) {
+            await new Promise((resolve) => setTimeout(resolve, 25));
+          }
         }
-      }
-      // A9-52: explicitly closing a workspace revokes suspended work too.
-      // Do not leave active SQLite rows behind for a later Runtime to inherit.
-      if (options.cancelPending && !activeController && (currentPendingApproval || currentPendingQuestion)) {
-        const question = currentPendingQuestion;
-        const lifecycle = activeLifecycle || (question && { taskId: question.taskId, turnId: question.turnId, runId: `run-${question.turnId}` });
-        if (!lifecycle || !lifecycle.turnId) throw new Error('A9_SHUTDOWN_LIFECYCLE_MISSING');
-        if (currentPendingApproval) {
-          const approval = approvalIdentity(currentPendingApproval);
-          persistence.recordApproval({ approvalId: approval.approvalId, sessionId: a9SessionId,
-            turnId: approval.turnId, toolName: approval.toolName, binding: approval, decision: 'denied' });
-          emitApprovalResolved(currentPendingApproval, 'denied');
+        // A9-52: explicitly closing a workspace revokes suspended work too.
+        // Do not leave active SQLite rows behind for a later Runtime to inherit.
+        if (options.cancelPending && !activeController && (currentPendingApproval || currentPendingQuestion)) {
+          const question = currentPendingQuestion;
+          const lifecycle = activeLifecycle || (question && { taskId: question.taskId, turnId: question.turnId, runId: `run-${question.turnId}` });
+          if (!lifecycle || !lifecycle.turnId) throw new Error('A9_SHUTDOWN_LIFECYCLE_MISSING');
+          if (currentPendingApproval) {
+            const approval = approvalIdentity(currentPendingApproval);
+            persistence.recordApproval({ approvalId: approval.approvalId, sessionId: a9SessionId,
+              turnId: approval.turnId, toolName: approval.toolName, binding: approval, decision: 'denied' });
+            emitApprovalResolved(currentPendingApproval, 'denied');
+          }
+          if (question) persistence.resolveQuestion(canonicalWorkspace, {
+            conversationId: a9SessionId, questionId: question.questionId, revision: question.revision, decision: 'cancelled',
+          });
+          persistTurnResult(lifecycle, { turnId: lifecycle.turnId, outcome: 'cancelled', verification: 'not_applicable',
+            finalMessage: 'Workspace closed by user; pending operations were cancelled without execution.', totalSteps: 0,
+            toolCallsExecuted: 0, externalChanges: [] });
         }
-        if (question) persistence.resolveQuestion(canonicalWorkspace, {
-          conversationId: a9SessionId, questionId: question.questionId, revision: question.revision, decision: 'cancelled',
-        });
-        persistTurnResult(lifecycle, { turnId: lifecycle.turnId, outcome: 'cancelled', verification: 'not_applicable',
-          finalMessage: 'Workspace closed by user; pending operations were cancelled without execution.', totalSteps: 0,
-          toolCallsExecuted: 0, externalChanges: [] });
-      }
-      await officeClose;
+      });
+      await shutdownWait('office_close', () => officeClose);
       // An uncooperative active Turn still uses the existing shutdown deadline
       // and unresolved result. Its pending promise must not bypass that limit.
-      if (!activeController) await Promise.allSettled(Array.from(pendingStateOperations));
-      if (managedStopPromise) await managedStopPromise;
+      await shutdownWait('state_operations', () => !activeController ? Promise.allSettled(Array.from(pendingStateOperations)) : undefined);
+      await shutdownWait('managed_process_stop', () => managedStopPromise);
       const before = manager.list();
       const stopManaged = options.stopManaged !== false;
-      const result = await manager.dispose({ stopManaged });
+      const result = await shutdownWait('background_manager_dispose', () => manager.dispose({ stopManaged }));
       for (const handle of before) {
         // Terminal/released state was already audited by the manager. Do not overwrite it with a pre-release snapshot.
         if (result.stopped.includes(handle.handleId)) recordManagedHandle({ ...handle, status: 'stopped', cleanupRequired: false });
@@ -3511,6 +3539,7 @@ function createA9AgentRuntime(options) {
       } catch (error) { return { ok: false, error: redactForProjection(serializeError(error)) }; }
     },
     shutdown,
+    getShutdownStage: () => shutdownStage,
   };
 }
 
@@ -3640,6 +3669,7 @@ function createSqliteUnavailableRuntime(reason) {
     undoFile() { throw new Error('ELECTRON_SQLITE_UNAVAILABLE'); },
     getDiff() { throw new Error('ELECTRON_SQLITE_UNAVAILABLE'); },
     async gitStatus() { return { ok: false, error: { code: 'ELECTRON_SQLITE_UNAVAILABLE' } }; },
+    getShutdownStage() { return null; },
     shutdown() {},
   };
 }
@@ -3699,6 +3729,7 @@ function createDiagnosticsRuntime(outcome) {
     undoFile() { throw new Error('A9_DIAGNOSTICS_MODE'); },
     getDiff() { throw new Error('A9_DIAGNOSTICS_MODE'); },
     async gitStatus() { return { ok: false, error: { code: 'A9_DIAGNOSTICS_MODE' } }; },
+    getShutdownStage() { return null; },
     shutdown() {},
   };
 }

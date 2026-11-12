@@ -23,6 +23,17 @@
       return scoped[key];
     },
   });
+  if (api && typeof api.onRequestWait === 'function') {
+    api.onRequestWait(status => {
+      const node = document.getElementById('main-response-wait');
+      if (!node) return;
+      node.hidden = !status;
+      node.textContent = status
+        ? `主进程已有 ${status.elapsedSeconds} 秒没有响应。诊断日志：${status.directory || '尚未取得诊断日志目录'}` : '';
+    });
+    // Cache the existing diagnostic directory before the first long request.
+    void api.getDiagnostics().catch(() => { console.warn('A9_DIAGNOSTIC_DIRECTORY_UNAVAILABLE'); });
+  }
   const SUPPORTED_MODES = new Set(['full_access', 'read_only']);
   const MODE_LABELS = Object.freeze({
     full_access: 'Full Access',
@@ -4283,9 +4294,10 @@
     ].filter(Boolean);
     const actions = [count > 0 ? `有 ${count} 处变更，可审阅 Diff`
       : git.clean === true ? '工作区干净，无需审阅 Diff' : '', ...divergence].filter(Boolean);
-    text('a9-git-status', git.isGit === false
+    const gitDiagnostics = (git.diagnostics || []).map(item => `${item.code}: ${item.detail || ''}`).join('；');
+    text('a9-git-status', gitDiagnostics || (git.isGit === false
       ? (git.degradedReason || '非 Git 工作区')
-      : `${git.branch || '-'} · ${git.clean ? 'clean' : `${count} 处变更`} · 外部机制：${(git.externalMechanisms || []).map((item) => item.kind).join(', ') || '无'}${actions.length ? `。${actions.join('；')}。` : ''}`);
+      : `${git.branch || '-'} · ${git.clean ? 'clean' : `${count} 处变更`} · 外部机制：${(git.externalMechanisms || []).map((item) => item.kind).join(', ') || '无'}${actions.length ? `。${actions.join('；')}。` : ''}`));
   }
 
   function providerValues() {
@@ -4617,7 +4629,16 @@
       ['Chrome', response.runtime && response.runtime.chrome], ['Architecture', response.runtime && response.runtime.arch],
       ['Platform', response.runtime && response.runtime.platform],
     ];
+    const log = response.diagnosticLog || {};
+    rows.push(['诊断日志目录', log.directory || '尚未取得']);
+    for (const [key, label] of [['writeFailureCount', '日志写入失败'], ['droppedCount', '日志丢弃'], ['suppressedCount', '被抑制的异常']]) {
+      if (log[key] > 0) rows.push([label, String(log[key])]);
+    }
+    if (log.ipcWaitSuspended) rows.push(['IPC 诊断等待', '熔断中']);
     if (state.snapshot) {
+      (state.snapshot.persistenceDiagnostics || []).forEach(diagnostic => {
+        rows.push(['持久化诊断', `${diagnostic.code}: ${diagnostic.detail}`]);
+      });
       rows.push(['A9 Runtime status', state.snapshot.status || '-']);
       rows.push(['A9 Runtime diagnostic', state.snapshot.status === 'ready' ? 'ready' : runtimeDiagnostic(state.snapshot)]);
       rows.push(['上下文预算', String(state.snapshot.contextWindow?.budgetChars || '-')]);
