@@ -169,7 +169,7 @@ export async function projectTrustedGit(workDir: string): Promise<TrustedGitProj
   const branchResult = await execGit(workDir, ['rev-parse', '--abbrev-ref', 'HEAD']);
   const headResult = await execGit(workDir, ['rev-parse', '--verify', '--quiet', 'HEAD']);
   const noCommit = headResult.failure === 'exit_nonzero' && headResult.code === 1 && headResult.stderr.trim() === '';
-  if (!noCommit) addCommandDiagnostic(diagnostics, branchResult, 'rev-parse branch');
+  if (!noCommit || branchResult.failure !== 'exit_nonzero') addCommandDiagnostic(diagnostics, branchResult, 'rev-parse branch');
   projection.branch = branchResult.code === 0 ? branchResult.stdout.trim() : undefined;
 
   if (!noCommit) addCommandDiagnostic(diagnostics, headResult, 'rev-parse HEAD');
@@ -199,7 +199,7 @@ export async function projectTrustedGit(workDir: string): Promise<TrustedGitProj
   const diffResult = await execGit(workDir, [
     'diff', '--no-ext-diff', '--no-textconv', 'HEAD', '--stat', '--patch', `--unified=3`,
   ], { disabledFilters });
-  if (!noCommit) addCommandDiagnostic(diagnostics, diffResult, 'diff');
+  if (!noCommit || diffResult.failure !== 'exit_nonzero') addCommandDiagnostic(diagnostics, diffResult, 'diff');
   if (diffResult.code === 0) {
     if (diffResult.stdout.length > MAX_DIFF_BYTES) {
       projection.diffPreview = diffResult.stdout.slice(0, MAX_DIFF_BYTES);

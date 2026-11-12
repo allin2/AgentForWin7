@@ -133,6 +133,40 @@ describe('A9-05: trusted git projection on real temp repositories', () => {
     }
   });
 
+  it('reports an oversized diff even when HEAD indicates no commits', async () => {
+    const oldPath = process.env.PATH;
+    const fakeRoot = makeTempDir('a9-63-git-no-commit-');
+    try {
+      const realGit = findGitBinary();
+      const fakeGit = path.join(fakeRoot, 'git');
+      fs.writeFileSync(fakeGit, [
+        '#!/bin/sh',
+        'while [ "$1" = "-c" ]; do shift 2; done',
+        'if [ "$1" = "rev-parse" ] && [ "$2" = "--verify" ]; then exit 1; fi',
+        'if [ "$1" = "rev-parse" ] && [ "$2" = "--abbrev-ref" ]; then exit 128; fi',
+        'if [ "$1" = "diff" ]; then',
+        `  exec ${JSON.stringify(process.execPath)} -e 'process.stdout.write("x".repeat(5 * 1024 * 1024))'`,
+        'fi',
+        `exec ${JSON.stringify(realGit)} "$@"`,
+        '',
+      ].join('\n'), 'utf8');
+      fs.chmodSync(fakeGit, 0o755);
+      process.env.PATH = `${fakeRoot}${path.delimiter}${oldPath || ''}`;
+
+      const projection = await projectTrustedGit(repo);
+      expect(projection.isGit).toBe(true);
+      expect(projection.head).toBeUndefined();
+      expect(projection.branch).toBeUndefined();
+      expect(projection.diagnostics).toEqual(expect.arrayContaining([
+        expect.objectContaining({ code: 'A9_GIT_OUTPUT_TOO_LARGE', operation: 'diff' }),
+      ]));
+    } finally {
+      if (oldPath === undefined) delete process.env.PATH;
+      else process.env.PATH = oldPath;
+      fs.rmSync(fakeRoot, { recursive: true, force: true });
+    }
+  });
+
   it('reports an oversized diff separately from a Git spawn failure', async () => {
     const largePath = path.join(repo, 'large.txt');
     fs.writeFileSync(largePath, 'base\n');

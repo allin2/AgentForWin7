@@ -152,3 +152,57 @@ Git 投影现在可区分以下六种失败；正常状态不产生诊断：
 最终提交为本分支在 698b1b57 之后的追加提交，未改写历史。
 源码/测试哈希、提交及命令绑定保存在上述证据目录的 final-binding.json。
 Win7 实机、Win10 验收机、Electron 产品链路、打包、正式门 A/B、推送与发布为 NOT_PERFORMED。
+
+## 2026-11-11 独立复审返修（A9-63-FL-REV3）
+
+负责人转交的独立复审结论为 P0×0、P1×0、P2×1，并授权两项返修及一次本机运行时确认。
+实际工作树为 `/private/tmp/a9-63-fail-loud`，分支为 `a9-63-fail-loud`。
+本轮基线为 `fdde0ae8c0a44801004956b09a1546a3e4f3359b`，开始时工作树干净。
+只修改本任务书、`src/git-adapter/src/trusted-projection.ts` 及其直接测试。
+原分支追加本地提交，不改写历史；不修改、暂存或清理主工作区，不推送或连接 Win7。
+无新增依赖、原生组件、公开接口、持久化格式或权限语义。
+
+### 返修内容与已知限制
+
+无提交判定只抑制失败类型为 `exit_nonzero` 的退出码非零失败。
+分支查询与 diff 即使遇到无提交判定，仍记录超时、启动失败和输出超限诊断。
+HEAD 查询保持原条件；无提交判定本身就要求 HEAD 查询失败类型为 `exit_nonzero`。
+最短开发链路为假 Git 返回无提交信号 → 真实 diff 子进程输出 5 MiB →
+真实 `execFile` 达到 4 MiB 上限 → 投影保留 `A9_GIT_OUTPUT_TOO_LARGE / diff`。
+
+单次投影诊断条数的**静态上限为 13 条**。
+根目录探测失败时提前返回，至多 1 条。
+成功进入仓库路径后，filter 配置及 branch/HEAD/status/diff 至多 5 条，
+外部机制的 5 次配置查询至多 5 条，hooks 读取至多 1 条，两处 attributes 读取至多 2 条。
+该上限来自当前调用结构，不新增运行时截断规则。
+
+**已知限制：分支引用文件损坏或为空时，仓库被当作无提交，不产生诊断。**
+独立复审已确认这两种现象；本轮不重复执行该探针。
+原因是 `rev-parse --verify --quiet HEAD` 同样返回退出码 1 且 stderr 为空。
+进一步区分需要额外的 Git 进程，本轮不增加该探测。
+
+### 本轮直接验证
+
+证据保留在候选外 `/private/tmp/a9-63-rev3-evidence-nhpayqnp`；此目录为证据，不是测试沙箱。
+共同测试前缀为 `env -u NODE_OPTIONS -u ELECTRON_RUN_AS_NODE`，
+Node 路径为 `/Users/qlyf/.nvm/versions/node/v20.17.0/bin/node`。
+PATH 固定为 `/Users/qlyf/.nvm/versions/node/v20.17.0/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin`。
+所有结果均为开发机直接证据，不构成 Win7 或打包产品验证。
+
+| 检查与命令 | 结果 | 证据 |
+|---|---|---|
+| 基线红色：在 `src/git-adapter` 执行 `node node_modules/jest/bin/jest.js --runInBand --runTestsByPath tests/trusted-projection.test.ts` | FAIL，1 failed / 12 passed / 13 total；仅新测试失败，收到的 diagnostics 为 undefined | red.log、red-command.json |
+| 返修绿色及日常：在工作树根执行 `node scripts/verify_integration.mjs --daily --module git-adapter` | PASS，5 suites / 64 tests；Runner 与 Git Adapter 当前源码构建和安全静态门通过 | daily.log、daily-command.json |
+| 本机运行时：`env -u NODE_OPTIONS ELECTRON_RUN_AS_NODE=1 /Users/qlyf/.cache/w7-electron-22.3.27/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron /private/tmp/a9-63-rev3-evidence-nhpayqnp/electron-maxbuffer.cjs` | PASS，Electron 22.3.27 / Node 16.17.1 / darwin arm64；真实 execFile 的 err.code 为 ERR_CHILD_PROCESS_STDIO_MAXBUFFER | electron-maxbuffer.log、electron-command.json |
+| 文档：在工作树根执行 `node scripts/check_docs.mjs` | FAIL，仅既有 task-index 与 task-lifecycle 两项；A9-63 未入索引及生命周期表，均指向禁止修改的 docs/tasks/README.md | docs-check.log |
+| 差异：在工作树根执行 `git diff --check` | PASS | 提交前直接执行 |
+| 沙箱：用 Python 比较运行前后的系统临时目录中 a9-*、win7-verify-* 目录名 | PASS，本轮新增测试目录零残留；只排除准确的本轮证据目录 | temp-before.json、temp-residue.json |
+
+新测试名为 `reports an oversized diff even when HEAD indicates no commits`。
+红色运行前逐字节核对产品源码与 fdde0ae8 相同；新测试不使用 15 秒超时。
+既有 `does not diagnose a repository with no commits` 在红色运行及返修日常集合中均 PASS。
+测试目录位于系统临时目录，新夹具带 `a9-63-git-no-commit-` 前缀。
+新夹具在 finally 清理并恢复 PATH；真实仓库沿用 afterEach 清理。
+
+Win7 实机、Win10 验收机、Electron 产品链路、打包、正式门 A/B、推送与发布为 NOT_PERFORMED。
+本机 Electron 检查仅确认 child_process 错误码及运行时版本，不启动 GUI 或完整产品。
