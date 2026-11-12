@@ -169,8 +169,19 @@ it('reconstructs archived read-only cards after runtime restart and keeps the cu
     await f.runtime.shutdown();
     reopened = createA9AgentRuntime({ workspaceRoot: f.workspace, dataRoot: path.join(f.root, 'data'), ownerId: 'reopen', openDatabase: (file: string, opts: any) => new Database(file, opts) });
     expect(reopened.getDelivery({ conversationId: id, turnId: 'restart-turn' })).toEqual(prior);
-    const before = state(f);
-    expect(await delivery(f, id, 'restart-turn')).toEqual(prior); expect(state(f)).toEqual(before);
+    // A restart has a fresh Registry/IPC binding; the old handler owns the closed Runtime.
+    expect(await delivery(f, id, 'restart-turn')).toMatchObject({ ok: false, error: { code: 'A9_RUNTIME_SHUTDOWN' } });
+    const registry = createA9WorkspaceRegistry({ createRuntime: () => reopened });
+    const entry = registry.activate(f.workspace);
+    const handler = createA9ProductRequestHandler({ workspaceRegistry: registry,
+      isValidRendererSender: () => true, getA9Runtime: () => reopened });
+    const restarted = { ...f, runtime: reopened, registry };
+    const before = state(restarted);
+    const scope = { workspaceId: entry.workspaceId, conversationId: reopened.getSnapshot({ conversationPage: true }).activeConversationId };
+    expect(await handler({}, { schemaVersion: 9, action: 'a9.delivery.get',
+      payload: { conversationId: id, turnId: 'restart-turn' }, scope })).toEqual(prior);
+    expect(state(restarted)).toEqual(before);
+    expect(() => reopened.getDiff('restart-turn')).toThrow('A9_CHECKPOINT_CONVERSATION_MISMATCH');
   } finally { if (reopened) await reopened.shutdown(); await f.close(); }
 });
 it('fails closed on oversized or malformed checkpoint metadata and supports retry after repair', async () => {
