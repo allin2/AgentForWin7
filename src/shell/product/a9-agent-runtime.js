@@ -3273,7 +3273,11 @@ function createA9AgentRuntime(options) {
     return manager.getTurnDiffAndReviewAsync(String(turnId)).then(({ diff, review }) => {
       // Also covers failed configuration before manager revalidation and a
       // sibling workspace replacing Provider state while the old manager runs.
-      if (generation !== knownSecretGeneration) throw new Error('A9_CHECKPOINT_VALIDATION_STALE: preview secret state changed');
+      // Sibling secrets arrive in Registry's finally; reject while its update
+      // is pending as well, before that sibling generation can be propagated.
+      if (generation !== knownSecretGeneration || (config.isProviderConfiguring && config.isProviderConfiguring())) {
+        throw new Error('A9_CHECKPOINT_VALIDATION_STALE: preview secret state changed');
+      }
       return { ok: true, diff, review };
     });
   }

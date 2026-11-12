@@ -17,7 +17,7 @@ function deferred() {
 }
 
 /** Real services and SQLite. Only readiness/validation scheduling is held by tests. */
-function environment() {
+function environment(runtimeOptions: any = {}) {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'a9-61-review-')));
   const a = path.join(root, 'A 中文'), b = path.join(root, 'B space');
   fs.mkdirSync(a); fs.mkdirSync(b);
@@ -34,7 +34,7 @@ function environment() {
   };
   const createRuntime = (workspaceRoot = a, host: any = {}) => {
     const open = host.openPersistence || ((_values: any, factory: any) => factory(_values));
-    const runtime = createA9AgentRuntime({ ...host, modules, workspaceRoot, dataRoot: path.join(root, 'data'),
+    const runtime = createA9AgentRuntime({ ...host, ...runtimeOptions, modules, workspaceRoot, dataRoot: path.join(root, 'data'),
       ownerId: `a9-61-review-${process.pid}-${runtimes.length}`,
       openPersistence: (values: any, factory: any) => { const result = open(values, factory); persistence = result.manager; return result; },
       openDatabase: (file: string, options: any) => { const db = new Database(file, options); databases.push(db); return db; },
@@ -422,6 +422,53 @@ describe('A9-61 review wait boundaries', () => {
       expect(JSON.stringify(response)).not.toContain(secret);
     } finally {
       if (scheduled) clearImmediate(scheduled);
+      if (configuring) await configuring;
+      await f.close();
+    }
+  });
+
+  it.each([true, false])('F3 revokes a sibling preview while its real Provider probe is pending (probe ok=%s)', async ok => {
+    const probe = deferred(), entered = deferred();
+    const f = environment({ wrapProvider: () => ({ probeCapability: async () => {
+      entered.release(); await probe.promise;
+      return { ok, hasToolCalling: ok, hasStreaming: false, latencyMs: 0 };
+    } }) });
+    const secret = 'PENDING-SIBLING-PROVIDER-SECRET-A961';
+    let configuring: Promise<any> | undefined, scheduled: NodeJS.Immediate | undefined;
+    let settled = false, rendered = 0;
+    try {
+      const runtime = f.registry.activate(f.a).runtime;
+      await runtime.whenReady();
+      for (let i = 0; i < 70; i += 1) {
+        const name = `pending-${i}.txt`;
+        fs.writeFileSync(path.join(f.a, name), i === 0 ? secret : `public ${i}`, 'utf8');
+        await f.services[0].read(name);
+        await f.services[0].write(name, 'safe replacement', { turnId: 'pending-preview' });
+      }
+      f.persistence.saveCheckpoint({ turnId: 'pending-preview', sessionId: runtime.getSnapshot().activeConversationId, payload: {} });
+      const manager = f.services[0].getCheckpointManager();
+      expect(manager.loadCheckpoint('pending-preview')).toBeDefined();
+      const preview = manager.recordDiffPreview.bind(manager);
+      jest.spyOn(manager, 'recordDiffPreview').mockImplementation((record: any) => {
+        const value = preview(record);
+        if (++rendered === 1) scheduled = setImmediate(() => {
+          const target = f.registry.activate(f.b).runtime;
+          configuring = f.registry.configureProvider(target, {
+            baseUrl: 'https://fixture.invalid', model: 'fixture', apiKey: secret,
+          }).finally(() => { settled = true; });
+        });
+        return value;
+      });
+      const responsePromise = f.call('a9.diff.get', { turnId: 'pending-preview' });
+      await entered.promise;
+      const response = await responsePromise;
+      expect(settled).toBe(false);
+      expect(JSON.stringify(response).includes(secret)).toBe(false);
+      expect(response.ok).toBe(false);
+      probe.release(); await configuring;
+      expect(settled).toBe(true);
+    } finally {
+      probe.release(); if (scheduled) clearImmediate(scheduled);
       if (configuring) await configuring;
       await f.close();
     }
