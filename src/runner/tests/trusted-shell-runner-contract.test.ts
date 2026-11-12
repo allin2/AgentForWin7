@@ -20,6 +20,57 @@ import {
 } from '../src';
 import type { HelperTransport, HelperTransportResult } from '../src';
 
+const temporaryRoots = new Set<string>();
+const runners = new Set<TrustedShellRunner>();
+let processesStopped = true;
+
+function temporaryDirectory(prefix: string, roots = temporaryRoots, suffixes: string[] = []): string {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  roots.add(root);
+  // Register renamed paths before the operation, including assertion-failure paths.
+  for (const suffix of suffixes) roots.add(root + suffix);
+  return root;
+}
+
+function removeTemporaryDirectories(roots: Set<string>): void {
+  for (const root of roots) {
+    if (!processesStopped) {
+      console.warn(`TEMP_CLEANUP_SKIPPED: ${root}: child shutdown unconfirmed`);
+      continue;
+    }
+    try {
+      fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+      roots.delete(root);
+    } catch (error) {
+      console.warn(`TEMP_CLEANUP_FAILED: ${root}: ${(error as NodeJS.ErrnoException).code}`);
+    }
+  }
+}
+
+// Only real developer-host runners use this helper; helper fixtures spawn no OS children.
+function testRunner(options: ConstructorParameters<typeof TrustedShellRunner>[0]): TrustedShellRunner {
+  const runner = new TrustedShellRunner(options);
+  runners.add(runner);
+  return runner;
+}
+
+afterEach(async () => {
+  for (const runner of runners) {
+    const manager = runner.getBackgroundManager();
+    for (const handle of manager.list()) {
+      try {
+        // stop() verifies process-tree termination before resolving.
+        await manager.stop(handle.handleId);
+      } catch (error) {
+        processesStopped = false;
+        console.warn(`TEMP_CHILD_CLEANUP_FAILED: ${handle.handleId}: ${String(error)}`);
+      }
+    }
+  }
+  runners.clear();
+  removeTemporaryDirectories(temporaryRoots);
+});
+
 describe('A9-02 regression: shell invocation contracts', () => {
   it('captures the complete recursive Windows descendant set before taskkill verification', () => {
     const table = [
@@ -163,10 +214,13 @@ describe('A9-02 regression: output decoding', () => {
 });
 
 describe('A9-02 regression: honest termination and logs', () => {
-  const logDir = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-shell-logs-'));
+  const suiteRoots = new Set<string>();
+  let logDir: string;
+  beforeAll(() => { logDir = temporaryDirectory('a9-shell-logs-', suiteRoots); });
+  afterAll(() => removeTemporaryDirectories(suiteRoots));
 
   it('verifies cleanup after cancellation and reports processTreeReaped only when proven', async () => {
-    const runner = new TrustedShellRunner({ logDir });
+    const runner = testRunner({ logDir });
     const controller = new AbortController();
     setTimeout(() => controller.abort(), 150);
     const result = await runner.execute({
@@ -189,18 +243,18 @@ describe('A9-02 regression: honest termination and logs', () => {
 
   it('reaps a real POSIX shell descendant and waits for cleanup proof before returning cancelled', async () => {
     if (process.platform === 'win32') return;
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-shell-tree-'));
+    const root = temporaryDirectory('a9-shell-tree-');
     const marker = path.join(root, 'child.pid');
     const childScript = path.join(root, 'child.cjs');
     fs.writeFileSync(childScript, `'use strict';\nrequire('fs').writeFileSync(process.argv[2], String(process.pid));\nsetInterval(() => {}, 1000);\n`, 'utf8');
     const quote = (value: string) => `"${value.replace(/"/g, '\\"')}"`;
-    const runner = new TrustedShellRunner({ logDir });
+    const runner = testRunner({ logDir });
     const controller = new AbortController();
+    const execution = runner.execute({
+      command: `${quote(process.execPath)} ${quote(childScript)} ${quote(marker)}`,
+      signal: controller.signal,
+    });
     try {
-      const execution = runner.execute({
-        command: `${quote(process.execPath)} ${quote(childScript)} ${quote(marker)}`,
-        signal: controller.signal,
-      });
       const deadline = Date.now() + 10_000;
       while (!fs.existsSync(marker) && Date.now() < deadline) {
         await new Promise((resolve) => setTimeout(resolve, 50));
@@ -214,12 +268,22 @@ describe('A9-02 regression: honest termination and logs', () => {
       expect(result.residueRisk).toBeUndefined();
       expect(() => process.kill(descendantPid, 0)).toThrow();
     } finally {
-      fs.rmSync(root, { recursive: true, force: true });
+      controller.abort();
+      try {
+        const result = await execution;
+        if (!result.termination.processTreeReaped) {
+          processesStopped = false;
+          console.warn(`TEMP_CHILD_CLEANUP_FAILED: ${root}: process tree shutdown unconfirmed`);
+        }
+      } catch (error) {
+        processesStopped = false;
+        console.warn(`TEMP_CHILD_CLEANUP_FAILED: ${root}: ${String(error)}`);
+      }
     }
   });
 
   it('writes bounded raw logs and preserves exit code despite preview truncation', async () => {
-    const runner = new TrustedShellRunner({ logDir });
+    const runner = testRunner({ logDir });
     const result = await runner.execute({
       command: 'node -e "for(let i=0;i<400;i++) console.log(\'line \' + i)"',
       maxOutputLines: 20,
@@ -237,7 +301,7 @@ describe('A9-02 regression: honest termination and logs', () => {
 
   it('redacts a configured secret split across output chunks from preview and raw logs', async () => {
     const secret = 'SPLIT-SECRET-42';
-    const runner = new TrustedShellRunner({
+    const runner = testRunner({
       logDir,
       redactText: (text) => text.split(secret).join('***redacted***'),
       getSensitiveValues: () => [secret],
@@ -256,7 +320,7 @@ describe('A9-02 regression: honest termination and logs', () => {
     const secret = '~~~';
     const encodedBase64 = encodeURIComponent(Buffer.from(secret, 'utf8').toString('base64'));
     const boundarySecret = 'SECRET-AT-CAP';
-    const runner = new TrustedShellRunner({
+    const runner = testRunner({
       logDir,
       maxLogBytes: 8,
       redactText: (text) => text.split(encodedBase64).join('***redacted***').split(boundarySecret).join('***redacted***'),
@@ -274,7 +338,7 @@ describe('A9-02 regression: honest termination and logs', () => {
   it('redacts mixed-case percent escapes of Base64 from raw logs', async () => {
     const secret = '~~~~~~';
     const mixed = 'fn5%2Bfn5%2b';
-    const runner = new TrustedShellRunner({
+    const runner = testRunner({
       logDir,
       redactText: (text) => text.split(mixed).join('***redacted***'),
       getSensitiveValues: () => [secret],
@@ -430,7 +494,7 @@ describe('A9-02 regression: honest termination and logs', () => {
   it('keeps inherited known values out of real developer-host foreground and background children', async () => {
     const original = process.env.A9_BUILD_MODE;
     const secret = 'real-child-environment-sentinel';
-    const runner = new TrustedShellRunner({ logDir, getSensitiveValues: () => [secret] });
+    const runner = testRunner({ logDir, getSensitiveValues: () => [secret] });
     const script = "console.log(process.env.A9_BUILD_MODE === undefined ? 'ENV_CLEAN' : 'ENV_LEAK')";
     try {
       process.env.A9_BUILD_MODE = secret;
@@ -481,7 +545,7 @@ describe('A9-02 regression: honest termination and logs', () => {
   });
 
   it('rejects a replaced user-selected Shell before invoking the helper', async () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-shell-identity-'));
+    const root = temporaryDirectory('a9-shell-identity-');
     const selected = path.join(root, 'selected-shell.exe');
     const replacement = path.join(root, 'replacement-shell.exe');
     fs.writeFileSync(selected, 'selected-v1', 'utf8');
@@ -498,11 +562,10 @@ describe('A9-02 regression: honest termination and logs', () => {
     expect(result.status).toBe('failed');
     expect(result.error).toContain('A9_SHELL_IDENTITY_CHANGED');
     expect(invoke).not.toHaveBeenCalled();
-    fs.rmSync(root, { recursive: true, force: true });
   });
 
   it('does not impose a default fixed hard timeout when timeoutMs is absent', async () => {
-    const runner = new TrustedShellRunner({ logDir });
+    const runner = testRunner({ logDir });
     // 一个 700ms 的命令：如果存在固定短超时（如 60s 不影响，但历史 bug 是固定 60s；
     // 此处验证“未传 timeoutMs 也能正常完成且 status=exited”）。
     const result = await runner.execute({ command: 'sleep 0.7' });
@@ -526,10 +589,13 @@ describe('A9-02 regression: honest termination and logs', () => {
 });
 
 describe('A9-02 regression: background start honesty', () => {
-  const logDir = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-shell-bg-'));
+  const suiteRoots = new Set<string>();
+  let logDir: string;
+  beforeAll(() => { logDir = temporaryDirectory('a9-shell-bg-', suiteRoots); });
+  afterAll(() => removeTemporaryDirectories(suiteRoots));
 
   it('returns background_started with a handle instead of faking exited/0', async () => {
-    const runner = new TrustedShellRunner({ logDir });
+    const runner = testRunner({ logDir });
     const result = await runner.execute({
       command: 'node -e "setTimeout(() => process.exit(0), 800)"',
       background: true,
@@ -547,7 +613,7 @@ describe('A9-02 regression: background start honesty', () => {
   });
 
   it('reports a failed background start instead of success', async () => {
-    const runner = new TrustedShellRunner({ logDir });
+    const runner = testRunner({ logDir });
     const result = await runner.execute({
       command: 'this-executable-does-not-exist --run',
       background: true,
@@ -676,7 +742,7 @@ describe('A9-35 managed cwd preflight and post-check lifecycle', () => {
     return { runner, helper, cancel, execute };
   }
   it.each(['missing', 'file', 'denied'])('rejects %s cwd before any helper or managed intent', async (kind) => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-cwd-'));
+    const dir = temporaryDirectory('a9-cwd-');
     const cwd = path.join(dir, kind);
     if (kind === 'file') fs.writeFileSync(cwd, 'file', 'utf8');
     const realStat = fs.statSync;
@@ -692,7 +758,7 @@ describe('A9-35 managed cwd preflight and post-check lifecycle', () => {
     } finally { stat?.mockRestore(); }
   });
   it.each(['clean', 'unknown', 'wrong', 'wrong_version', 'wrong_profile', 'incomplete'] as const)('keeps actual readiness failure distinct from preflight (%s)', async (failure) => {
-    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-\u4e2d\u6587 \u7a7a\u683c%#-'));
+    const cwd = temporaryDirectory('a9-\u4e2d\u6587 \u7a7a\u683c%#-');
     const f = fixture(failure);
     const result = await f.execute(cwd);
     const clean = failure === 'clean';
@@ -702,7 +768,7 @@ describe('A9-35 managed cwd preflight and post-check lifecycle', () => {
     expect(f.runner.getBackgroundManager().list()[0].cleanupRequired).toBe(!clean);
   });
   it('preserves a valid error frame diagnostic without treating it as cleanup proof', async () => {
-    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-error-frame-'));
+    const cwd = temporaryDirectory('a9-error-frame-');
     const f = fixture('error_frame');
     const result = await f.execute(cwd);
     expect(result).toMatchObject({ status: 'failed', residueRisk: true, spawnFacts: { helperSpawned: true, backgroundProcess: 'unknown', cleanupConfirmed: false, cleanupRequired: true } });
@@ -711,14 +777,14 @@ describe('A9-35 managed cwd preflight and post-check lifecycle', () => {
     expect(f.runner.getBackgroundManager().list()[0]).toMatchObject({ status: 'failed', cleanupRequired: true });
   });
   it.each(['error_wrong_id', 'error_wrong_version'] as const)('rejects identity mismatch on an error frame (%s)', async (failure) => {
-    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-error-mismatch-'));
+    const cwd = temporaryDirectory('a9-error-mismatch-');
     const f = fixture(failure);
     const result = await f.execute(cwd);
     expect(result.stderr).toContain('A9_BACKGROUND_HELPER_IDENTITY_MISMATCH');
     expect(result).toMatchObject({ residueRisk: true, spawnFacts: { cleanupConfirmed: false, cleanupRequired: true } });
   });
   it('does not turn a successful directory check into post-check cleanup proof', async () => {
-    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-cwd-race-'));
+    const cwd = temporaryDirectory('a9-cwd-race-', temporaryRoots, ['-moved']);
     const f = fixture('unknown');
     const start = f.helper.startManaged.getMockImplementation()!;
     f.helper.startManaged.mockImplementation(() => { fs.renameSync(cwd, cwd + '-moved'); return start(); });

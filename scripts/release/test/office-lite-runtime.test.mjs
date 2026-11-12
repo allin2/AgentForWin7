@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import os from 'node:os';
+import { tempRoot } from './temp-root.mjs';
 import crypto from 'node:crypto';
 import { createRequire } from 'node:module';
 import { Worker } from 'node:worker_threads';
@@ -11,7 +11,7 @@ import { copyDirectory } from '../release-contract.mjs';
 import { remotePath } from '../../win7-dev/win7-dev.mjs';
 
 test('copies the real locked Office closure and executes its packaged Worker without source-directory dependencies', async () => {
-  const stage = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-office-package-'));
+  const stage = tempRoot('a9-office-package-');
   const rows = copyOfficeLiteRuntime(process.cwd(), stage, copyDirectory);
   assert.equal(rows.length, 99);
   const manifest = JSON.parse(fs.readFileSync(path.join(stage, 'office-lite/DELIVERY_MANIFEST.json'), 'utf8'));
@@ -65,7 +65,7 @@ test('copies the real locked Office closure and executes its packaged Worker wit
 });
 
 test('rejects modified dependency bytes even when the declared version still matches', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-office-tamper-'));
+  const root = tempRoot('a9-office-tamper-');
   const source = path.join(root, 'src/shell/office-lite');
   fs.mkdirSync(path.join(source, 'node_modules/demo'), { recursive: true });
   const bytes = JSON.stringify({ name: 'demo', version: '1.0.0', license: 'MIT' });
@@ -80,14 +80,14 @@ test('rejects modified dependency bytes even when the declared version still mat
       { path: 'package.json', sha256: sha(bytes) }, { path: 'index.js', sha256: sha('original') },
     ],
   }] }));
-  const stage = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-office-tamper-stage-'));
+  const stage = tempRoot('a9-office-tamper-stage-');
   assert.throws(() => copyOfficeLiteRuntime(root, stage, copyDirectory), /OFFICE_DEPENDENCY_HASH_MISMATCH/);
 });
 
 test('rejects missing files, missing license, symlinks and unconfirmed docx exclusions', () => {
   const sha = value => crypto.createHash('sha256').update(value).digest('hex');
   for (const scenario of ['missing', 'license', 'symlink', 'docx', 'omitted-tamper']) {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-office-negative-'));
+    const root = tempRoot('a9-office-negative-');
     const source = path.join(root, 'src/shell/office-lite');
     const name = ['docx', 'omitted-tamper'].includes(scenario) ? 'docx' : 'demo';
     const relative = `node_modules/${name}`;
@@ -112,7 +112,7 @@ test('rejects missing files, missing license, symlinks and unconfirmed docx excl
         ...(scenario === 'omitted-tamper' ? [{ path: 'src/deep.ts', sha256: sha('original') }] : []),
       ],
     }] }));
-    const stage = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-office-negative-stage-'));
+    const stage = tempRoot('a9-office-negative-stage-');
     const error = { missing: /OFFICE_DEPENDENCY_FILE_MISSING/, license: /OFFICE_DEPENDENCY_LICENSE_MISSING/,
       symlink: /OFFICE_DEPENDENCY_SYMLINK/, docx: /OFFICE_DOCX_EXCLUSION_UNCONFIRMED/,
       'omitted-tamper': /OFFICE_DEPENDENCY_HASH_MISMATCH/ }[scenario];
