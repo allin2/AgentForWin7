@@ -134,9 +134,9 @@ export interface A9ModelPort {
 }
 
 export interface A9WorkspacePort {
-  list(path?: string, options?: { recursive?: boolean; maxEntries?: number }): Promise<any>;
+  list(path?: string, options?: { recursive?: boolean; maxEntries?: number; signal?: AbortSignal }): Promise<any>;
   read(path: string, options?: { startLine?: number; maxLines?: number; encoding?: string; signal?: AbortSignal }): Promise<any>;
-  search(pattern: string, options?: { path?: string; isRegex?: boolean; maxMatches?: number }): Promise<any>;
+  search(pattern: string, options?: { path?: string; isRegex?: boolean; maxMatches?: number; signal?: AbortSignal }): Promise<any>;
   write(path: string, content: string, options?: { encoding?: string; turnId?: string }): Promise<any>;
   edit(path: string, oldText: string, newText: string, options?: { turnId?: string }): Promise<any>;
   copy(src: string, dest: string, options?: { overwrite?: boolean; turnId?: string }): Promise<any>;
@@ -1913,7 +1913,11 @@ export class A9AgentLoop {
         if (!this.config.office || this.permissionMode !== PermissionMode.FULL_ACCESS) throw new Error('A9_OFFICE_WRITE_DENIED');
         return { payload: await this.config.office.writeCopy(args, turnId, signal) };
       case 'list':
-        return { payload: await ws.list(args.path ?? '', { recursive: args.recursive, maxEntries: args.maxEntries }) };
+        return { payload: await ws.list(args.path ?? '', {
+          recursive: args.recursive,
+          maxEntries: args.maxEntries,
+          ...(signal ? { signal } : {}),
+        }) };
       case 'read':
         return { payload: await ws.read(args.path, { startLine: args.startLine, maxLines: args.maxLines, encoding: args.encoding, signal }) };
       case 'read_image': {
@@ -1926,7 +1930,12 @@ export class A9AgentLoop {
         return { payload: { ...result.metadata, delivery: 'prepared_for_next_request' } };
       }
       case 'search':
-        return { payload: await ws.search(args.pattern, { path: args.path, isRegex: args.isRegex, maxMatches: args.maxMatches }) };
+        return { payload: await ws.search(args.pattern, {
+          path: args.path,
+          isRegex: args.isRegex,
+          maxMatches: args.maxMatches,
+          ...(signal ? { signal } : {}),
+        }) };
       case 'write':
         return { payload: await ws.write(args.path, args.content, { encoding: args.encoding, turnId }) };
       case 'edit':

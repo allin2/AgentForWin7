@@ -42,6 +42,7 @@ export interface A9ListResult {
   totalEntries: number;
   truncated: boolean;
   outsideWorkspace: boolean;
+  skipped: Array<{ path: string; reason: 'directory_unreadable' }>;
   entries: Array<{
     name: string;
     path: string;
@@ -72,6 +73,9 @@ export interface A9SearchResult {
   outsideWorkspace: boolean;
   filesScanned: number;
   skippedFiles: number;
+  skipped: Array<{ path: string; reason: SearchSkippedReason }>;
+  skippedTotal: number;
+  truncationReasons: Array<'matches' | 'files'>;
   matches: Array<{
     filePath: string;
     lineNumber: number;
@@ -80,6 +84,13 @@ export interface A9SearchResult {
     contextAfter?: string[];
   }>;
 }
+
+export type SearchSkippedReason =
+  | 'directory_unreadable'
+  | 'stat_failed'
+  | 'too_large'
+  | 'binary_or_ambiguous'
+  | 'read_failed';
 
 export interface A9WriteResult {
   path: string;
@@ -134,6 +145,59 @@ const BASELINE_YIELD_SLICE_MS = 25;
 
 function yieldToEventLoop(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
+}
+
+interface YieldController {
+  checkpoint(force?: boolean): Promise<void>;
+}
+
+function createYieldController(signal?: AbortSignal): YieldController {
+  let lastYieldAt = Date.now();
+  return {
+    async checkpoint(force = false): Promise<void> {
+      if (signal?.aborted) throw new Error('操作已被用户取消');
+      if (force || Date.now() - lastYieldAt >= BASELINE_YIELD_SLICE_MS) {
+        await yieldToEventLoop();
+        // A setImmediate-only loop can run successive promise continuations
+        // before the timers phase. Give cancellation timers a real timers
+        // phase as well, while retaining the existing 25 ms slice contract.
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        lastYieldAt = Date.now();
+        if (signal?.aborted) throw new Error('操作已被用户取消');
+      }
+    },
+  };
+}
+
+async function sortDirentsWithYields(
+  input: fs.Dirent[],
+  controller: YieldController,
+  signal?: AbortSignal,
+): Promise<fs.Dirent[]> {
+  if (input.length < 2) return input;
+  let source = input.slice();
+  let scratch = new Array<fs.Dirent>(source.length);
+  for (let width = 1; width < source.length; width *= 2) {
+    for (let start = 0; start < source.length; start += width * 2) {
+      let left = start;
+      let right = Math.min(start + width, source.length);
+      const end = Math.min(start + width * 2, source.length);
+      let output = start;
+      while (left < right && right < end) {
+        if (source[left].name.localeCompare(source[right].name) <= 0) scratch[output++] = source[left++];
+        else scratch[output++] = source[right++];
+        if ((output & 0x3ff) === 0) await controller.checkpoint();
+      }
+      while (left < right) scratch[output++] = source[left++];
+      while (right < end) scratch[output++] = source[right++];
+    }
+    const previous = source;
+    source = scratch;
+    scratch = previous;
+    await controller.checkpoint();
+    if (signal?.aborted) throw new Error('操作已被用户取消');
+  }
+  return source;
 }
 const MAX_BASELINE_FILE_BYTES = 2 * 1024 * 1024;
 const MAX_BASELINE_TOTAL_BYTES = 40 * 1024 * 1024;
@@ -287,26 +351,42 @@ export class A9WorkspaceService {
   // list
   // -------------------------------------------------------------------------
 
-  async list(targetPath: string = '', options: { recursive?: boolean; maxEntries?: number } = {}): Promise<A9ListResult> {
+  async list(
+    targetPath: string = '',
+    options: { recursive?: boolean; maxEntries?: number; signal?: AbortSignal } = {},
+  ): Promise<A9ListResult> {
     const { absPath, relPath, isOutside } = this.resolvePath(targetPath);
     const maxEntries = options.maxEntries || 500;
     const recursive = options.recursive || false;
-
-    if (!fs.existsSync(absPath)) {
-      throw new Error(`目录不存在: ${targetPath}`);
+    const signal = options.signal;
+    const controller = createYieldController(signal);
+    const checkCanceled = () => {
+      if (signal?.aborted) throw new Error('目录读取已取消');
+    };
+    checkCanceled();
+    let stat: fs.Stats;
+    try {
+      stat = await fs.promises.stat(absPath);
+    } catch (error: any) {
+      if (error?.code === 'ENOENT') throw new Error(`目录不存在: ${targetPath}`);
+      throw new WorkspaceError('DIRECTORY_READ_FAILED', `无法读取目录 ${relPath || '.'}: ${error?.message || 'unknown error'}`);
     }
-
-    const stat = fs.statSync(absPath);
-    if (!stat.isDirectory()) {
-      throw new Error(`路径不是目录: ${targetPath}`);
-    }
+    if (!stat.isDirectory()) throw new Error(`路径不是目录: ${targetPath}`);
 
     const entries: A9ListResult['entries'] = [];
+    const skipped: A9ListResult['skipped'] = [];
     let truncated = false;
     // canonical path 集合防止 junction/symlink 递归环。
-    const visitedDirs = new Set<string>([fs.realpathSync(absPath)]);
+    let rootRealPath: string;
+    try {
+      rootRealPath = await fs.promises.realpath(absPath);
+    } catch (error: any) {
+      throw new WorkspaceError('DIRECTORY_READ_FAILED', `无法读取目录 ${relPath || '.'}: ${error?.message || 'unknown error'}`);
+    }
+    const visitedDirs = new Set<string>([rootRealPath]);
 
-    const scan = (currentDir: string, currentRel: string, depth: number) => {
+    const scan = async (currentDir: string, currentRel: string, depth: number, isRoot: boolean): Promise<void> => {
+      checkCanceled();
       if (entries.length >= maxEntries) {
         truncated = true;
         return;
@@ -314,14 +394,20 @@ export class A9WorkspaceService {
 
       let dirents: fs.Dirent[];
       try {
-        dirents = fs.readdirSync(currentDir, { withFileTypes: true });
-      } catch (_e) {
+        dirents = await fs.promises.readdir(currentDir, { withFileTypes: true });
+        dirents = await sortDirentsWithYields(dirents, controller, signal);
+      } catch (error: any) {
+        if (signal?.aborted) throw new Error('目录读取已取消');
+        if (isRoot) {
+          throw new WorkspaceError('DIRECTORY_READ_FAILED', `无法读取目录 ${relPath || '.'}: ${error?.message || 'unknown error'}`);
+        }
+        skipped.push({ path: currentRel || '.', reason: 'directory_unreadable' });
         return;
       }
 
-      dirents.sort((a, b) => a.name.localeCompare(b.name));
-
       for (const dirent of dirents) {
+        await controller.checkpoint();
+        checkCanceled();
         if (entries.length >= maxEntries) {
           truncated = true;
           break;
@@ -351,25 +437,27 @@ export class A9WorkspaceService {
         if (recursive && dirent.isDirectory() && depth < 10) {
           let realChild: string;
           try {
-            realChild = fs.realpathSync(itemAbs);
+            realChild = await fs.promises.realpath(itemAbs);
           } catch (_e) {
+            skipped.push({ path: itemRel, reason: 'directory_unreadable' });
             continue;
           }
           if (!visitedDirs.has(realChild)) {
             visitedDirs.add(realChild);
-            scan(itemAbs, itemRel, depth + 1);
+            await scan(itemAbs, itemRel, depth + 1, false);
           }
         }
       }
     };
 
-    scan(absPath, relPath === '.' ? '' : relPath, 0);
+    await scan(absPath, relPath === '.' ? '' : relPath, 0, true);
 
     return {
       path: relPath || '.',
       totalEntries: entries.length,
       truncated,
       outsideWorkspace: isOutside,
+      skipped,
       entries,
     };
   }
@@ -567,9 +655,15 @@ export class A9WorkspaceService {
     const { absPath, isOutside } = this.resolvePath(options.path || '');
     const maxMatches = options.maxMatches || 200;
     const isRegex = options.isRegex || false;
+    const controller = createYieldController(options.signal);
 
-    if (!fs.existsSync(absPath)) {
-      throw new Error(`搜索路径不存在: ${options.path || ''}`);
+    try {
+      const rootStat = await fs.promises.stat(absPath);
+      if (!rootStat.isDirectory()) throw new Error(`搜索路径不是目录: ${options.path || ''}`);
+    } catch (error: any) {
+      if (error?.message?.startsWith('搜索路径不是目录:')) throw error;
+      if (error?.code === 'ENOENT') throw new Error(`搜索路径不存在: ${options.path || ''}`);
+      throw new WorkspaceError('DIRECTORY_READ_FAILED', `无法读取搜索目录: ${error?.message || 'unknown error'}`);
     }
 
     let regex: RegExp;
@@ -581,35 +675,65 @@ export class A9WorkspaceService {
 
     const matches: A9SearchResult['matches'] = [];
     let truncated = false;
+    const truncationReasons = new Set<'matches' | 'files'>();
     let filesScanned = 0;
     let skippedFiles = 0;
+    const skipped: A9SearchResult['skipped'] = [];
+    let skippedTotal = 0;
+    const recordSkipped = (filePath: string, reason: SearchSkippedReason, countAsFile = true): void => {
+      skippedTotal += 1;
+      if (countAsFile) skippedFiles += 1;
+      if (skipped.length < 50) skipped.push({ path: filePath || '.', reason });
+    };
+    const markFileLimit = (): void => {
+      if (filesScanned >= MAX_SEARCH_FILES) {
+        truncated = true;
+        truncationReasons.add('files');
+      }
+    };
+    const checkCanceled = () => {
+      if (options.signal?.aborted) throw new Error('搜索已被用户取消');
+    };
     // 迭代遍历 + canonical path 集合：可取消、无递归环、不整体加载。
     const queue: Array<{ dir: string; rel: string }> = [{ dir: absPath, rel: '' }];
-    const visitedDirs = new Set<string>([fs.realpathSync(absPath)]);
+    let rootRealPath: string;
+    try {
+      rootRealPath = fs.realpathSync(absPath);
+    } catch (error: any) {
+      throw new WorkspaceError('DIRECTORY_READ_FAILED', `无法读取搜索目录: ${error?.message || 'unknown error'}`);
+    }
+    const visitedDirs = new Set<string>([rootRealPath]);
+    let queueIndex = 0;
 
-    while (queue.length > 0) {
-      if (options.signal?.aborted) {
-        throw new Error('搜索已被用户取消');
-      }
+    while (queueIndex < queue.length) {
+      checkCanceled();
       if (matches.length >= maxMatches || filesScanned >= MAX_SEARCH_FILES) {
         truncated = true;
+        if (matches.length >= maxMatches) truncationReasons.add('matches');
+        if (filesScanned >= MAX_SEARCH_FILES) truncationReasons.add('files');
         break;
       }
 
-      const { dir, rel } = queue.shift()!;
+      const { dir, rel } = queue[queueIndex++];
       let dirents: fs.Dirent[];
       try {
-        dirents = fs.readdirSync(dir, { withFileTypes: true });
-      } catch (_e) {
+        dirents = await fs.promises.readdir(dir, { withFileTypes: true });
+      } catch (error: any) {
+        if (!rel) {
+          throw new WorkspaceError('DIRECTORY_READ_FAILED', `无法读取搜索目录: ${error?.message || 'unknown error'}`);
+        }
+        const unreadablePath = path.relative(this.workspaceRoot, dir).replace(/\\/g, '/') || '.';
+        recordSkipped(unreadablePath, 'directory_unreadable', false);
         continue;
       }
 
       for (const dirent of dirents) {
-        if (options.signal?.aborted) {
-          throw new Error('搜索已被用户取消');
-        }
+        await controller.checkpoint();
+        checkCanceled();
         if (matches.length >= maxMatches || filesScanned >= MAX_SEARCH_FILES) {
           truncated = true;
+          if (matches.length >= maxMatches) truncationReasons.add('matches');
+          if (filesScanned >= MAX_SEARCH_FILES) truncationReasons.add('files');
           break;
         }
 
@@ -622,6 +746,7 @@ export class A9WorkspaceService {
           try {
             realChild = fs.realpathSync(fullPath);
           } catch (_e) {
+            recordSkipped(relPath, 'directory_unreadable', false);
             continue;
           }
           if (!visitedDirs.has(realChild)) {
@@ -637,22 +762,38 @@ export class A9WorkspaceService {
         try {
           stat = fs.statSync(fullPath);
         } catch (_e) {
-          skippedFiles += 1;
+          recordSkipped(relPath, 'stat_failed');
+          markFileLimit();
+          if (truncated) break;
           continue;
         }
         if (stat.size > MAX_SEARCH_FILE_BYTES) {
-          skippedFiles += 1;
+          recordSkipped(relPath, 'too_large');
+          markFileLimit();
+          if (truncated) break;
           continue;
         }
         try {
           const buf = fs.readFileSync(fullPath);
           const detection = detectEncoding(buf);
-          if (detection.encoding === 'ambiguous') continue;
+          if (detection.encoding === 'ambiguous') {
+            recordSkipped(relPath, 'binary_or_ambiguous');
+            markFileLimit();
+            if (truncated) break;
+            continue;
+          }
           const text = decodeBuffer(buf, detection.encoding as WritableEncoding);
-          if (text === undefined) continue;
+          if (text === undefined) {
+            recordSkipped(relPath, 'binary_or_ambiguous');
+            markFileLimit();
+            if (truncated) break;
+            continue;
+          }
 
           const lines = text.split(/\r?\n/);
           for (let i = 0; i < lines.length; i++) {
+            await controller.checkpoint();
+            checkCanceled();
             if (regex.test(lines[i])) {
               matches.push({
                 filePath: relPath,
@@ -663,13 +804,17 @@ export class A9WorkspaceService {
               });
               if (matches.length >= maxMatches) {
                 truncated = true;
+                truncationReasons.add('matches');
                 break;
               }
             }
           }
         } catch (_e) {
-          skippedFiles += 1;
+          checkCanceled();
+          recordSkipped(relPath, 'read_failed');
         }
+        markFileLimit();
+        if (truncated) break;
       }
     }
 
@@ -680,6 +825,9 @@ export class A9WorkspaceService {
       outsideWorkspace: isOutside,
       filesScanned,
       skippedFiles,
+      skipped,
+      skippedTotal,
+      truncationReasons: Array.from(truncationReasons),
       matches,
     };
   }
