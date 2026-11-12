@@ -39,16 +39,39 @@ export interface TrustedGitProjection {
   /** 仓库存在外部执行机制（hooks/filters/helpers）时如实列出。 */
   externalMechanisms: TrustedGitExternalMechanism[];
   notes: string[];
+  /** Optional bounded diagnostics; existing projection fields remain stable. */
+  diagnostics?: TrustedGitDiagnostic[];
+}
+
+export type TrustedGitDiagnosticCode =
+  | 'A9_GIT_NOT_REPOSITORY'
+  | 'A9_GIT_SPAWN_FAILED'
+  | 'A9_GIT_TIMEOUT'
+  | 'A9_GIT_EXIT_FAILED'
+  | 'A9_GIT_CONFIG_UNREADABLE'
+  | 'A9_GIT_OUTPUT_TOO_LARGE';
+
+export interface TrustedGitDiagnostic {
+  code: TrustedGitDiagnosticCode;
+  operation: string;
+  detail: string;
 }
 
 const MAX_DIFF_BYTES = 512 * 1024;
 const READ_ONLY_COMMANDS = new Set(['status', 'rev-parse', 'diff', 'log', 'branch', 'config', 'remote', 'describe']);
 
+interface GitCommandResult {
+  code: number;
+  stdout: string;
+  stderr: string;
+  failure?: 'spawn_failed' | 'timeout' | 'exit_nonzero' | 'output_too_large';
+}
+
 function execGit(
   workDir: string,
   args: string[],
   options: { observeConfigOnly?: boolean; disabledFilters?: string[] } = {},
-): Promise<{ code: number; stdout: string; stderr: string } | null> {
+): Promise<GitCommandResult> {
   return new Promise((resolve) => {
     try {
       // Projection is an observation path, not a request to execute repository
@@ -76,11 +99,18 @@ function execGit(
           GIT_TERMINAL_PROMPT: '0',
         },
       }, (err, stdout, stderr) => {
-        const code = err && typeof (err as any).code === 'number' ? (err as any).code : err ? 1 : 0;
-        resolve({ code, stdout: String(stdout ?? ''), stderr: String(stderr ?? '') });
+        const rawCode = err && typeof (err as any).code === 'number' ? (err as any).code : err ? 1 : 0;
+        const outputTooLarge = Boolean(err && (err as any).code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER');
+        const timedOut = Boolean(err && ((err as any).killed || (err as any).code === 'ETIMEDOUT'));
+        const spawnFailed = Boolean(err && typeof (err as any).code === 'string'
+          && (err as any).code !== 'ETIMEDOUT'
+          && !outputTooLarge);
+        resolve({ code: rawCode, stdout: String(stdout ?? ''), stderr: String(stderr ?? ''),
+          ...(outputTooLarge ? { failure: 'output_too_large' } : timedOut ? { failure: 'timeout' }
+            : spawnFailed ? { failure: 'spawn_failed' } : rawCode !== 0 ? { failure: 'exit_nonzero' } : {}) });
       });
     } catch (_err) {
-      resolve(null);
+      resolve({ code: 1, stdout: '', stderr: '', failure: 'spawn_failed' });
     }
   });
 }
@@ -90,6 +120,7 @@ function execGit(
  */
 export async function projectTrustedGit(workDir: string): Promise<TrustedGitProjection> {
   const notes: string[] = [];
+  const diagnostics: TrustedGitDiagnostic[] = [];
   const projection: TrustedGitProjection = {
     schemaVersion: '1.0',
     isGit: false,
@@ -101,13 +132,22 @@ export async function projectTrustedGit(workDir: string): Promise<TrustedGitProj
   };
 
   if (!workDir || !fs.existsSync(workDir)) {
+    diagnostics.push({ code: 'A9_GIT_NOT_REPOSITORY', operation: 'workspace', detail: '工作区目录不存在，无法建立 Git 投影。' });
     projection.degradedReason = '工作区目录不存在';
+    projection.diagnostics = diagnostics;
     return projection;
   }
 
   const toplevel = await execGit(workDir, ['rev-parse', '--show-toplevel']);
-  if (!toplevel || toplevel.code !== 0) {
+  if (toplevel.code !== 0) {
+    const code = toplevel.failure === 'spawn_failed' ? 'A9_GIT_SPAWN_FAILED'
+      : toplevel.failure === 'timeout' ? 'A9_GIT_TIMEOUT'
+      : /not a git repository|不是 git 仓库|not a repository/i.test(toplevel.stderr)
+        ? 'A9_GIT_NOT_REPOSITORY' : 'A9_GIT_EXIT_FAILED';
+    diagnostics.push({ code, operation: 'rev-parse', detail: code === 'A9_GIT_NOT_REPOSITORY'
+      ? '当前工作区不是 Git 仓库。' : 'Git 只读探测未成功。' });
     projection.degradedReason = '当前工作区不是 Git 仓库（或 git 不可用）；Agent 文件/Shell 能力不受影响，仅无 Git 状态/Diff 投影。';
+    projection.diagnostics = diagnostics;
     return projection;
   }
 
@@ -118,7 +158,8 @@ export async function projectTrustedGit(workDir: string): Promise<TrustedGitProj
     ['config', '--name-only', '--get-regexp', '^filter\\..*\\.(clean|smudge|process|required)$'],
     { observeConfigOnly: true },
   );
-  const disabledFilters = filterConfig?.code === 0
+  addConfigDiagnostic(diagnostics, filterConfig, 'config filters');
+  const disabledFilters = filterConfig.code === 0
     ? Array.from(new Set(filterConfig.stdout.split(/\r?\n/).map((line) => {
       const match = /^filter\.(.+)\.(?:clean|smudge|process|required)$/.exec(line.trim());
       return match ? match[1] : '';
@@ -126,13 +167,17 @@ export async function projectTrustedGit(workDir: string): Promise<TrustedGitProj
     : [];
 
   const branchResult = await execGit(workDir, ['rev-parse', '--abbrev-ref', 'HEAD']);
-  projection.branch = branchResult?.code === 0 ? branchResult.stdout.trim() : undefined;
+  const headResult = await execGit(workDir, ['rev-parse', '--verify', '--quiet', 'HEAD']);
+  const noCommit = headResult.failure === 'exit_nonzero' && headResult.code === 1 && headResult.stderr.trim() === '';
+  if (!noCommit || branchResult.failure !== 'exit_nonzero') addCommandDiagnostic(diagnostics, branchResult, 'rev-parse branch');
+  projection.branch = branchResult.code === 0 ? branchResult.stdout.trim() : undefined;
 
-  const headResult = await execGit(workDir, ['rev-parse', 'HEAD']);
-  projection.head = headResult?.code === 0 ? headResult.stdout.trim() : undefined;
+  if (!noCommit) addCommandDiagnostic(diagnostics, headResult, 'rev-parse HEAD');
+  projection.head = headResult.code === 0 ? headResult.stdout.trim() : undefined;
 
   const statusResult = await execGit(workDir, ['status', '--porcelain=v1', '-b'], { disabledFilters });
-  if (statusResult && statusResult.code === 0) {
+  addCommandDiagnostic(diagnostics, statusResult, 'status');
+  if (statusResult.code === 0) {
     for (const line of statusResult.stdout.split('\n')) {
       if (!line) continue;
       if (line.startsWith('##')) {
@@ -154,7 +199,8 @@ export async function projectTrustedGit(workDir: string): Promise<TrustedGitProj
   const diffResult = await execGit(workDir, [
     'diff', '--no-ext-diff', '--no-textconv', 'HEAD', '--stat', '--patch', `--unified=3`,
   ], { disabledFilters });
-  if (diffResult && diffResult.code === 0) {
+  if (!noCommit || diffResult.failure !== 'exit_nonzero') addCommandDiagnostic(diagnostics, diffResult, 'diff');
+  if (diffResult.code === 0) {
     if (diffResult.stdout.length > MAX_DIFF_BYTES) {
       projection.diffPreview = diffResult.stdout.slice(0, MAX_DIFF_BYTES);
       projection.diffTruncated = true;
@@ -163,23 +209,49 @@ export async function projectTrustedGit(workDir: string): Promise<TrustedGitProj
     }
   }
 
-  projection.externalMechanisms = await detectExternalMechanisms(workDir);
+  projection.externalMechanisms = await detectExternalMechanisms(workDir, diagnostics);
 
   if (projection.externalMechanisms.length > 0) {
     notes.push('该仓库存在 hooks/filters/helpers 等外部执行机制：Trusted Full Access 经 Shell 使用用户真实 Git 环境时，这些机制拥有当前用户执行权（ADR-0089）。');
   }
   notes.push('本投影只读；模型的真实 Git 写命令经 TrustedShellRunner 与行为策略执行。');
+  if (diagnostics.length > 0) projection.diagnostics = diagnostics;
   return projection;
+}
+
+function commandDiagnostic(result: GitCommandResult, operation: string): TrustedGitDiagnostic {
+  const code = result.failure === 'spawn_failed' ? 'A9_GIT_SPAWN_FAILED'
+    : result.failure === 'timeout' ? 'A9_GIT_TIMEOUT'
+      : result.failure === 'output_too_large' ? 'A9_GIT_OUTPUT_TOO_LARGE' : 'A9_GIT_EXIT_FAILED';
+  return { code, operation, detail: code === 'A9_GIT_TIMEOUT' ? 'Git 命令超时。'
+    : code === 'A9_GIT_SPAWN_FAILED' ? 'Git 无法启动。'
+      : code === 'A9_GIT_OUTPUT_TOO_LARGE' ? 'Git 输出超过上限。' : 'Git 命令退出码非零。' };
+}
+
+function addCommandDiagnostic(diagnostics: TrustedGitDiagnostic[], result: GitCommandResult, operation: string): void {
+  if (result.failure) diagnostics.push(commandDiagnostic(result, operation));
+}
+
+function addConfigDiagnostic(diagnostics: TrustedGitDiagnostic[], result: GitCommandResult, operation: string): void {
+  if (!result.failure) return;
+  if (result.failure === 'exit_nonzero') {
+    if (result.stderr.trim()) {
+      diagnostics.push({ code: 'A9_GIT_CONFIG_UNREADABLE', operation, detail: 'Git 配置不可读。' });
+    }
+    return;
+  }
+  diagnostics.push(commandDiagnostic(result, operation));
 }
 
 /**
  * 探测仓库/用户配置中的外部执行机制（提示用途，不阻断）。
  */
-export async function detectExternalMechanisms(workDir: string): Promise<TrustedGitExternalMechanism[]> {
+export async function detectExternalMechanisms(workDir: string, diagnostics: TrustedGitDiagnostic[] = []): Promise<TrustedGitExternalMechanism[]> {
   const mechanisms: TrustedGitExternalMechanism[] = [];
 
   const hooksPath = await execGit(workDir, ['config', '--get', 'core.hooksPath'], { observeConfigOnly: true });
-  if (hooksPath?.code === 0 && hooksPath.stdout.trim()) {
+  addConfigDiagnostic(diagnostics, hooksPath, 'config core.hooksPath');
+  if (hooksPath.code === 0 && hooksPath.stdout.trim()) {
     mechanisms.push({ kind: 'hooks_path_override', detail: `core.hooksPath=${hooksPath.stdout.trim()}` });
   } else {
     const defaultHooksDir = path.join(workDir, '.git', 'hooks');
@@ -190,7 +262,9 @@ export async function detectExternalMechanisms(workDir: string): Promise<Trusted
           mechanisms.push({ kind: 'hooks', detail: `active hooks: ${activeHooks.join(', ')}` });
         }
       }
-    } catch (_err) { /* unreadable hooks dir */ }
+    } catch (_err) {
+      diagnostics.push({ code: 'A9_GIT_CONFIG_UNREADABLE', operation: 'hooks', detail: 'Git hooks 目录不可读。' });
+    }
   }
 
   for (const attrFile of [path.join(workDir, '.gitattributes'), path.join(workDir, '.git', 'info', 'attributes')]) {
@@ -202,26 +276,32 @@ export async function detectExternalMechanisms(workDir: string): Promise<Trusted
         const named = /diff\s*=\s*(\S+)/.exec(text);
         if (named) mechanisms.push({ kind: 'textconv', detail: `${attrFile}: diff=${named[1]}` });
       }
-    } catch (_err) { /* unreadable */ }
+    } catch (_err) {
+      diagnostics.push({ code: 'A9_GIT_CONFIG_UNREADABLE', operation: 'attributes', detail: 'Git attributes 配置不可读。' });
+    }
   }
 
   const credentialHelper = await execGit(workDir, ['config', '--get', 'credential.helper'], { observeConfigOnly: true });
-  if (credentialHelper?.code === 0 && credentialHelper.stdout.trim()) {
+  addConfigDiagnostic(diagnostics, credentialHelper, 'config credential.helper');
+  if (credentialHelper.code === 0 && credentialHelper.stdout.trim()) {
     mechanisms.push({ kind: 'credential_helper', detail: `credential.helper=${credentialHelper.stdout.trim()}` });
   }
 
   const pager = await execGit(workDir, ['config', '--get', 'core.pager'], { observeConfigOnly: true });
-  if (pager?.code === 0 && pager.stdout.trim() && pager.stdout.trim() !== 'cat') {
+  addConfigDiagnostic(diagnostics, pager, 'config core.pager');
+  if (pager.code === 0 && pager.stdout.trim() && pager.stdout.trim() !== 'cat') {
     mechanisms.push({ kind: 'pager', detail: `core.pager=${pager.stdout.trim()}` });
   }
 
   const fsmonitor = await execGit(workDir, ['config', '--get', 'core.fsmonitor'], { observeConfigOnly: true });
-  if (fsmonitor?.code === 0 && fsmonitor.stdout.trim() && fsmonitor.stdout.trim() !== 'false') {
+  addConfigDiagnostic(diagnostics, fsmonitor, 'config core.fsmonitor');
+  if (fsmonitor.code === 0 && fsmonitor.stdout.trim() && fsmonitor.stdout.trim() !== 'false') {
     mechanisms.push({ kind: 'fsmonitor', detail: `core.fsmonitor=${fsmonitor.stdout.trim()}` });
   }
 
   const sshCommand = await execGit(workDir, ['config', '--get', 'core.sshCommand'], { observeConfigOnly: true });
-  if (sshCommand?.code === 0 && sshCommand.stdout.trim()) {
+  addConfigDiagnostic(diagnostics, sshCommand, 'config core.sshCommand');
+  if (sshCommand.code === 0 && sshCommand.stdout.trim()) {
     mechanisms.push({ kind: 'ssh_command', detail: `core.sshCommand=${sshCommand.stdout.trim()}` });
   }
 

@@ -10,7 +10,29 @@ import * as path from 'path';
 import { projectTrustedGit } from '../src';
 
 function git(cwd: string, ...args: string[]): void {
-  execFileSync('git', args, { cwd, stdio: 'pipe' });
+  execFileSync('git', args, { cwd, stdio: 'pipe', env: cleanGitEnv() });
+}
+
+function cleanGitEnv(): NodeJS.ProcessEnv {
+  return {
+    ...process.env,
+    GIT_CONFIG_NOSYSTEM: '1',
+    GIT_CONFIG_GLOBAL: path.join(os.tmpdir(), `a9-git-proj-global-${process.pid}.missing`),
+  };
+}
+
+function findGitBinary(): string {
+  for (const dir of (process.env.PATH || '').split(path.delimiter)) {
+    if (!dir) continue;
+    const candidate = path.join(dir, 'git');
+    try {
+      fs.accessSync(candidate, fs.constants.X_OK);
+      return candidate;
+    } catch (_err) {
+      // Continue through PATH entries until the real Git executable is found.
+    }
+  }
+  throw new Error('git executable not found');
 }
 
 function makeTempDir(prefix: string): string {
@@ -19,8 +41,14 @@ function makeTempDir(prefix: string): string {
 
 describe('A9-05: trusted git projection on real temp repositories', () => {
   let repo: string;
+  let previousGitConfigGlobal: string | undefined;
+  let previousGitConfigNoSystem: string | undefined;
 
   beforeEach(() => {
+    previousGitConfigGlobal = process.env.GIT_CONFIG_GLOBAL;
+    previousGitConfigNoSystem = process.env.GIT_CONFIG_NOSYSTEM;
+    process.env.GIT_CONFIG_GLOBAL = path.join(os.tmpdir(), `a9-git-proj-global-${process.pid}.missing`);
+    process.env.GIT_CONFIG_NOSYSTEM = '1';
     repo = makeTempDir('a9-git-proj-');
     git(repo, 'init', '-q', '-b', 'main');
     git(repo, 'config', 'user.email', 'agent@example.com');
@@ -32,6 +60,10 @@ describe('A9-05: trusted git projection on real temp repositories', () => {
 
   afterEach(() => {
     fs.rmSync(repo, { recursive: true, force: true });
+    if (previousGitConfigGlobal === undefined) delete process.env.GIT_CONFIG_GLOBAL;
+    else process.env.GIT_CONFIG_GLOBAL = previousGitConfigGlobal;
+    if (previousGitConfigNoSystem === undefined) delete process.env.GIT_CONFIG_NOSYSTEM;
+    else process.env.GIT_CONFIG_NOSYSTEM = previousGitConfigNoSystem;
   });
 
   it('projects branch, head and clean status', async () => {
@@ -74,6 +106,86 @@ describe('A9-05: trusted git projection on real temp repositories', () => {
     expect(projection.externalMechanisms.some((m) => m.kind === 'hooks_path_override' && m.detail.includes('custom-hooks'))).toBe(true);
   });
 
+  it('does not diagnose absent config and still reports an explicit pager', async () => {
+    const withoutConfig = await projectTrustedGit(repo);
+    expect(withoutConfig.diagnostics?.some((item) => item.operation.startsWith('config')) ?? false).toBe(false);
+
+    git(repo, 'config', 'core.pager', 'less');
+    const withPager = await projectTrustedGit(repo);
+    expect(withPager.externalMechanisms).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'pager', detail: 'core.pager=less' }),
+    ]));
+  });
+
+  it('does not diagnose a repository with no commits', async () => {
+    const empty = makeTempDir('a9-git-proj-empty-');
+    try {
+      git(empty, 'init', '-q', '-b', 'main');
+      const projection = await projectTrustedGit(empty);
+      expect(projection.isGit).toBe(true);
+      expect(projection.diagnostics).toBeUndefined();
+      expect(projection.branch).toBeUndefined();
+      expect(projection.head).toBeUndefined();
+      expect(projection.diffPreview).toBe('');
+      expect(projection.entries).toEqual([]);
+    } finally {
+      fs.rmSync(empty, { recursive: true, force: true });
+    }
+  });
+
+  it('reports an oversized diff even when HEAD indicates no commits', async () => {
+    const oldPath = process.env.PATH;
+    const fakeRoot = makeTempDir('a9-63-git-no-commit-');
+    try {
+      const realGit = findGitBinary();
+      const fakeGit = path.join(fakeRoot, 'git');
+      fs.writeFileSync(fakeGit, [
+        '#!/bin/sh',
+        'while [ "$1" = "-c" ]; do shift 2; done',
+        'if [ "$1" = "rev-parse" ] && [ "$2" = "--verify" ]; then exit 1; fi',
+        'if [ "$1" = "rev-parse" ] && [ "$2" = "--abbrev-ref" ]; then exit 128; fi',
+        'if [ "$1" = "diff" ]; then',
+        `  exec ${JSON.stringify(process.execPath)} -e 'process.stdout.write("x".repeat(5 * 1024 * 1024))'`,
+        'fi',
+        `exec ${JSON.stringify(realGit)} "$@"`,
+        '',
+      ].join('\n'), 'utf8');
+      fs.chmodSync(fakeGit, 0o755);
+      process.env.PATH = `${fakeRoot}${path.delimiter}${oldPath || ''}`;
+
+      const projection = await projectTrustedGit(repo);
+      expect(projection.isGit).toBe(true);
+      expect(projection.head).toBeUndefined();
+      expect(projection.branch).toBeUndefined();
+      expect(projection.diagnostics).toEqual(expect.arrayContaining([
+        expect.objectContaining({ code: 'A9_GIT_OUTPUT_TOO_LARGE', operation: 'diff' }),
+      ]));
+    } finally {
+      if (oldPath === undefined) delete process.env.PATH;
+      else process.env.PATH = oldPath;
+      fs.rmSync(fakeRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('reports an oversized diff separately from a Git spawn failure', async () => {
+    const largePath = path.join(repo, 'large.txt');
+    fs.writeFileSync(largePath, 'base\n');
+    git(repo, 'add', 'large.txt');
+    git(repo, 'commit', '-q', '-m', 'large baseline');
+    fs.writeFileSync(largePath, `${'x'.repeat(5 * 1024 * 1024)}\n`);
+
+    const projection = await projectTrustedGit(repo);
+    expect(projection.branch).toBe('main');
+    expect(projection.head).toMatch(/^[0-9a-f]{40}$/);
+    expect(projection.entries.some((entry) => entry.path === 'large.txt')).toBe(true);
+    expect(projection.diagnostics).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'A9_GIT_OUTPUT_TOO_LARGE', operation: 'diff' }),
+    ]));
+    expect(projection.diagnostics).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'A9_GIT_SPAWN_FAILED', operation: 'diff' }),
+    ]));
+  });
+
   it('does not execute fsmonitor or textconv callbacks while projecting status and diff', async () => {
     const callback = path.join(repo, 'projection-callback.js');
     const fsmonitorMarker = path.join(repo, 'fsmonitor-called.txt');
@@ -110,6 +222,62 @@ describe('A9-05: trusted git projection on real temp repositories', () => {
       expect(projection.degradedReason).toContain('不是 Git 仓库');
     } finally {
       fs.rmSync(plain, { recursive: true, force: true });
+    }
+  });
+
+  it('distinguishes git spawn failure and non-zero exit from a non-repository', async () => {
+    const oldPath = process.env.PATH;
+    const fakeRoot = makeTempDir('a9-git-fake-');
+    try {
+      process.env.PATH = fakeRoot;
+      const missing = await projectTrustedGit(repo);
+      expect(missing.diagnostics?.[0]).toMatchObject({ code: 'A9_GIT_SPAWN_FAILED' });
+      fs.writeFileSync(path.join(fakeRoot, 'git'), '#!/bin/sh\nexit 7\n');
+      fs.chmodSync(path.join(fakeRoot, 'git'), 0o755);
+      const failed = await projectTrustedGit(repo);
+      expect(failed.diagnostics?.[0]).toMatchObject({ code: 'A9_GIT_EXIT_FAILED' });
+    } finally {
+      process.env.PATH = oldPath;
+      fs.rmSync(fakeRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('reports unreadable Git configuration mechanisms without hiding them as absent', async () => {
+    const hooks = path.join(repo, '.git', 'hooks');
+    fs.rmSync(hooks, { recursive: true, force: true });
+    fs.writeFileSync(hooks, 'unreadable marker');
+    const projection = await projectTrustedGit(repo);
+    expect(projection.diagnostics).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'A9_GIT_CONFIG_UNREADABLE' }),
+    ]));
+  });
+
+  it('reports a Git config command failure from a delegated fake Git', async () => {
+    const oldPath = process.env.PATH;
+    const fakeRoot = makeTempDir('a9-git-config-fake-');
+    try {
+      const realGit = findGitBinary();
+      const fakeGit = path.join(fakeRoot, 'git');
+      fs.writeFileSync(fakeGit, [
+        '#!/bin/sh',
+        'if [ "$1" = "config" ]; then',
+        '  echo "synthetic config failure" >&2',
+        '  exit 9',
+        'fi',
+        `exec ${JSON.stringify(realGit)} "$@"`,
+        '',
+      ].join('\n'));
+      fs.chmodSync(fakeGit, 0o755);
+      process.env.PATH = `${fakeRoot}${path.delimiter}${oldPath || ''}`;
+
+      const projection = await projectTrustedGit(repo);
+      expect(projection.diagnostics).toEqual(expect.arrayContaining([
+        expect.objectContaining({ code: 'A9_GIT_CONFIG_UNREADABLE' }),
+      ]));
+      expect(projection.diagnostics?.some((item) => item.operation.startsWith('config'))).toBe(true);
+    } finally {
+      process.env.PATH = oldPath;
+      fs.rmSync(fakeRoot, { recursive: true, force: true });
     }
   });
 });
