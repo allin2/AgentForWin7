@@ -268,3 +268,42 @@ Electron 路径为 `/Users/qlyf/.cache/w7-electron-22.3.27/node_modules/electron
 - git diff --check PASS。/private/tmp 与本会话 TMPDIR 中本轮测试前缀目录残留 0；工作树和 outputs 证据不属于临时沙箱。
 - 仅七个授权文件追加提交；主工作区 HEAD 仍为 d5b99b62abb8c7fe1a52875272811a1b01f8bc5d，主工作区暂存区为空。
   未暂存 Office Lite 依赖链接，未推送。准确提交及产品/测试/任务书哈希见 outputs/a9-62/R3_RESULT.json。
+
+## 8. 2026-11-11 独立复审返修（R4）
+
+负责人要求在 `5042e04dea1a6de5645fd53b9e3f20d5a529c1ee` 上追加两项返修，并登记以下已知限制；主工作区、IPC schema、Runtime、Core、Renderer、远端和 Win7 均未触碰。Office Lite 依赖链接保持为 `/Users/qlyf/Developer/win7-coding-Agent/src/shell/office-lite/node_modules`，不纳入提交。
+
+### 8.1 改动位置和行为
+
+1. `src/shell/product/a9-diagnostics-log.js`：应急同步日志拆为 `main.fatal.jsonl` 与 `main.fatal.previous.jsonl`，每段默认上限 512 KiB。轮转时同步删除旧 `previous`、同步改名当前文件，再写入新当前文件；初始化同时按上限处理两段。两段与普通/关键日志的容量总和保持不超过 6 MiB。
+   `uncaught-exception` 每进程最多同步落盘 32 条，超出部分只计入 `snapshot().suppressedCount`；`exit-end` 同步记录该数值，`startup-failed` 不受上限影响。现有 `main.js` 的未捕获异常与启动失败入口继续使用 `criticalSync`，本轮无需改动调用点。
+2. `src/shell/product/a9-diagnostics-log.js`：异步队列项增加入队单调时间，仅当该项从入队到写完严格少于 50ms 时解除 IPC 等待熔断；同步写成功不再解除熔断。
+3. `src/shell/tests/product/a9-diagnostics-log.test.ts`：新增以下红绿回归。
+
+| 项 | 测试名 | `5042e04d` 基线红测 | 修复后绿测 |
+|---|---|---|---|
+| R4-1 | `retains the first uncaught exception, caps synchronous records, and reports suppressedCount on exit` | FAIL：无 `suppressedCount`，5000 条均写入 | PASS：首条仍可读，`uncaught-exception` 恰好 32 条，`suppressedCount=4968`，`startup-failed` 与 `exit-end` 可写 |
+| R4-1 | `rotates a nearly full emergency file into previous synchronously` | FAIL：旧 `previous` 未被替换 | PASS：旧当前文件进入 `previous`，新记录在当前文件，两段均不超过 512 KiB |
+| R4-1 | `keeps both emergency segments and all diagnostic files under 6 MiB` | PASS（旧实现已有总量上限，但只有单应急段） | PASS：双应急段存在且总量不超过 6 MiB |
+| R4-2 | `suspends IPC waits after a slow async write and recovers only after a fast queued write` | FAIL：20 次慢写会重复等待约 50ms | PASS：第 1 次等待，后 19 次各小于 5ms；延迟撤掉后第 2 次等待并确认 `ipc-begin` 已落盘 |
+
+4. `src/shell/tests/product/a9-diagnostics-entry.cjs`、`run-a9-diagnostics-electron.cjs`：增加 Electron `uncaught-flood` 夹具和断言，真实触发 5000 次未捕获异常并核对 32 条记录、`suppressedCount=4968`。
+
+### 8.2 本轮检查和证据
+
+| 检查 | 命令/证据 | 结果 | 证据层级 |
+|---|---|---|---|
+| R4 基线红测 | `A9_62_REVIEW_LOGGER=<git show 5042e04d 的临时副本> env -u NODE_OPTIONS -u ELECTRON_RUN_AS_NODE /Users/qlyf/.nvm/versions/node/v20.17.0/bin/node src/shell/node_modules/jest/bin/jest.js --config src/shell/jest.config.js --runInBand --runTestsByPath src/shell/tests/product/a9-diagnostics-log.test.ts`；原始输出 `outputs/a9-62/r4-red-final.txt` | 22 项中 19 PASS、3 FAIL（R4-1 上限、R4-1 轮转、R4-2 熔断） | 开发机 Node 20.17.0，准确基线副本 |
+| R4 定向绿测 | 同一 Jest 命令，使用当前工作树 logger；原始输出保留于本轮终端 | 22/22 PASS | 开发机 Node 20.17.0 |
+| Shell 日常集合 | `env -u NODE_OPTIONS -u ELECTRON_RUN_AS_NODE PATH=/Users/qlyf/.nvm/versions/node/v20.17.0/bin:$PATH /Users/qlyf/.nvm/versions/node/v20.17.0/bin/node scripts/verify_integration.mjs --daily --module shell` | 75/75 套件，1634 PASS、12 跳过、0 FAIL；构建、lint、测试均退出 0 | 开发机 Node 20.17.0；当前工作树构建输出 |
+| Electron 既有入口与新增场景 | `/Users/qlyf/.nvm/versions/node/v20.17.0/bin/node src/shell/tests/product/run-a9-diagnostics-electron.cjs --electron=/Users/qlyf/.cache/w7-electron-22.3.27/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron --out=/tmp/a9-62-diagnostics/outputs/a9-62/r4-complete --dialog-mode=capture --case=smoke,startup-failure,stall-stage,stall-ipc,kill-stage,kill-ipc,rejection,window-events,normal-exit,ipc-failure,fifo-exit,slow-startup,early-exit,early-quit,cancel-quit-stop,cancel-quit-leave,slow-uncaught,steady-2m,uncaught-flood` | 19/19 场景 PASS；`steady-2m` 为 120 次真实 IPC；新增 `uncaught-flood` PASS | 开发机 Electron 22.3.27 / Node 16.17.1，`DEVELOPER_ELECTRON` |
+| 差异与临时目录 | `git diff --check`；测试钩子清理系统临时目录，运行后按项目前缀核对 | PASS；本轮测试沙箱零残留 | 开发机工作树 |
+
+### 8.3 已知限制和未执行项
+
+- 诊断目录按“当前用户独占”设计。同一用户的其他进程把日志文件替换为命名管道或符号链接，不在防护范围内：异步日志文件被替换时进程退出可能卡住；同步写入的 `lstat` 检查与写入之间存在替换窗口。触发前提是攻击者已能写入 `userData`；Win7 NTFS 没有这种管道文件，创建符号链接默认需要管理员权限；Node 16/Win7 没有可用的 `O_NOFOLLOW` 与 `O_NONBLOCK` 路径。现有 `lstat` 检查保留，不加码。
+- 原生错误框的实际点击尚未验证，留到 Win7 开发通道；`dialogMode=capture` 只验证调用、日志和继续/退出语义。
+- Node 16 的 Jest 运行器退出时 `SIGTRAP` 与基线相同，精确根因 `UNKNOWN`；本轮以无 VM Node 16 探针和真实 Electron 入口作为替代证据。
+- Win7/Win10 实机、完整后台 Runtime/Runner 清理、原生错误框点击、打包、候选冻结、门 A/B、推送和发布均为 `NOT_PERFORMED`。本轮只产生开发机证据，不提升为 Win7 PASS 或正式候选结论。
+
+本轮没有新增需要负责人裁决的技术取舍；以上命名管道/符号链接边界、原生错误框点击和 Node 16 Jest `SIGTRAP` 均按负责人已裁决的已知限制登记，不改代码绕过。

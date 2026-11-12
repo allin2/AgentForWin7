@@ -275,3 +275,99 @@ describe('A9-62 R3 seven reliability repairs', () => {
     ]));
   });
 });
+
+describe('A9-62 independent review follow-up', () => {
+  test('retains the first uncaught exception, caps synchronous records, and reports suppressedCount on exit', () => {
+    const log = createDiagnosticsLog({ userDataPath: root() });
+    const firstError = errorFacts(Object.assign(new Error('first'), { code: 'EIO' }), 'A9_MAIN_UNCAUGHT_EXCEPTION');
+    const laterError = errorFacts(Object.assign(new Error('later'), { code: 'ENOSPC' }), 'A9_MAIN_UNCAUGHT_EXCEPTION');
+    expect(log.criticalSync('uncaught-exception', firstError)).toBe(true);
+    for (let index = 1; index < 5000; index++) expect(log.criticalSync('uncaught-exception', laterError)).toBe(true);
+    expect(log.snapshot()).toMatchObject({ suppressedCount: 4968 });
+    expect(log.criticalSync('startup-failed', { errorCode: 'ENOSPC' })).toBe(true);
+    expect(log.criticalSync('exit-end', { exitCode: 0 })).toBe(true);
+    const directory = log.snapshot().directory;
+    const emergency = fs.readdirSync(directory).filter(name => name.startsWith('main.fatal') && name.endsWith('.jsonl'))
+      .flatMap(name => fs.readFileSync(path.join(directory, name), 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line)));
+    expect(emergency.filter(row => row.event === 'uncaught-exception')).toHaveLength(32);
+    expect(emergency.find(row => row.event === 'uncaught-exception')).toMatchObject({ errorCode: 'EIO' });
+    expect(emergency.find(row => row.event === 'startup-failed')).toMatchObject({ errorCode: 'ENOSPC' });
+    expect(emergency.find(row => row.event === 'exit-end')).toMatchObject({ exitCode: 0, suppressedCount: 4968 });
+  });
+
+  test('rotates a nearly full emergency file into previous synchronously', () => {
+    const userDataPath = root();
+    const directory = path.join(userDataPath, 'diagnostics');
+    fs.mkdirSync(directory, { recursive: true });
+    const limit = 512 * 1024;
+    const marker = 'legacy-emergency-marker\n';
+    fs.writeFileSync(path.join(directory, 'main.fatal.previous.jsonl'), 'stale-previous\n', 'utf8');
+    fs.writeFileSync(path.join(directory, 'main.fatal.jsonl'), marker + 'x'.repeat(limit - marker.length - 32) + '\n', 'utf8');
+    const log = createDiagnosticsLog({ userDataPath });
+    expect(log.criticalSync('uncaught-exception', errorFacts({ code: 'EIO' }, 'A9_MAIN_UNCAUGHT_EXCEPTION'))).toBe(true);
+    const active = fs.readFileSync(path.join(directory, 'main.fatal.jsonl'));
+    const previous = fs.readFileSync(path.join(directory, 'main.fatal.previous.jsonl'), 'utf8');
+    expect(previous).toContain(marker.trim());
+    expect(previous).not.toContain('stale-previous');
+    expect(active.toString('utf8')).toContain('"event":"uncaught-exception"');
+    expect(active.length).toBeLessThanOrEqual(limit);
+    expect(Buffer.byteLength(previous, 'utf8')).toBeLessThanOrEqual(limit);
+  });
+
+  test('keeps both emergency segments and all diagnostic files under 6 MiB', async () => {
+    const log = createDiagnosticsLog({ userDataPath: root() });
+    const error = errorFacts({ code: 'EIO' }, 'A9_MAIN_UNCAUGHT_EXCEPTION');
+    for (let index = 0; index < 5000; index++) log.criticalSync('uncaught-exception', error);
+    await log.record('main-thread-stall', { durationMs: 2000, pending: [{ operationId: 1, stage: 'desktop-host' }] });
+    await log.flush();
+    const directory = log.snapshot().directory;
+    const sizes = fs.readdirSync(directory).filter(name => name.endsWith('.jsonl')).map(name => fs.statSync(path.join(directory, name)).size);
+    expect(sizes.reduce((sum, size) => sum + size, 0)).toBeLessThanOrEqual(6 * 1024 * 1024);
+    expect(fs.existsSync(path.join(directory, 'main.fatal.jsonl'))).toBe(true);
+  });
+
+  test('suspends IPC waits after a slow async write and recovers only after a fast queued write', async () => {
+    let delayMs = 200;
+    let holdSecond = false;
+    let releaseSecond!: () => void;
+    const secondGate = new Promise<void>(resolve => { releaseSecond = resolve; });
+    const io = { ...fs, promises: { ...fs.promises,
+      appendFile: async (...args: any[]) => {
+        if (delayMs) await new Promise(resolve => setTimeout(resolve, delayMs));
+        if (holdSecond && String(args[1]).includes('"operationId":21')) await secondGate;
+        return (fs.promises.appendFile as any)(...args);
+      },
+    } };
+    const log = createDiagnosticsLog({ userDataPath: root(), fs: io });
+    const waits: number[] = [];
+    for (let index = 0; index < 20; index++) {
+      const started = process.hrtime.bigint();
+      await log.checkpoint('ipc-begin', { action: 'a9.workspace.list', operationId: index });
+      waits.push(Number(process.hrtime.bigint() - started) / 1e6);
+      if (index < 19) await new Promise(resolve => setTimeout(resolve, 300));
+    }
+    expect(waits[0]).toBeGreaterThanOrEqual(40);
+    expect(waits.slice(1).every(wait => wait < 5)).toBe(true);
+    delayMs = 0;
+    await new Promise(resolve => setTimeout(resolve, 250));
+    const firstRecovered = log.checkpoint('ipc-begin', { action: 'a9.workspace.list', operationId: 20 });
+    await firstRecovered;
+    await log.flush();
+    expect(log.snapshot().ipcWaitSuspended).toBe(false);
+    const directory = log.snapshot().directory;
+    let handlerStarted = false;
+    holdSecond = true;
+    const second = log.checkpoint('ipc-begin', { action: 'a9.workspace.list', operationId: 21 }).then(() => {
+      const records = fs.readdirSync(directory).filter(name => name.endsWith('.jsonl'))
+        .flatMap(name => fs.readFileSync(path.join(directory, name), 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line)));
+      expect(records.some(row => row.event === 'ipc-begin' && row.operationId === 21)).toBe(true);
+      handlerStarted = true;
+    });
+    await new Promise(resolve => setImmediate(resolve));
+    expect(handlerStarted).toBe(false);
+    releaseSecond();
+    await second;
+    expect(handlerStarted).toBe(true);
+    await log.flush();
+  }, 15000);
+});

@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 
 const FILE_BYTES = 2 * 1024 * 1024;
+const EMERGENCY_FILE_BYTES = 512 * 1024;
 const LINE_BYTES = 4096;
 const CODE_PATTERN = /^(?:A[89]_[A-Z0-9_]+|E[A-Z0-9]{2,15}|ERR_[A-Z0-9_]{2,44})$/;
 const ERROR_NAMES = new Set(['Error', 'TypeError', 'RangeError', 'ReferenceError', 'SyntaxError', 'URIError', 'EvalError', 'AggregateError']);
@@ -36,10 +37,10 @@ function createDiagnosticsLog(options) {
   const maxFileBytes = Math.max(512, Math.min(FILE_BYTES, config.maxFileBytes || FILE_BYTES));
   const maxLineBytes = Math.max(256, Math.min(LINE_BYTES, maxFileBytes / 2, config.maxLineBytes || LINE_BYTES));
   const maxQueue = Math.max(1, Math.min(256, config.maxQueue || 256));
-  // 1 MiB IPC + two 2 MiB critical files + 1 MiB emergency = 6 MiB.
+  // 1 MiB IPC + two 2 MiB critical files + two 512 KiB emergency files = 6 MiB.
   const normal = { activePath: path.join(directory, 'main.jsonl'), previousPath: null, bytes: 0, limit: maxFileBytes / 2 };
   const critical = { activePath: path.join(directory, 'critical.jsonl'), previousPath: path.join(directory, 'critical.previous.jsonl'), bytes: 0, previousBytes: 0, limit: maxFileBytes };
-  const emergency = { activePath: path.join(directory, 'main.fatal.jsonl'), bytes: 0, limit: maxFileBytes / 2 };
+  const emergency = { activePath: path.join(directory, 'main.fatal.jsonl'), previousPath: path.join(directory, 'main.fatal.previous.jsonl'), bytes: 0, previousBytes: 0, limit: Math.min(EMERGENCY_FILE_BYTES, maxFileBytes / 4) };
   const normalQueue = [];
   const criticalQueue = [];
   const stats = { recordCount: 0, writtenCount: 0, droppedCount: 0, writeFailureCount: 0, truncatedCount: 0 };
@@ -49,13 +50,15 @@ function createDiagnosticsLog(options) {
   let criticalDraining = false;
   let stopped = false;
   let ipcWaitSuspended = false;
+  let uncaughtRecorded = 0;
+  let suppressedCount = 0;
 
   function encode(event, values) {
     const row = { schemaVersion: 1, timestamp: new Date().toISOString(), pid: process.pid, event };
     for (const key of ['stage', 'channel', 'action', 'errorCode', 'errorName', 'reason', 'version', 'electron', 'node', 'blockReason']) {
       if (typeof values[key] === 'string') row[key] = values[key].slice(0, 96);
     }
-    for (const key of ['operationId', 'durationMs', 'exitCode', 'pendingCount']) {
+    for (const key of ['operationId', 'durationMs', 'exitCode', 'pendingCount', 'suppressedCount']) {
       if (Number.isFinite(values[key])) row[key] = Math.max(-2147483648, Math.min(Number.MAX_SAFE_INTEGER, Math.round(values[key])));
     }
     if (Array.isArray(values.stackFrames)) row.stackFrames = values.stackFrames.slice(0, 5).map(frame => ({ file: frame.file, line: frame.line, column: frame.column }));
@@ -97,11 +100,15 @@ function createDiagnosticsLog(options) {
       critical.bytes = await statAsyncOrZero(critical.activePath);
       critical.previousBytes = await statAsyncOrZero(critical.previousPath);
       emergency.bytes = await statAsyncOrZero(emergency.activePath);
+      emergency.previousBytes = await statAsyncOrZero(emergency.previousPath);
       for (const state of [normal, critical, emergency]) {
         if (state.bytes > state.limit) { await io.promises.truncate(state.activePath, 0); state.bytes = 0; }
       }
       if (critical.previousBytes > critical.limit) {
         await io.promises.truncate(critical.previousPath, 0); critical.previousBytes = 0;
+      }
+      if (emergency.previousBytes > emergency.limit) {
+        await io.promises.truncate(emergency.previousPath, 0); emergency.previousBytes = 0;
       }
       directoryReady = true;
     })();
@@ -141,8 +148,14 @@ function createDiagnosticsLog(options) {
     } catch (error) { if (error.code !== 'ENOENT') throw error; }
     const bytes = Buffer.byteLength(line, 'utf8');
     const rotate = existingBytes + bytes > emergency.limit;
-    io.writeFileSync(emergency.activePath, line, { encoding: 'utf8', flag: rotate ? 'w' : 'a' });
-    emergency.bytes = (rotate ? 0 : existingBytes) + bytes;
+    if (rotate) {
+      try { io.unlinkSync(emergency.previousPath); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+      try { io.renameSync(emergency.activePath, emergency.previousPath); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+      emergency.previousBytes = existingBytes;
+      existingBytes = 0;
+    }
+    io.writeFileSync(emergency.activePath, line, { encoding: 'utf8', flag: 'a' });
+    emergency.bytes = existingBytes + bytes;
   }
 
   async function drain(state, queue, criticalDrain) {
@@ -154,7 +167,8 @@ function createDiagnosticsLog(options) {
         try {
           await appendAsync(state, item.line);
           stats.writtenCount += 1;
-          ipcWaitSuspended = false;
+          const elapsedMs = Number(process.hrtime.bigint() - item.enqueuedAt) / 1e6;
+          if (elapsedMs < 50) ipcWaitSuspended = false;
           item.resolve(true);
         } catch (_error) {
           stats.writeFailureCount += 1;
@@ -171,7 +185,7 @@ function createDiagnosticsLog(options) {
     stats.recordCount += 1;
     if (stopped || queue.length >= maxQueue) { stats.droppedCount += 1; return Promise.resolve(false); }
     try {
-      const result = new Promise(resolve => queue.push({ line: encode(event, values), resolve }));
+      const result = new Promise(resolve => queue.push({ line: encode(event, values), enqueuedAt: process.hrtime.bigint(), resolve }));
       if (criticalRecord) lastCriticalWrite = result; else lastNormalWrite = result;
       void drain(state, queue, criticalRecord);
       return result;
@@ -189,10 +203,16 @@ function createDiagnosticsLog(options) {
 
   function criticalSync(event, values = {}) {
     stats.recordCount += 1;
+    if (event === 'uncaught-exception') {
+      if (uncaughtRecorded >= 32) {
+        suppressedCount += 1;
+        return true;
+      }
+      uncaughtRecorded += 1;
+    }
     try {
-      appendSync(encode(event, values));
+      appendSync(encode(event, event === 'exit-end' ? { ...values, suppressedCount } : values));
       stats.writtenCount += 1;
-      ipcWaitSuspended = false;
       return true;
     } catch (_error) {
       stats.writeFailureCount += 1;
@@ -221,7 +241,7 @@ function createDiagnosticsLog(options) {
     flush: () => boundedWait(Promise.all([lastNormalWrite, lastCriticalWrite])),
     criticalSync,
     stop: () => { stopped = true; },
-    snapshot: () => ({ directory, ...stats, ipcWaitSuspended, queuedCount: normalQueue.length + criticalQueue.length }),
+    snapshot: () => ({ directory, ...stats, suppressedCount, ipcWaitSuspended, queuedCount: normalQueue.length + criticalQueue.length }),
   };
 }
 

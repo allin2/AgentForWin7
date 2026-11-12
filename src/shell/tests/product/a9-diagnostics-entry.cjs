@@ -25,9 +25,9 @@ ipcMain.handle = (channel, handler) => registerHandle(channel, (event, ...args) 
 write('runtime.json', { electron: process.versions.electron, node: process.versions.node, mode, dialogMode });
 const originalErrorBox = dialog.showErrorBox.bind(dialog);
 dialog.showErrorBox = (title, content) => {
-  write('dialog.json', { title, content });
-  if (!mode.startsWith('native-') && mode !== 'baseline-uncaught' && mode !== 'slow-uncaught') throw new Error('UNEXPECTED_NATIVE_DIALOG');
-  if (mode === 'slow-uncaught' || dialogMode === 'capture') return; // Fault test observes fatal persistence without user interaction.
+  if (mode !== 'uncaught-flood' || !fs.existsSync(path.join(runRoot, 'dialog.json'))) write('dialog.json', { title, content });
+  if (!mode.startsWith('native-') && mode !== 'baseline-uncaught' && mode !== 'slow-uncaught' && mode !== 'uncaught-flood') throw new Error('UNEXPECTED_NATIVE_DIALOG');
+  if (mode === 'slow-uncaught' || mode === 'uncaught-flood' || dialogMode === 'capture') return; // Fault test observes fatal persistence without user interaction.
   return originalErrorBox(title, content);
 };
 function block(milliseconds) {
@@ -158,6 +158,13 @@ if (mode.startsWith('baseline-')) {
         }
         if (mode === 'normal-exit') {
           write('normal-exit-requested.json', { requested: true });
+          app.quit();
+          return;
+        }
+        if (mode === 'uncaught-flood') {
+          const error = Object.assign(new Error(fakeSecret), { code: 'EIO' });
+          for (let index = 0; index < 5000; index++) process.emit('uncaughtException', error);
+          write('flood.json', { attempted: 5000 });
           app.quit();
           return;
         }

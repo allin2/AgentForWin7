@@ -85,6 +85,14 @@ function verify(mode, runRoot, code, signal) {
     assert.equal(rows.filter(row => row.event === 'exit-end')[0].exitCode, 0);
     assert.deepEqual(read('lifecycle.json'), { beforeQuit: 1, willQuit: 1, dispose: 1 });
   }
+  if (mode === 'uncaught-flood') {
+    const emergency = rows.filter(row => row.event === 'uncaught-exception');
+    assert.equal(emergency.length, 32);
+    const exit = rows.find(row => row.event === 'exit-end');
+    assert(exit, 'exit-end missing after uncaught flood');
+    assert.equal(exit.suppressedCount, 4968);
+    assert.equal(read('flood.json').attempted, 5000);
+  }
   if (mode === 'fifo-exit') {
     assert.equal(read('fifo-ready.json').ready, true);
     assert(read('log-stats.json').writeFailureCount >= 1);
@@ -142,7 +150,7 @@ async function run(mode) {
     try { result = { mode, dialogMode, status: 'PASS', code, signal, ...verify(mode, runRoot, code, signal) }; }
     catch (error) { result = { mode, dialogMode, status: 'FAIL', code, signal, error: error.message }; }
     const destination = path.join(output, mode); fs.mkdirSync(destination, { recursive: true });
-    for (const name of ['runtime.json', 'smoke.json', 'diagnostics.json', 'ipc-result.json', 'dialog.json', 'alive.json', 'normal-exit-requested.json', 'steady.json', 'lifecycle.json', 'driver-error.json', 'fifo-ready.json', 'cancelled.json', 'shutdown-choice.json', 'log-stats.json']) {
+    for (const name of ['runtime.json', 'smoke.json', 'diagnostics.json', 'ipc-result.json', 'dialog.json', 'alive.json', 'normal-exit-requested.json', 'steady.json', 'lifecycle.json', 'driver-error.json', 'fifo-ready.json', 'cancelled.json', 'shutdown-choice.json', 'log-stats.json', 'flood.json']) {
       const file = path.join(runRoot, name); if (fs.existsSync(file)) fs.copyFileSync(file, path.join(destination, name));
     }
     fs.writeFileSync(path.join(destination, 'records.json'), JSON.stringify(readRows(runRoot), null, 2) + '\n', 'utf8');
