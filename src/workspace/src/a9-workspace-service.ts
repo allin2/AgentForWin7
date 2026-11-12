@@ -43,6 +43,7 @@ export interface A9ListResult {
   truncated: boolean;
   outsideWorkspace: boolean;
   skipped: Array<{ path: string; reason: 'directory_unreadable' }>;
+  skippedTotal: number;
   entries: Array<{
     name: string;
     path: string;
@@ -167,40 +168,6 @@ function createYieldController(): YieldController {
   };
 }
 
-async function sortDirentsWithYields(
-  input: fs.Dirent[],
-  controller: YieldController,
-  checkCanceled: () => void,
-): Promise<fs.Dirent[]> {
-  checkCanceled();
-  if (input.length < 2) return input;
-  let source = input.slice();
-  let scratch = new Array<fs.Dirent>(source.length);
-  for (let width = 1; width < source.length; width *= 2) {
-    for (let start = 0; start < source.length; start += width * 2) {
-      let left = start;
-      let right = Math.min(start + width, source.length);
-      const end = Math.min(start + width * 2, source.length);
-      let output = start;
-      while (left < right && right < end) {
-        if (source[left].name.localeCompare(source[right].name) <= 0) scratch[output++] = source[left++];
-        else scratch[output++] = source[right++];
-        if ((output & 0x3ff) === 0) {
-          await controller.checkpoint();
-          checkCanceled();
-        }
-      }
-      while (left < right) scratch[output++] = source[left++];
-      while (right < end) scratch[output++] = source[right++];
-    }
-    const previous = source;
-    source = scratch;
-    scratch = previous;
-    await controller.checkpoint();
-    checkCanceled();
-  }
-  return source;
-}
 const MAX_BASELINE_FILE_BYTES = 2 * 1024 * 1024;
 const MAX_BASELINE_TOTAL_BYTES = 40 * 1024 * 1024;
 
@@ -377,6 +344,11 @@ export class A9WorkspaceService {
 
     const entries: A9ListResult['entries'] = [];
     const skipped: A9ListResult['skipped'] = [];
+    let skippedTotal = 0;
+    const recordSkipped = (directoryPath: string): void => {
+      skippedTotal += 1;
+      if (skipped.length < 50) skipped.push({ path: directoryPath || '.', reason: 'directory_unreadable' });
+    };
     let truncated = false;
     // canonical path 集合防止 junction/symlink 递归环。
     let rootRealPath: string;
@@ -398,14 +370,15 @@ export class A9WorkspaceService {
       let dirents: fs.Dirent[];
       try {
         dirents = await fs.promises.readdir(currentDir, { withFileTypes: true });
-        dirents = await sortDirentsWithYields(dirents, controller, checkCanceled);
+        checkCanceled();
+        dirents.sort((a, b) => a.name.localeCompare(b.name));
         checkCanceled();
       } catch (error: any) {
         if (signal?.aborted) throw new Error('目录读取已取消');
         if (isRoot) {
           throw new WorkspaceError('DIRECTORY_READ_FAILED', `无法读取目录 ${relPath || '.'}: ${error?.message || 'unknown error'}`);
         }
-        skipped.push({ path: currentRel || '.', reason: 'directory_unreadable' });
+        recordSkipped(currentRel);
         return;
       }
 
@@ -444,7 +417,7 @@ export class A9WorkspaceService {
             realChild = await fs.promises.realpath(itemAbs);
           } catch (_e) {
             checkCanceled();
-            skipped.push({ path: itemRel, reason: 'directory_unreadable' });
+            recordSkipped(itemRel);
             continue;
           }
           if (!visitedDirs.has(realChild)) {
@@ -463,6 +436,7 @@ export class A9WorkspaceService {
       truncated,
       outsideWorkspace: isOutside,
       skipped,
+      skippedTotal,
       entries,
     };
   }
@@ -789,8 +763,10 @@ export class A9WorkspaceService {
 
           const lines = text.split(/\r?\n/);
           for (let i = 0; i < lines.length; i++) {
-            await controller.checkpoint();
-            checkCanceled();
+            if ((i & 0xff) === 0) {
+              await controller.checkpoint();
+              checkCanceled();
+            }
             if (regex.test(lines[i])) {
               matches.push({
                 filePath: relPath,

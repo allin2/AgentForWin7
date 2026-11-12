@@ -15,7 +15,7 @@ Win7-Validation: NOT_PERFORMED
 
 改动位置限定为：
 
-- `src/workspace/src/a9-workspace-service.ts`：异步目录读取、可让出的排序与扫描、取消、稳定目录错误码、list/search 跳过和截断结果字段。
+- `src/workspace/src/a9-workspace-service.ts`：异步目录读取、原生排序与可让出的扫描、取消、稳定目录错误码、list/search 跳过和截断结果字段。
 - `src/workspace/src/types.ts`：新增 `DIRECTORY_READ_FAILED` 工作区错误码。
 - `src/core/src/a9-agent-loop.ts`：将当前 Turn 的 `AbortSignal` 传给 list/search。
 - `src/workspace/tests/unit/a9-64-search-list-responsive.test.ts`：等价、取消和失败路径回归。
@@ -25,7 +25,10 @@ Win7-Validation: NOT_PERFORMED
 
 ## 2. 行为合同
 
-`list` 增加可选 `signal`。目录读取和 Dirent 排序使用现有 25 ms 时间片让出；排序仍使用旧的 `name.localeCompare` 规则，递归仍为深度优先、每层排序、最多 10 层，并在同一位置执行 `maxEntries` 截断。根目录读取失败抛出 `WorkspaceError`，错误码为 `DIRECTORY_READ_FAILED`；递归子目录读取失败继续扫描并返回 `skipped: [{ path, reason: "directory_unreadable" }]`。
+`list` 增加可选 `signal`。目录读取保持异步，逐项扫描使用现有 25 ms 时间片让出；第四轮已删除存在 P0 缺陷的自写排序，改回原生 `dirents.sort((a, b) => a.name.localeCompare(b.name))`，排序前后检查取消，排序期间不让出事件循环。递归仍为深度优先、每层排序、最多 10 层，并在同一位置执行 `maxEntries` 截断。根目录读取失败抛出 `WorkspaceError`，错误码为 `DIRECTORY_READ_FAILED`；递归子目录读取失败继续扫描，结果新增字段为：
+
+- `skipped`：最多 50 项，格式为 `{ path, reason: "directory_unreadable" }`。
+- `skippedTotal`：全部跳过目录的总数，不受 50 项详情上限限制。
 
 `search` 增加可让出的扫描和可选 `signal`，保留取消文字“搜索已被用户取消”。结果新增：
 
@@ -47,7 +50,7 @@ Win7-Validation: NOT_PERFORMED
 |---|---|---|
 | 基线对照 | `A9_64_REPO_ROOT=/tmp/a9-64-probe-baseline-20261111 ... node outputs/a9-64/probe.mjs`；修复后 `node outputs/a9-64/probe.mjs` | 上一轮基线 list 100000 文件最长单次阻塞实测 `53 ms`；差别主要来自 search。上一轮修复后 search 20000 文件最长单次阻塞 `12.05 ms`。本轮重跑结果见 `outputs/a9-64/probe-fixed-r2.json`，并确认 20000 文件边界 `truncated=false`。 |
 | 取消 | `node outputs/a9-64/cancel-probe.mjs` | list `25.51 ms`、search `26.38 ms` 均以原取消错误结束，≤200 ms；原始 JSON 在 `outputs/a9-64/cancel-probe.json`。 |
-| 等价 | `npm --prefix src/workspace test -- --runInBand tests/unit/a9-64-search-list-responsive.test.ts` | list 非递归、递归和截断逐项对照旧同步算法，7/7 通过。 |
+| 等价（历史，更正见第四轮） | `npm --prefix src/workspace test -- --runInBand tests/unit/a9-64-search-list-responsive.test.ts` | 当时的定向集合 7/7 通过，但夹具太小，未覆盖自写排序缺陷；该结果不能证明一般目录下的 list 等价。第四轮以最小复现和 200 个随机目录重新验证。 |
 | 失败路径 | 同上定向测试 | 根目录不可读、递归子目录不可读、文件过大、二进制/歧义、读文件失败均有回归，7/7 通过。 |
 | 红绿 | 基线工作树同一测试；修复工作树同一测试 | 基线 5 项行为测试失败、2 项兼容行为通过；修复后 7/7 通过。Core signal 回归基线 1 项失败；修复后 14/14 通过。原始红测日志在 `outputs/a9-64/red-workspace-baseline.log`、`red-core-baseline.log`。 |
 | 回归 | `node scripts/verify_integration.mjs --daily --module workspace`；`node scripts/verify_integration.mjs --daily --module core` | 修复后 workspace：25/25 suites、278/278 tests，build 通过；core：40/40 suites、924/924 tests，build 通过（依赖 workspace/state/runner/git-adapter/gateway 同步 build）。同一 Node 20 基线工作树 workspace：25/25、278/278；core：40/40、924/924；通过数无回归。原始日志在 `outputs/a9-64/daily-workspace.log`、`daily-core.log`、`daily-baseline-workspace.log`、`daily-baseline-core.log`。 |
@@ -85,10 +88,36 @@ Win7-Validation: NOT_PERFORMED
 | 响应性探针 | `NODE20 outputs/a9-64/probe.mjs > outputs/a9-64/probe-fixed-r3.json` | list 100000 文件：总耗时 `111.46 ms`、最大定时器间隔 `31.16 ms`、最长阻塞 `21.16 ms`；search 20000 文件：总耗时 `437.21 ms`、间隔 `11.08 ms`、阻塞 `1.08 ms`；均低于 200 ms。搜索精确边界仍不截断。 |
 | 范围与清理 | `git diff --check`；提交后 `git diff --name-only f229bc3c HEAD`；系统临时目录核对 | 差异检查通过；仅包含三个允许文件。本轮测试与探针夹具新增残留 `0`；失败验证留下的空运行目录已移除，其他会话的 `a9-64-man-*` 目录及旧日志保留。 |
 
+### 第四轮：修复独立审核发现的排序 P0 与两条 P2
+
+实际基线为 `9ab87046661ef6ec94e9b9bad3b6e4e1ecb1735b`，分支 `a9-64-search-list-responsive`，开始时 HEAD 匹配且工作区干净。负责人明确决定删除自写排序、恢复原生排序，并授权跳过列表有界及搜索行循环开销修复。本轮只修改工作区服务、对应测试和本任务书；本地提交，不推送、不连接 Win7、不打包。产品 JS/类型与测试变化，无新增依赖、原生组件、权限或上限常量变化。
+
+P0 由独立审核发现：仅有 `File.txt` 和 `a_b.txt` 的目录返回 4 项，`a_b.txt` 出现 3 次；审核随机 150 个目录有 147 个结果不一致。根因是自写归并排序将会被推进的 `right` 同时当作左段边界，右段先耗尽后把额外元素拷入结果。负责人决定采用原生排序，本轮完整删除 `sortDirentsWithYields`，不修补保留；恢复与基线完全相同的 `dirents.sort((a, b) => a.name.localeCompare(b.name))`，前后各检查取消。目录读取保持异步，逐项扫描的让出不变。
+
+此前“list 等价通过”的结论不充分：原定向夹具太小，未覆盖这个缺陷。原日志保留为历史事实，不能作为一般等价证明。本轮新增独立同步参照：原生排序、基线递归顺序、深度上限和截断位置，不调用产品辅助函数。200 个固定种子的随机树各含 0～300 个文件/目录，覆盖空树、300 项树、嵌套树和平铺树；名字混合大小写、数字、下划线、连字符、中文、空格和长名字，以唯一编号避免大小写不敏感文件系统冲突，生成名称不命中忽略规则。每树验证递归/非递归及 `maxEntries=1、7、500、总项数+501`，共 1600 组逐项对照；另保留两文件最小复现。
+
+P2 跳过列表：list 两处子目录失败入口统一计数，`skipped` 详情最多 50 项，新增 `skippedTotal` 记录全部数量。100 个不可读子目录用真实目录配合 `readdir` 权限失败替身验证，返回详情 50 项、总数 100。P2 搜索开销：行循环在行索引为 0、256、512 等时执行让出及取消检查，文件之间的检查保持不变。结果语义、取消文字、第三轮的上限判定位置保持不变，无固定超时。
+
+下表 `NODE20` 使用第三轮给出的完整运行前缀；所有证据层级均为开发机 Node 20，父进程和 npm 子进程均为 `v20.17.0`。
+
+| 项 | 命令/证据 | 第四轮结果 |
+|---|---|---|
+| 红绿 | 在 `src/workspace` 执行 `NODE20 node_modules/jest/bin/jest.js --runInBand --runTestsByPath tests/unit/a9-64-search-list-responsive.test.ts --json --outputFile ../../outputs/a9-64/red-r4-9ab87046.json`；当时产品源码仍为 `9ab87046` | 随机树旧代码 186 失败、14 通过；加最小复现的等价组共 187 失败、14 通过，返修后 201/201 通过。含跳过有界测试的整个集合旧代码 188 失败、25 通过，返修后 213/213 通过。日志 `red-r4-9ab87046.log` 保留。 |
+| 最小复现 | `NODE20 scripts/verify_integration.mjs --module workspace --test-file tests/unit/a9-64-search-list-responsive.test.ts` | 恰好 2 项，顺序为 `a_b.txt`、`File.txt`；`totalEntries=2`、`truncated=false`。 |
+| 定向 | 同上；`outputs/a9-64/targeted-r4.log` | build、静态门及 213/213 测试通过，包含 1600 组随机目录对照和 100 个不可读子目录的有界报告。 |
+| 日常 | `NODE20 scripts/verify_integration.mjs --daily --module workspace`；`outputs/a9-64/daily-workspace-r4.log` | 25/25 套件、484/484 测试通过，上一轮为 282；daily 依原规则不执行 A9-19 慢测试。 |
+| 原探针 | `NODE20 outputs/a9-64/probe.mjs > outputs/a9-64/probe-fixed-r4.json` | list 100000 文件：总耗时 93.73 ms、最大定时器间隔 30.23 ms、最长阻塞 20.23 ms；search 20000 文件：总耗时 475.47 ms、间隔 11.52 ms、阻塞 1.52 ms。均低于 200 ms。 |
+| 短行搜索三版本对比 | `NODE20 outputs/a9-64/r4-perf-probe.cjs > outputs/a9-64/perf-fixed-r4.json` | 同一批 200 文件，每文件 1048572 字节、每行 6 字节，共 174762 行。各版本预热 3 文件，再轮换顺序测 3 轮，中位数：基线 4dfabf18 为 1158.27 ms、9ab87046 为 4882.71 ms、返修后为 1297.85 ms；返修后/基线为 1.12，满足 ≤1.3。返修后三轮最长阻塞最大 24.09 ms。 |
+| 100000 文件取消 | 同一性能探针，在 readdir 完成后、原生排序前安排取消定时器 | 从调用开始到结束 63.05 ms，实际触发 abort 后 1.18 ms；错误文字严格为“目录读取已取消”，均低于 200 ms。 |
+| 范围与清理 | `git diff --check`；提交后 `git diff --name-only 9ab87046 HEAD`；临时目录与运行前快照对照 | 差异检查通过，仅三个允许文件；新增临时目录残留 0。探针在 finally 删除本轮夹具；保留其他会话的既有目录，证据 `outputs/a9-64/temp-check-r4.json`。 |
+
+性能参照加载方式：`r4-perf-probe.cjs` 用 `git show` 取得两个历史 service 的原始 TypeScript，以既有 TypeScript 5.3.3 转译并内存加载，依赖解析到当前构建中未变化的运行依赖。基线至当前的 workspace 源码差异仅为 service 与 types，types 的变更仅新增错误码类型联合，其余运行依赖源码未变。返修后加载当前 `dist/a9-workspace-service.js`。JSON 记录源码及转译/构建哈希。全程不改写被测产品文件、不创建或修改主工作区。原探针的总耗时包含 25 ms 定时器收尾；短行性能探针的总耗时不包含该收尾，三版本口径一致。
+
 ## 4. 已知限制与边界
 
 - 单个文件的读取仍是同步的，上限 1 MiB；时间片让出发生在文件之间和文本行扫描期间。
 - 用户正则在超长行上的回溯无法中止；正则本身仍由 JavaScript RegExp 执行。
+- 原生排序期间不让出事件循环，也不能在排序中途取消。对混合名称的真实 Dirent 作固定种子洗牌后测三轮纯排序：100000 项为 50.38 ms 中位数、52.86 ms 最大值；20000 项为 8.05 ms 中位数、23.71 ms 最大值。复制数组和读取目录不计入纯排序耗时；这些开发机数据不代表 Win7 阈值。
 - Win7 机械盘上的阈值未校准；本轮仅有开发机 Node 20 证据。
 - 本轮未连接 Win7、未打包、未执行正式 Gate A/B、未推送；这些均为 `NOT_PERFORMED`。
 - `check_docs` 对任务未登记 `docs/tasks/README.md` 的失败是预期结果；索引登记由负责人会话在合入时完成。

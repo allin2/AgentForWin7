@@ -5,12 +5,16 @@ import { A9WorkspaceService } from '../../src';
 
 const fsModule = require('fs') as typeof fs;
 
-function legacyList(root: string, recursive: boolean): Array<{ name: string; path: string; type: string; sizeBytes?: number }> {
+function legacyList(root: string, recursive: boolean, maxEntries = Number.MAX_SAFE_INTEGER) {
   const entries: Array<{ name: string; path: string; type: string; sizeBytes?: number }> = [];
+  let truncated = false;
+  const visitedDirs = new Set([fs.realpathSync(root)]);
   const scan = (dir: string, rel: string, depth: number): void => {
+    if (entries.length >= maxEntries) { truncated = true; return; }
     const dirents = fs.readdirSync(dir, { withFileTypes: true });
     dirents.sort((a, b) => a.name.localeCompare(b.name));
     for (const dirent of dirents) {
+      if (entries.length >= maxEntries) { truncated = true; break; }
       const itemRel = rel ? `${rel}/${dirent.name}` : dirent.name;
       const itemAbs = path.join(dir, dirent.name);
       let type = 'other';
@@ -21,11 +25,44 @@ function legacyList(root: string, recursive: boolean): Array<{ name: string; pat
         try { sizeBytes = fs.statSync(itemAbs).size; } catch (_e) { /* legacy ignores stat failures */ }
       } else if (dirent.isSymbolicLink()) type = 'symlink';
       entries.push({ name: dirent.name, path: itemRel, type, sizeBytes });
-      if (recursive && dirent.isDirectory() && depth < 10) scan(itemAbs, itemRel, depth + 1);
+      if (recursive && dirent.isDirectory() && depth < 10) {
+        const realChild = fs.realpathSync(itemAbs);
+        if (!visitedDirs.has(realChild)) {
+          visitedDirs.add(realChild);
+          scan(itemAbs, itemRel, depth + 1);
+        }
+      }
     }
   };
   scan(root, '', 0);
-  return entries;
+  return { entries, truncated, totalEntries: entries.length };
+}
+
+// Reproducible trees without case-folding collisions; no generated name is ignored.
+function writeRandomTree(root: string, caseIndex: number): number {
+  let state = (0xa9640000 + caseIndex) >>> 0;
+  const random = () => {
+    state ^= state << 13; state ^= state >>> 17; state ^= state << 5;
+    return (state >>> 0) / 0x100000000;
+  };
+  const count = caseIndex === 0 ? 0 : caseIndex === 1 ? 300 : Math.floor(random() * 301);
+  const parents = [{ dir: root, depth: 0 }];
+  const names = ['File', 'a_b', 'UPPER', 'lower', '42', 'with-hyphen', '中文', 'has space', 'x'.repeat(80)];
+  const used = new Set<string>();
+  for (let i = 0; i < count; i += 1) {
+    const parent = caseIndex % 4 === 0 || random() < 0.5 ? parents[0] : parents[Math.floor(random() * parents.length)];
+    const directory = random() < 0.22;
+    const name = `${names[i % names.length]}-${i}-${Math.floor(random() * 100000)}${directory ? '' : '.txt'}`;
+    const target = path.join(parent.dir, name);
+    const folded = target.normalize('NFC').toLowerCase();
+    if (used.has(folded)) throw new Error('case-insensitive fixture collision');
+    used.add(folded);
+    if (directory) {
+      fs.mkdirSync(target);
+      if (parent.depth < 4) parents.push({ dir: target, depth: parent.depth + 1 });
+    } else fs.writeFileSync(target, `sample ${i}`, 'utf8');
+  }
+  return count;
 }
 
 describe('A9-64 responsive list/search', () => {
@@ -36,7 +73,7 @@ describe('A9-64 responsive list/search', () => {
   });
 
   afterEach(() => {
-    try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch (_e) { /* cleanup is best effort */ }
+    fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
   it('keeps legacy ordering and truncation for non-recursive and recursive list', async () => {
@@ -50,12 +87,52 @@ describe('A9-64 responsive list/search', () => {
 
     const service = new A9WorkspaceService(tempDir);
     const nonRecursive = await service.list('', { maxEntries: 500 });
-    expect(nonRecursive.entries).toEqual(legacyList(tempDir, false));
+    expect(nonRecursive.entries).toEqual(legacyList(tempDir, false).entries);
     const recursive = await service.list('', { recursive: true, maxEntries: 500 });
-    expect(recursive.entries).toEqual(legacyList(tempDir, true));
+    expect(recursive.entries).toEqual(legacyList(tempDir, true).entries);
     const truncated = await service.list('', { recursive: true, maxEntries: 3 });
-    expect(truncated.entries).toEqual(legacyList(tempDir, true).slice(0, 3));
+    expect(truncated.entries).toEqual(legacyList(tempDir, true).entries.slice(0, 3));
     expect(truncated.truncated).toBe(true);
+  });
+
+  it('lists File.txt and a_b.txt exactly once in native locale order', async () => {
+    fs.writeFileSync(path.join(tempDir, 'File.txt'), 'file');
+    fs.writeFileSync(path.join(tempDir, 'a_b.txt'), 'underscore');
+    const result = await new A9WorkspaceService(tempDir).list();
+    expect(result.entries.map(entry => entry.name)).toEqual(['a_b.txt', 'File.txt']);
+    expect(result.totalEntries).toBe(2);
+    expect(result.truncated).toBe(false);
+  });
+
+  it.each(Array.from({ length: 200 }, (_, index) => index))('matches independent legacy traversal for random tree %i', async (caseIndex) => {
+    const count = writeRandomTree(tempDir, caseIndex);
+    const service = new A9WorkspaceService(tempDir);
+    for (const recursive of [false, true]) {
+      for (const maxEntries of [1, 7, 500, count + 501]) {
+        const expected = legacyList(tempDir, recursive, maxEntries);
+        const result = await service.list('', { recursive, maxEntries });
+        expect({ entries: result.entries, truncated: result.truncated, totalEntries: result.totalEntries }).toEqual(expected);
+      }
+    }
+  });
+
+  it('bounds unreadable list details at 50 while counting all 100 skipped directories', async () => {
+    for (let i = 0; i < 100; i += 1) fs.mkdirSync(path.join(tempDir, `unreadable-${i}`));
+    const service = new A9WorkspaceService(tempDir);
+    const originalReaddir = fs.promises.readdir;
+    const readdir = jest.spyOn(fs.promises, 'readdir').mockImplementation(async (target: any, options?: any) => {
+      if (String(target) !== service.workspaceRoot) throw Object.assign(new Error('permission denied'), { code: 'EACCES' });
+      return originalReaddir.call(fs.promises, target, options as any);
+    });
+    try {
+      const result: any = await service.list('', { recursive: true });
+      expect(result.skipped).toHaveLength(50);
+      expect(result.skippedTotal).toBe(100);
+      expect(result.skipped.every((entry: any) => entry.reason === 'directory_unreadable')).toBe(true);
+      expect(new Set(result.skipped.map((entry: any) => entry.path)).size).toBe(50);
+    } finally {
+      readdir.mockRestore();
+    }
   });
 
   it('cancels list while a large directory is being scanned', async () => {
