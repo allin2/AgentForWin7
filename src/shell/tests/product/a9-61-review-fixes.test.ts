@@ -469,8 +469,8 @@ describe('A9-61 review wait boundaries', () => {
       expect(settled).toBe(true);
     } finally {
       probe.release(); if (scheduled) clearImmediate(scheduled);
-      if (configuring) await configuring;
-      await f.close();
+      try { if (configuring) await configuring; }
+      finally { await f.close(); }
     }
   });
 
