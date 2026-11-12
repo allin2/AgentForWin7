@@ -148,7 +148,7 @@ describe('A9-64 responsive list/search', () => {
     readFile.mockRestore();
   });
 
-  it('marks file truncation only when a file remains beyond the limit', async () => {
+  it('keeps an exact file limit untruncated when no directory entries remain', async () => {
     for (let i = 0; i < 20000; i += 1) fs.writeFileSync(path.join(tempDir, `exact-${i}.txt`), '');
     const service = new A9WorkspaceService(tempDir);
     const exact: any = await service.search('__a9_64_no_match__');
@@ -161,6 +161,40 @@ describe('A9-64 responsive list/search', () => {
     expect(over.filesScanned).toBe(20000);
     expect(over.truncated).toBe(true);
     expect(over.truncationReasons).toEqual(['files']);
+  });
+
+  it('stops reading queued directories after reaching the file or match limit', async () => {
+    const firstDir = path.join(tempDir, 'a');
+    fs.mkdirSync(firstDir);
+    for (let i = 0; i < 20001; i += 1) fs.writeFileSync(path.join(firstDir, `f-${i}.txt`), 'needle');
+    for (let i = 0; i < 300; i += 1) {
+      const dir = path.join(tempDir, `z-${i}`);
+      fs.mkdirSync(dir);
+      for (let j = 0; j < 3; j += 1) fs.writeFileSync(path.join(dir, `f-${j}.txt`), 'needle');
+    }
+    const service = new A9WorkspaceService(tempDir);
+    const readdir = jest.spyOn(fs.promises, 'readdir');
+    try {
+      const files = await service.search('__a9_64_no_match__');
+      console.log(`A9-64 file limit: readdir=${readdir.mock.calls.length} filesScanned=${files.filesScanned} truncated=${files.truncated} reasons=${files.truncationReasons.join(',')}`);
+      expect(readdir).toHaveBeenCalledTimes(2);
+      expect(readdir.mock.calls.map(([target]) => String(target))).toEqual([service.workspaceRoot, path.join(service.workspaceRoot, 'a')]);
+      expect(files.filesScanned).toBe(20000);
+      expect(files.truncated).toBe(true);
+      expect(files.truncationReasons).toEqual(['files']);
+
+      readdir.mockClear();
+      const matches = await service.search('needle', { maxMatches: 1 });
+      console.log(`A9-64 match limit: readdir=${readdir.mock.calls.length} filesScanned=${matches.filesScanned} matches=${matches.totalMatches} reasons=${matches.truncationReasons.join(',')}`);
+      expect(readdir).toHaveBeenCalledTimes(2);
+      expect(readdir.mock.calls.map(([target]) => String(target))).toEqual([service.workspaceRoot, path.join(service.workspaceRoot, 'a')]);
+      expect(matches.filesScanned).toBe(1);
+      expect(matches.totalMatches).toBe(1);
+      expect(matches.truncated).toBe(true);
+      expect(matches.truncationReasons).toEqual(['matches']);
+    } finally {
+      readdir.mockRestore();
+    }
   });
 
   it('reports search truncation reason and cancels during traversal', async () => {

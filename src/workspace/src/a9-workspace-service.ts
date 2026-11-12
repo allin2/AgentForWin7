@@ -709,9 +709,10 @@ export class A9WorkspaceService {
 
     while (queueIndex < queue.length) {
       checkCanceled();
-      if (matches.length >= maxMatches) {
+      if (matches.length >= maxMatches || filesScanned >= MAX_SEARCH_FILES) {
         truncated = true;
         if (matches.length >= maxMatches) truncationReasons.add('matches');
+        if (filesScanned >= MAX_SEARCH_FILES) truncationReasons.add('files');
         break;
       }
 
@@ -733,9 +734,10 @@ export class A9WorkspaceService {
       for (const dirent of dirents) {
         await controller.checkpoint();
         checkCanceled();
-        if (matches.length >= maxMatches) {
+        if (matches.length >= maxMatches || filesScanned >= MAX_SEARCH_FILES) {
           truncated = true;
           if (matches.length >= maxMatches) truncationReasons.add('matches');
+          if (filesScanned >= MAX_SEARCH_FILES) truncationReasons.add('files');
           break;
         }
 
@@ -760,11 +762,6 @@ export class A9WorkspaceService {
         }
         if (!dirent.isFile()) continue;
 
-        if (filesScanned >= MAX_SEARCH_FILES) {
-          truncated = true;
-          truncationReasons.add('files');
-          break;
-        }
         filesScanned += 1;
         let stat: fs.Stats;
         try {

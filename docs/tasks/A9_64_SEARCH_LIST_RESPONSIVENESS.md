@@ -35,7 +35,7 @@ Win7-Validation: NOT_PERFORMED
 
 搜索根目录读取失败同样抛出 `DIRECTORY_READ_FAILED`。跳过路径只在工具结果中返回，不写入诊断日志。未传新参数的旧调用方继续使用原默认行为。
 
-本轮返修（基于提交 `4c1a0f623737e1a5347be31d0c587686906fd70e`）保持上述新增字段和排序/递归合同不变，仅修正四项边界行为：搜索的所有取消路径统一为“搜索已被用户取消”，列目录的所有取消路径统一为“目录读取已取消”；二进制或编码有歧义的文件计入 `skippedTotal` 和 `skipped`，但不计入 `skippedFiles`；文件数恰好达到 20000 时不标记文件截断，只有发现后续文件时才标记 `files`；搜索根路径为文件时抛出“搜索路径不是目录”，基线在该情况下返回空结果。
+第二轮返修（基于提交 `4c1a0f623737e1a5347be31d0c587686906fd70e`）统一了搜索取消文字“搜索已被用户取消”和列目录取消文字“目录读取已取消”；二进制或编码有歧义的文件计入 `skippedTotal` 和 `skipped`，但不计入 `skippedFiles`。当时采用的“只有发现后续文件时才标记 files”判定在第三轮被撤回，当前停止条件见下文。搜索根路径为文件时抛出“搜索路径不是目录”，基线在该情况下返回空结果。
 
 本轮实际修改仅限 `src/workspace/src/a9-workspace-service.ts`、`src/workspace/tests/unit/a9-64-search-list-responsive.test.ts` 与本任务书。
 
@@ -64,6 +64,26 @@ Win7-Validation: NOT_PERFORMED
 | 探针 | `env -u NODE_OPTIONS -u ELECTRON_RUN_AS_NODE /Users/qlyf/.nvm/versions/node/v20.17.0/bin/node outputs/a9-64/probe.mjs` | 输出另存为 `outputs/a9-64/probe-fixed-r2.json`；list `maxBlockingMs=22.78`、search `maxBlockingMs=1.25`，均 ≤200 ms；20000 文件 `filesScanned=20000`、`truncated=false`、`truncationReasons=[]`。 |
 | diff | `git diff --check`；`git diff --name-only 4c1a0f62 HEAD` | 均通过；文件清单仅为本轮允许的三个文件。 |
 | 临时目录 | `find /tmp -maxdepth 1 -type d -name 'a9-64-*' -print` | 新增残留 `0`。 |
+
+### 第三轮：恢复达到上限后的停止遍历
+
+负责人本轮明确授权在 `a9-64-search-list-responsive` 分支的 `f229bc3c198646b5e99c88c2ded76a784037364d` 上追加修复；开始时 HEAD 匹配、工作区干净。只修改本任务书、工作区服务和对应测试，不修改主工作区、不推送、不连 Win7、不打包。
+
+回归原因：第二轮将文件数上限检查移到 `filesScanned` 自增之前，外层队列和内层目录项循环不再检查文件上限。目录 `a` 含 20001 文件、另有 300 个子目录各含 3 文件时，旧代码虽只扫描 20000 文件，仍读取了剩余目录，共调用 `readdir` 302 次。本轮将两处检查恢复为基线的位置与条件：外层循环顶部和内层循环顶部（忽略规则之前）在匹配数或文件数达到上限时标记截断并退出；分别记录实际触发的 `matches`、`files`，两者同时触发则都记录。删除自增前检查。取消文字和 `skippedFiles` 修复保持不变，无新增依赖或上限常量变化。
+
+恰好 20000 文件且队列、目录项均耗尽时仍返回 `truncated=false`、`truncationReasons=[]`。若还有排队目录或下一目录项，则循环顶部标记截断并停止，不再读取新目录；这一点与“必须再发现一个文件”的第二轮行为不同。新增测试检查真实目录读取次数，能发现旧有文件总数和截断布尔断言未覆盖的额外遍历。
+
+以下命令均使用 `env -u NODE_OPTIONS -u ELECTRON_RUN_AS_NODE /Users/qlyf/.nvm/versions/node/v20.17.0/bin/node`（下表记为 `NODE20`）。直接证据层级均为开发机 Node 20；父进程和 npm 子进程均核对为 `v20.17.0`。前两轮表格保留为历史结果。
+
+| 项 | 命令/证据 | 本轮结果 |
+|---|---|---|
+| 文件上限停止 | `NODE20 scripts/verify_integration.mjs --module workspace --test-file tests/unit/a9-64-search-list-responsive.test.ts`；`outputs/a9-64/targeted-r3-final.log` | 20001 文件及 300 个排队子目录夹具：`readdir=2`，路径恰为根目录和 `a`；`filesScanned=20000`、`truncated=true`、原因 `files`。 |
+| 精确边界 | 同一定向命令 | 20000 文件且无后续目录项：`filesScanned=20000`、`truncated=false`、原因空。 |
+| 匹配上限停止 | 同一定向命令、同一多目录夹具，`maxMatches=1` | `readdir=2`、`filesScanned=1`、匹配数 `1`、`truncated=true`、原因 `matches`。 |
+| 红绿 | `git show f229bc3c:src/workspace/src/a9-workspace-service.ts` 临时还原产品文件后，在 `src/workspace` 执行 `NODE20 node_modules/jest/bin/jest.js --runInBand --runTestsByPath tests/unit/a9-64-search-list-responsive.test.ts`，finally 逐字节恢复返修源码；`outputs/a9-64/red-r3-f229bc3c-final.log` | 同一最终测试：旧代码 `readdir=302`，`1` 条失败、`10` 条通过；返修后 `11/11` 通过。首次绿测暴露 `/var` 与 `/private/var` 路径别名差异，已改为按服务真实路径比较；原失败日志保留。 |
+| 定向与日常 | 上述定向命令；`NODE20 scripts/verify_integration.mjs --daily --module workspace`；`outputs/a9-64/daily-workspace-r3.log` | build、静态门通过；定向 `11/11`；日常 `25/25` 套件、`282/282` 测试（上一轮 `281`）。新增上限测试定向耗时 `2434 ms`。daily 按原规则跳过 A9-19 慢测试。 |
+| 响应性探针 | `NODE20 outputs/a9-64/probe.mjs > outputs/a9-64/probe-fixed-r3.json` | list 100000 文件：总耗时 `111.46 ms`、最大定时器间隔 `31.16 ms`、最长阻塞 `21.16 ms`；search 20000 文件：总耗时 `437.21 ms`、间隔 `11.08 ms`、阻塞 `1.08 ms`；均低于 200 ms。搜索精确边界仍不截断。 |
+| 范围与清理 | `git diff --check`；提交后 `git diff --name-only f229bc3c HEAD`；系统临时目录核对 | 差异检查通过；仅包含三个允许文件。本轮测试与探针夹具新增残留 `0`；失败验证留下的空运行目录已移除，其他会话的 `a9-64-man-*` 目录及旧日志保留。 |
 
 ## 4. 已知限制与边界
 
