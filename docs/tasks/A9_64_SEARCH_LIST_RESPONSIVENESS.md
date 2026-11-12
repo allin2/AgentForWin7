@@ -35,13 +35,17 @@ Win7-Validation: NOT_PERFORMED
 
 搜索根目录读取失败同样抛出 `DIRECTORY_READ_FAILED`。跳过路径只在工具结果中返回，不写入诊断日志。未传新参数的旧调用方继续使用原默认行为。
 
+本轮返修（基于提交 `4c1a0f623737e1a5347be31d0c587686906fd70e`）保持上述新增字段和排序/递归合同不变，仅修正四项边界行为：搜索的所有取消路径统一为“搜索已被用户取消”，列目录的所有取消路径统一为“目录读取已取消”；二进制或编码有歧义的文件计入 `skippedTotal` 和 `skipped`，但不计入 `skippedFiles`；文件数恰好达到 20000 时不标记文件截断，只有发现后续文件时才标记 `files`；搜索根路径为文件时抛出“搜索路径不是目录”，基线在该情况下返回空结果。
+
+本轮实际修改仅限 `src/workspace/src/a9-workspace-service.ts`、`src/workspace/tests/unit/a9-64-search-list-responsive.test.ts` 与本任务书。
+
 ## 3. 验证表
 
 证据层级统一为：开发机 Node 20（`/Users/qlyf/.nvm/versions/node/v20.17.0/bin/node`），不构成 Win7 通过。
 
 | 项 | 命令/证据 | 结果 |
 |---|---|---|
-| 基线对照 | `A9_64_REPO_ROOT=/tmp/a9-64-probe-baseline-20261111 ... node outputs/a9-64/probe.mjs`；修复后 `node outputs/a9-64/probe.mjs` | 基线 list 100000 文件：`maxTimerGapMs=63.40`、`durationMs=88.61`；基线 search 20000 文件：`maxTimerGapMs=436.93`、`durationMs=462.55`。修复后 list：`maxTimerGapMs=29.82`、`durationMs=115.63`；search：`maxTimerGapMs=12.05`、`durationMs=434.61`，结果 `files=20000` 且 `truncationReasons=["files"]`。最长单次阻塞均 ≤200 ms。原始 JSON 在 `outputs/a9-64/probe-baseline.json`、`probe-fixed.json`。 |
+| 基线对照 | `A9_64_REPO_ROOT=/tmp/a9-64-probe-baseline-20261111 ... node outputs/a9-64/probe.mjs`；修复后 `node outputs/a9-64/probe.mjs` | 上一轮基线 list 100000 文件最长单次阻塞实测 `53 ms`；差别主要来自 search。上一轮修复后 search 20000 文件最长单次阻塞 `12.05 ms`。本轮重跑结果见 `outputs/a9-64/probe-fixed-r2.json`，并确认 20000 文件边界 `truncated=false`。 |
 | 取消 | `node outputs/a9-64/cancel-probe.mjs` | list `25.51 ms`、search `26.38 ms` 均以原取消错误结束，≤200 ms；原始 JSON 在 `outputs/a9-64/cancel-probe.json`。 |
 | 等价 | `npm --prefix src/workspace test -- --runInBand tests/unit/a9-64-search-list-responsive.test.ts` | list 非递归、递归和截断逐项对照旧同步算法，7/7 通过。 |
 | 失败路径 | 同上定向测试 | 根目录不可读、递归子目录不可读、文件过大、二进制/歧义、读文件失败均有回归，7/7 通过。 |
@@ -49,6 +53,17 @@ Win7-Validation: NOT_PERFORMED
 | 回归 | `node scripts/verify_integration.mjs --daily --module workspace`；`node scripts/verify_integration.mjs --daily --module core` | 修复后 workspace：25/25 suites、278/278 tests，build 通过；core：40/40 suites、924/924 tests，build 通过（依赖 workspace/state/runner/git-adapter/gateway 同步 build）。同一 Node 20 基线工作树 workspace：25/25、278/278；core：40/40、924/924；通过数无回归。原始日志在 `outputs/a9-64/daily-workspace.log`、`daily-core.log`、`daily-baseline-workspace.log`、`daily-baseline-core.log`。 |
 | diff 检查 | `git diff --check` | 通过。 |
 | 临时目录 | `find /tmp -maxdepth 1 -type d -name 'a9-64-*' -print` | 0 个残留。 |
+
+本轮返修验证结果（证据层级均为开发机 Node 20）：
+
+| 项 | 命令/证据 | 结果 |
+|---|---|---|
+| 红绿 | 基线 `4c1a0f62` 与返修后定向测试 | 基线新增/修改行为测试失败 `3` 条、通过 `7` 条；返修后 `10/10` 通过。 |
+| 定向测试 | `env -u NODE_OPTIONS -u ELECTRON_RUN_AS_NODE /Users/qlyf/.nvm/versions/node/v20.17.0/bin/node scripts/verify_integration.mjs --module workspace --test-file tests/unit/a9-64-search-list-responsive.test.ts` | `10/10` 通过。 |
+| workspace 日常 | `env -u NODE_OPTIONS -u ELECTRON_RUN_AS_NODE /Users/qlyf/.nvm/versions/node/v20.17.0/bin/node scripts/verify_integration.mjs --daily --module workspace` | 上一轮 `25` 套件、`278` 条通过；本轮 `25` 套件、`281` 条通过；结果写入 `outputs/a9-64/daily-workspace-r2.log`。 |
+| 探针 | `env -u NODE_OPTIONS -u ELECTRON_RUN_AS_NODE /Users/qlyf/.nvm/versions/node/v20.17.0/bin/node outputs/a9-64/probe.mjs` | 输出另存为 `outputs/a9-64/probe-fixed-r2.json`；list `maxBlockingMs=22.78`、search `maxBlockingMs=1.25`，均 ≤200 ms；20000 文件 `filesScanned=20000`、`truncated=false`、`truncationReasons=[]`。 |
+| diff | `git diff --check`；`git diff --name-only 4c1a0f62 HEAD` | 均通过；文件清单仅为本轮允许的三个文件。 |
+| 临时目录 | `find /tmp -maxdepth 1 -type d -name 'a9-64-*' -print` | 新增残留 `0`。 |
 
 ## 4. 已知限制与边界
 

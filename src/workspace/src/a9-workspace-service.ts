@@ -151,11 +151,10 @@ interface YieldController {
   checkpoint(force?: boolean): Promise<void>;
 }
 
-function createYieldController(signal?: AbortSignal): YieldController {
+function createYieldController(): YieldController {
   let lastYieldAt = Date.now();
   return {
     async checkpoint(force = false): Promise<void> {
-      if (signal?.aborted) throw new Error('操作已被用户取消');
       if (force || Date.now() - lastYieldAt >= BASELINE_YIELD_SLICE_MS) {
         await yieldToEventLoop();
         // A setImmediate-only loop can run successive promise continuations
@@ -163,7 +162,6 @@ function createYieldController(signal?: AbortSignal): YieldController {
         // phase as well, while retaining the existing 25 ms slice contract.
         await new Promise<void>((resolve) => setTimeout(resolve, 0));
         lastYieldAt = Date.now();
-        if (signal?.aborted) throw new Error('操作已被用户取消');
       }
     },
   };
@@ -172,8 +170,9 @@ function createYieldController(signal?: AbortSignal): YieldController {
 async function sortDirentsWithYields(
   input: fs.Dirent[],
   controller: YieldController,
-  signal?: AbortSignal,
+  checkCanceled: () => void,
 ): Promise<fs.Dirent[]> {
+  checkCanceled();
   if (input.length < 2) return input;
   let source = input.slice();
   let scratch = new Array<fs.Dirent>(source.length);
@@ -186,7 +185,10 @@ async function sortDirentsWithYields(
       while (left < right && right < end) {
         if (source[left].name.localeCompare(source[right].name) <= 0) scratch[output++] = source[left++];
         else scratch[output++] = source[right++];
-        if ((output & 0x3ff) === 0) await controller.checkpoint();
+        if ((output & 0x3ff) === 0) {
+          await controller.checkpoint();
+          checkCanceled();
+        }
       }
       while (left < right) scratch[output++] = source[left++];
       while (right < end) scratch[output++] = source[right++];
@@ -195,7 +197,7 @@ async function sortDirentsWithYields(
     source = scratch;
     scratch = previous;
     await controller.checkpoint();
-    if (signal?.aborted) throw new Error('操作已被用户取消');
+    checkCanceled();
   }
   return source;
 }
@@ -359,10 +361,10 @@ export class A9WorkspaceService {
     const maxEntries = options.maxEntries || 500;
     const recursive = options.recursive || false;
     const signal = options.signal;
-    const controller = createYieldController(signal);
     const checkCanceled = () => {
       if (signal?.aborted) throw new Error('目录读取已取消');
     };
+    const controller = createYieldController();
     checkCanceled();
     let stat: fs.Stats;
     try {
@@ -381,6 +383,7 @@ export class A9WorkspaceService {
     try {
       rootRealPath = await fs.promises.realpath(absPath);
     } catch (error: any) {
+      checkCanceled();
       throw new WorkspaceError('DIRECTORY_READ_FAILED', `无法读取目录 ${relPath || '.'}: ${error?.message || 'unknown error'}`);
     }
     const visitedDirs = new Set<string>([rootRealPath]);
@@ -395,7 +398,8 @@ export class A9WorkspaceService {
       let dirents: fs.Dirent[];
       try {
         dirents = await fs.promises.readdir(currentDir, { withFileTypes: true });
-        dirents = await sortDirentsWithYields(dirents, controller, signal);
+        dirents = await sortDirentsWithYields(dirents, controller, checkCanceled);
+        checkCanceled();
       } catch (error: any) {
         if (signal?.aborted) throw new Error('目录读取已取消');
         if (isRoot) {
@@ -439,6 +443,7 @@ export class A9WorkspaceService {
           try {
             realChild = await fs.promises.realpath(itemAbs);
           } catch (_e) {
+            checkCanceled();
             skipped.push({ path: itemRel, reason: 'directory_unreadable' });
             continue;
           }
@@ -655,12 +660,17 @@ export class A9WorkspaceService {
     const { absPath, isOutside } = this.resolvePath(options.path || '');
     const maxMatches = options.maxMatches || 200;
     const isRegex = options.isRegex || false;
-    const controller = createYieldController(options.signal);
+    const controller = createYieldController();
+    const checkCanceled = () => {
+      if (options.signal?.aborted) throw new Error('搜索已被用户取消');
+    };
+    checkCanceled();
 
     try {
       const rootStat = await fs.promises.stat(absPath);
       if (!rootStat.isDirectory()) throw new Error(`搜索路径不是目录: ${options.path || ''}`);
     } catch (error: any) {
+      checkCanceled();
       if (error?.message?.startsWith('搜索路径不是目录:')) throw error;
       if (error?.code === 'ENOENT') throw new Error(`搜索路径不存在: ${options.path || ''}`);
       throw new WorkspaceError('DIRECTORY_READ_FAILED', `无法读取搜索目录: ${error?.message || 'unknown error'}`);
@@ -685,21 +695,13 @@ export class A9WorkspaceService {
       if (countAsFile) skippedFiles += 1;
       if (skipped.length < 50) skipped.push({ path: filePath || '.', reason });
     };
-    const markFileLimit = (): void => {
-      if (filesScanned >= MAX_SEARCH_FILES) {
-        truncated = true;
-        truncationReasons.add('files');
-      }
-    };
-    const checkCanceled = () => {
-      if (options.signal?.aborted) throw new Error('搜索已被用户取消');
-    };
     // 迭代遍历 + canonical path 集合：可取消、无递归环、不整体加载。
     const queue: Array<{ dir: string; rel: string }> = [{ dir: absPath, rel: '' }];
     let rootRealPath: string;
     try {
       rootRealPath = fs.realpathSync(absPath);
     } catch (error: any) {
+      checkCanceled();
       throw new WorkspaceError('DIRECTORY_READ_FAILED', `无法读取搜索目录: ${error?.message || 'unknown error'}`);
     }
     const visitedDirs = new Set<string>([rootRealPath]);
@@ -707,10 +709,9 @@ export class A9WorkspaceService {
 
     while (queueIndex < queue.length) {
       checkCanceled();
-      if (matches.length >= maxMatches || filesScanned >= MAX_SEARCH_FILES) {
+      if (matches.length >= maxMatches) {
         truncated = true;
         if (matches.length >= maxMatches) truncationReasons.add('matches');
-        if (filesScanned >= MAX_SEARCH_FILES) truncationReasons.add('files');
         break;
       }
 
@@ -718,7 +719,9 @@ export class A9WorkspaceService {
       let dirents: fs.Dirent[];
       try {
         dirents = await fs.promises.readdir(dir, { withFileTypes: true });
+        checkCanceled();
       } catch (error: any) {
+        checkCanceled();
         if (!rel) {
           throw new WorkspaceError('DIRECTORY_READ_FAILED', `无法读取搜索目录: ${error?.message || 'unknown error'}`);
         }
@@ -730,10 +733,9 @@ export class A9WorkspaceService {
       for (const dirent of dirents) {
         await controller.checkpoint();
         checkCanceled();
-        if (matches.length >= maxMatches || filesScanned >= MAX_SEARCH_FILES) {
+        if (matches.length >= maxMatches) {
           truncated = true;
           if (matches.length >= maxMatches) truncationReasons.add('matches');
-          if (filesScanned >= MAX_SEARCH_FILES) truncationReasons.add('files');
           break;
         }
 
@@ -746,6 +748,7 @@ export class A9WorkspaceService {
           try {
             realChild = fs.realpathSync(fullPath);
           } catch (_e) {
+            checkCanceled();
             recordSkipped(relPath, 'directory_unreadable', false);
             continue;
           }
@@ -757,36 +760,33 @@ export class A9WorkspaceService {
         }
         if (!dirent.isFile()) continue;
 
+        if (filesScanned >= MAX_SEARCH_FILES) {
+          truncated = true;
+          truncationReasons.add('files');
+          break;
+        }
         filesScanned += 1;
         let stat: fs.Stats;
         try {
           stat = fs.statSync(fullPath);
         } catch (_e) {
           recordSkipped(relPath, 'stat_failed');
-          markFileLimit();
-          if (truncated) break;
           continue;
         }
         if (stat.size > MAX_SEARCH_FILE_BYTES) {
           recordSkipped(relPath, 'too_large');
-          markFileLimit();
-          if (truncated) break;
           continue;
         }
         try {
           const buf = fs.readFileSync(fullPath);
           const detection = detectEncoding(buf);
           if (detection.encoding === 'ambiguous') {
-            recordSkipped(relPath, 'binary_or_ambiguous');
-            markFileLimit();
-            if (truncated) break;
+            recordSkipped(relPath, 'binary_or_ambiguous', false);
             continue;
           }
           const text = decodeBuffer(buf, detection.encoding as WritableEncoding);
           if (text === undefined) {
-            recordSkipped(relPath, 'binary_or_ambiguous');
-            markFileLimit();
-            if (truncated) break;
+            recordSkipped(relPath, 'binary_or_ambiguous', false);
             continue;
           }
 
@@ -813,7 +813,6 @@ export class A9WorkspaceService {
           checkCanceled();
           recordSkipped(relPath, 'read_failed');
         }
-        markFileLimit();
         if (truncated) break;
       }
     }

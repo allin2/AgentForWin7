@@ -65,8 +65,39 @@ describe('A9-64 responsive list/search', () => {
     const started = Date.now();
     const pending = (service as any).list('', { maxEntries: 10000, signal: controller.signal });
     setTimeout(() => controller.abort(), 0);
-    await expect(pending).rejects.toThrow(/取消/);
+    await expect(pending).rejects.toThrow('目录读取已取消');
     expect(Date.now() - started).toBeLessThan(200);
+  });
+
+  it('uses operation-specific cancellation text for repeated list and search cancellations', async () => {
+    for (let i = 0; i < 2400; i += 1) {
+      const level1 = path.join(tempDir, `d-${String(Math.floor(i / 200)).padStart(2, '0')}`);
+      const level2 = path.join(level1, `s-${String(Math.floor((i % 200) / 20)).padStart(2, '0')}`);
+      fs.mkdirSync(level2, { recursive: true });
+      fs.writeFileSync(path.join(level2, `f-${i}.txt`), `sample ${i}\n`);
+    }
+    const service = new A9WorkspaceService(tempDir);
+    const expectOptionalCancellation = async (operation: Promise<unknown>, message: string): Promise<void> => {
+      try {
+        await operation;
+      } catch (error) {
+        expect(error).toBeInstanceOf(Error);
+        expect((error as Error).message).toBe(message);
+      }
+    };
+
+    for (let delayMs = 0; delayMs < 12; delayMs += 1) {
+      const controller = new AbortController();
+      const pending = service.list('', { recursive: true, maxEntries: 10000, signal: controller.signal });
+      setTimeout(() => controller.abort(), delayMs);
+      await expectOptionalCancellation(pending, '目录读取已取消');
+    }
+    for (let delayMs = 0; delayMs < 12; delayMs += 1) {
+      const controller = new AbortController();
+      const pending = service.search('__a9_64_never__', { signal: controller.signal });
+      setTimeout(() => controller.abort(), delayMs);
+      await expectOptionalCancellation(pending, '搜索已被用户取消');
+    }
   });
 
   it('reports root and child directory read failures', async () => {
@@ -90,9 +121,20 @@ describe('A9-64 responsive list/search', () => {
     readdir.mockRestore();
   });
 
-  it('reports oversized, binary and read-failed search files with bounded details', async () => {
+  it('does not count binary or ambiguous files in skippedFiles', async () => {
     fs.writeFileSync(path.join(tempDir, 'large.bin'), Buffer.alloc(1024 * 1024 + 1));
     fs.writeFileSync(path.join(tempDir, 'binary.bin'), Buffer.from([0xff, 0xd8, 0xff, 0xe0]));
+    fs.writeFileSync(path.join(tempDir, 'plain.txt'), 'needle');
+    const result: any = await new A9WorkspaceService(tempDir).search('needle');
+    expect(result.skipped).toEqual(expect.arrayContaining([
+      { path: 'large.bin', reason: 'too_large' },
+      { path: 'binary.bin', reason: 'binary_or_ambiguous' },
+    ]));
+    expect(result.skippedTotal).toBe(2);
+    expect(result.skippedFiles).toBe(1);
+  });
+
+  it('reports read-failed search files with bounded details', async () => {
     fs.writeFileSync(path.join(tempDir, 'broken.txt'), 'needle');
     const originalRead = fsModule.readFileSync;
     const readFile = jest.spyOn(fsModule, 'readFileSync').mockImplementation((target: any, ...args: any[]) => {
@@ -100,14 +142,25 @@ describe('A9-64 responsive list/search', () => {
       return originalRead(target, ...(args as [any]));
     });
     const result: any = await new A9WorkspaceService(tempDir).search('needle');
-    expect(result.skipped).toEqual(expect.arrayContaining([
-      { path: 'large.bin', reason: 'too_large' },
-      { path: 'binary.bin', reason: 'binary_or_ambiguous' },
-      { path: 'broken.txt', reason: 'read_failed' },
-    ]));
-    expect(result.skippedTotal).toBe(3);
-    expect(result.skippedFiles).toBe(3);
+    expect(result.skipped).toEqual([{ path: 'broken.txt', reason: 'read_failed' }]);
+    expect(result.skippedTotal).toBe(1);
+    expect(result.skippedFiles).toBe(1);
     readFile.mockRestore();
+  });
+
+  it('marks file truncation only when a file remains beyond the limit', async () => {
+    for (let i = 0; i < 20000; i += 1) fs.writeFileSync(path.join(tempDir, `exact-${i}.txt`), '');
+    const service = new A9WorkspaceService(tempDir);
+    const exact: any = await service.search('__a9_64_no_match__');
+    expect(exact.filesScanned).toBe(20000);
+    expect(exact.truncated).toBe(false);
+    expect(exact.truncationReasons).toEqual([]);
+
+    fs.writeFileSync(path.join(tempDir, 'over-limit.txt'), '');
+    const over: any = await service.search('__a9_64_no_match__');
+    expect(over.filesScanned).toBe(20000);
+    expect(over.truncated).toBe(true);
+    expect(over.truncationReasons).toEqual(['files']);
   });
 
   it('reports search truncation reason and cancels during traversal', async () => {
@@ -121,7 +174,7 @@ describe('A9-64 responsive list/search', () => {
     const started = Date.now();
     const pending = (service as any).search('never', { signal: controller.signal, maxMatches: 200 });
     setTimeout(() => controller.abort(), 10);
-    await expect(pending).rejects.toThrow(/取消/);
+    await expect(pending).rejects.toThrow('搜索已被用户取消');
     expect(Date.now() - started).toBeLessThan(200);
   });
 
