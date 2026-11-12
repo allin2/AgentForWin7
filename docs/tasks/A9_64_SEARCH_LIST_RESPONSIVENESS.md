@@ -57,4 +57,3 @@ Win7-Validation: NOT_PERFORMED
 - Win7 机械盘上的阈值未校准；本轮仅有开发机 Node 20 证据。
 - 本轮未连接 Win7、未打包、未执行正式 Gate A/B、未推送；这些均为 `NOT_PERFORMED`。
 - `check_docs` 对任务未登记 `docs/tasks/README.md` 的失败是预期结果；索引登记由负责人会话在合入时完成。
-
