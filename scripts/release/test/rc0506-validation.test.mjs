@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
-import os from 'node:os';
+import { tempRoot } from './temp-root.mjs';
 import path from 'node:path';
 import test from 'node:test';
 import { spawnSync } from 'node:child_process';
@@ -71,7 +71,7 @@ test('RC0506 accepts a structurally contained nonzero restricted whoami exit', (
 });
 
 test('RC0506 argument parsing requires three separate roots', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'rc0506-args-'));
+  const root = tempRoot('rc0506-args-');
   const product = path.join(root, 'product');
   const evidence = path.join(root, 'evidence');
   const state = path.join(root, 'state');
@@ -85,7 +85,7 @@ test('RC0506 argument parsing requires three separate roots', () => {
 });
 
 test('RC0506 rejects stale evidence and user-data roots', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'rc0506-fresh-'));
+  const root = tempRoot('rc0506-fresh-');
   const empty = path.join(root, 'empty');
   const absent = path.join(root, 'absent');
   fs.mkdirSync(empty);
@@ -106,7 +106,7 @@ test('RC0506 cases and summary preserve partial gates', () => {
 });
 
 test('RC0506 command-line fatal path writes evidence and exits nonzero', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'rc0506-fatal-'));
+  const root = tempRoot('rc0506-fatal-');
   const product = path.join(root, 'product');
   const evidence = path.join(root, 'evidence');
   const state = path.join(root, 'state');
@@ -131,7 +131,7 @@ test('RC0506 report validators require every atomic case', () => {
 });
 
 test('RC0506 independent verifier binds reports, databases and rejects fatal evidence', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'rc0506-return-'));
+  const root = tempRoot('rc0506-return-');
   const lock = JSON.parse(fs.readFileSync(path.join(repositoryRoot, 'release', 'win7-rc', 'rc0506-validation-lock.json'), 'utf8'));
   const rc05Cases = ['RC05-N01', 'RC05-P01', 'RC05-P02', 'RC05-N02', 'RC05-C01', 'RC05-Z01']
     .map((case_id) => ({ case_id, status: case_id === 'RC05-P01' ? 'NOT_APPLICABLE_TARGET_PROFILE_HASH' : 'PASS' }));
@@ -160,7 +160,7 @@ test('RC0506 independent verifier binds reports, databases and rejects fatal evi
 });
 
 test('RC0506 kit manifest rejects changed harness bytes', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'rc0506-kit-'));
+  const root = tempRoot('rc0506-kit-');
   const files = ['RC0506_WINDOWS_VALIDATION.cjs', 'VALIDATION_LOCK.json', 'README.txt'];
   for (const name of files) fs.writeFileSync(path.join(root, name), name, 'utf8');
   const manifest = {

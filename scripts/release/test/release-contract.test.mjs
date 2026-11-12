@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
+import { tempRoot } from './temp-root.mjs';
 import path from 'node:path';
 import test from 'node:test';
 import {
@@ -17,13 +17,13 @@ const HASH = '0'.repeat(64);
 test('hash and forbidden-payload checks fail closed', () => {
   assert.doesNotThrow(() => assertHash('INPUT', HASH, HASH));
   assert.throws(() => assertHash('INPUT', '1'.repeat(64), HASH), /INPUT_SHA256_MISMATCH/);
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a7-forbidden-'));
+  const root = tempRoot('a7-forbidden-');
   fs.writeFileSync(path.join(root, 'private.pem'), 'not-a-real-key', 'utf8');
   assert.throws(() => createFileManifest(root, ['private.pem']), /FORBIDDEN_PAYLOAD/);
 });
 
 test('release verifier checks the sidecar, every manifest file and native layout', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a7-contract-'));
+  const root = tempRoot('a7-contract-');
   const packageName = 'Win7CodingAgent-test-win7-x64';
   const packageRoot = path.join(root, 'stage', packageName);
   const runner = path.join(packageRoot, 'resources', 'native', 'runner', 'spike02_helper.exe');

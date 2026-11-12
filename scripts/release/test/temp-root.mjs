@@ -10,9 +10,10 @@ const roots = new Set();
 process.on('exit', () => {
   for (const root of roots) {
     try {
-      fs.rmSync(root, { recursive: true, force: true });
-    } catch {
+      fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    } catch (error) {
       // Cleanup is best effort; the run result must not change because of it.
+      console.warn(`TEMP_CLEANUP_FAILED: ${root}: ${error.code || error.message}`);
     }
   }
 });

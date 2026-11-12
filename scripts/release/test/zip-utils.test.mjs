@@ -1,12 +1,12 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
+import { tempRoot } from './temp-root.mjs';
 import path from 'node:path';
 import test from 'node:test';
 import { extractZip, getZipEntry, normalizeZipPath, readZipEntries, writeDeterministicZip } from '../zip-utils.mjs';
 
 test('deterministic ZIP output is byte-identical and round-trips Unicode paths', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a7-zip-'));
+  const root = tempRoot('a7-zip-');
   const source = path.join(root, 'source');
   fs.mkdirSync(path.join(source, '中文 空格'), { recursive: true });
   fs.writeFileSync(path.join(source, 'a.txt'), 'alpha\r\n', 'utf8');
@@ -31,7 +31,7 @@ test('ZIP path normalization rejects absolute and traversal paths', () => {
 });
 
 test('CRC corruption is detected fail-closed', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a7-crc-'));
+  const root = tempRoot('a7-crc-');
   const source = path.join(root, 'source');
   fs.mkdirSync(source);
   fs.writeFileSync(path.join(source, 'payload.txt'), 'payload', 'utf8');
