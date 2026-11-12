@@ -371,3 +371,79 @@ describe('A9-62 independent review follow-up', () => {
     await log.flush();
   }, 15000);
 });
+
+describe('A9-62 fatal and rotation failure repairs', () => {
+  function emergencyRows(directory: string) {
+    return fs.readdirSync(directory).filter(name => name.startsWith('main.fatal') && name.endsWith('.jsonl'))
+      .flatMap(name => fs.readFileSync(path.join(directory, name), 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line)));
+  }
+
+  test('counts only successful uncaught writes toward the 32-record cap', () => {
+    let failures = 32;
+    const io = { ...fs, writeFileSync: (...args: any[]) => {
+      if (failures > 0) {
+        failures -= 1;
+        throw Object.assign(new Error('injected write failure'), { code: 'EIO' });
+      }
+      return (fs.writeFileSync as any)(...args);
+    } };
+    const log = createDiagnosticsLog({ userDataPath: root(), fs: io });
+    const error = errorFacts({ code: 'EIO' }, 'A9_MAIN_UNCAUGHT_EXCEPTION');
+    for (let index = 0; index < 32; index++) expect(log.criticalSync('uncaught-exception', error)).toBe(false);
+    for (let index = 0; index < 40; index++) expect(log.criticalSync('uncaught-exception', error)).toBe(true);
+    expect(log.snapshot()).toMatchObject({ suppressedCount: 8, writeFailureCount: 32 });
+    expect(emergencyRows(log.snapshot().directory).filter(row => row.event === 'uncaught-exception')).toHaveLength(32);
+  });
+
+  test('does not suppress uncaught records while synchronous writes continuously fail', () => {
+    const io = { ...fs, writeFileSync: () => { throw Object.assign(new Error('injected write failure'), { code: 'EIO' }); } };
+    const log = createDiagnosticsLog({ userDataPath: root(), fs: io });
+    const error = errorFacts({ code: 'EIO' }, 'A9_MAIN_UNCAUGHT_EXCEPTION');
+    const started = process.hrtime.bigint();
+    for (let index = 0; index < 5000; index++) log.criticalSync('uncaught-exception', error);
+    const elapsedMs = Number(process.hrtime.bigint() - started) / 1e6;
+    expect(log.snapshot()).toMatchObject({ suppressedCount: 0, writeFailureCount: 5000 });
+    expect(elapsedMs).toBeGreaterThanOrEqual(0);
+  });
+
+  test.each([
+    ['rename EPERM', 'rename', 'EPERM'],
+    ['rename EBUSY', 'rename', 'EBUSY'],
+    ['unlink EBUSY', 'unlink', 'EBUSY'],
+  ])('keeps synchronous fatal records writable when %s blocks rotation', (_label, blocked, code) => {
+    const userDataPath = root();
+    const directory = path.join(userDataPath, 'diagnostics');
+    fs.mkdirSync(directory, { recursive: true });
+    const limit = 512 * 1024;
+    fs.writeFileSync(path.join(directory, 'main.fatal.jsonl'), Buffer.alloc(limit - 128, 'x'));
+    const io = { ...fs,
+      ...(blocked === 'rename' ? { renameSync: () => { throw Object.assign(new Error('injected rotation failure'), { code }); } } : {}),
+      ...(blocked === 'unlink' ? { unlinkSync: () => { throw Object.assign(new Error('injected rotation failure'), { code }); } } : {}),
+    };
+    const log = createDiagnosticsLog({ userDataPath, fs: io });
+    const error = errorFacts({ code: 'EIO' }, 'A9_MAIN_UNCAUGHT_EXCEPTION');
+    expect(log.criticalSync('uncaught-exception', error)).toBe(true);
+    expect(log.criticalSync('exit-end', { exitCode: 0 })).toBe(true);
+    const current = fs.readFileSync(path.join(directory, 'main.fatal.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
+    expect(current.map(row => row.event)).toEqual(['uncaught-exception', 'exit-end']);
+    expect(fs.statSync(path.join(directory, 'main.fatal.jsonl')).size).toBeLessThanOrEqual(limit);
+    expect(log.snapshot().writeFailureCount).toBe(0);
+  });
+
+  test('keeps asynchronous critical records writable when rotation rename fails', async () => {
+    const io = { ...fs, promises: { ...fs.promises,
+      rename: async () => { throw Object.assign(new Error('injected rotation failure'), { code: 'EPERM' }); },
+    } };
+    const log = createDiagnosticsLog({ userDataPath: root(), maxFileBytes: 2048, fs: io });
+    const results: boolean[] = [];
+    for (let index = 0; index < 60; index++) results.push(await log.record('main-thread-stall', { durationMs: 2000, pendingCount: index }));
+    await log.flush();
+    const directory = log.snapshot().directory;
+    const currentPath = path.join(directory, 'critical.jsonl');
+    const current = fs.readFileSync(currentPath, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+    expect(results).toEqual(Array(60).fill(true));
+    expect(log.snapshot().writeFailureCount).toBe(0);
+    expect(current[current.length - 1]).toMatchObject({ event: 'main-thread-stall', pendingCount: 59 });
+    expect(fs.statSync(currentPath).size).toBeLessThanOrEqual(2048);
+  });
+});

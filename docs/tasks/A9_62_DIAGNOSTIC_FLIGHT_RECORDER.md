@@ -307,3 +307,45 @@ Electron 路径为 `/Users/qlyf/.cache/w7-electron-22.3.27/node_modules/electron
 - Win7/Win10 实机、完整后台 Runtime/Runner 清理、原生错误框点击、打包、候选冻结、门 A/B、推送和发布均为 `NOT_PERFORMED`。本轮只产生开发机证据，不提升为 Win7 PASS 或正式候选结论。
 
 本轮没有新增需要负责人裁决的技术取舍；以上命名管道/符号链接边界、原生错误框点击和 Node 16 Jest `SIGTRAP` 均按负责人已裁决的已知限制登记，不改代码绕过。
+
+## 9. 2026-11-11 独立复审返修（R5）
+
+本轮在 `43d37b81e686e56e983ceb592f6ce0f16f8e8647` 上追加三项同步/异步致命记录返修。范围只涉及 `a9-diagnostics-log.js`、其产品测试和本任务书；未修改 `main.js`、Electron 夹具/驱动、IPC schema、日志字段、远端、Win7 或主工作区。`src/shell/office-lite/node_modules` 仍为既存符号链接，不纳入提交。
+
+### 9.1 改动位置和红绿对照
+
+| 返修 | 改动位置 | `43d37b81` 基线红测 | 本轮绿测 |
+|---|---|---|---|
+| R5-1 异常上限只计成功写入 | `src/shell/product/a9-diagnostics-log.js` 的 `criticalSync`；`src/shell/tests/product/a9-diagnostics-log.test.ts` 的成功写入上限、持续失败测试 | 失败：32 次 EIO 占满名额后，后续 40 次全部被抑制；持续失败时 `suppressedCount=4968`、`writeFailureCount=32` | 32 次失败不占名额；恢复后 40 次落盘 32 条、`suppressedCount=8`、`writeFailureCount=32`；持续失败 5000 次 `suppressedCount=0`、`writeFailureCount=5000` |
+| R5-2 应急文件轮转降级 | `src/shell/product/a9-diagnostics-log.js` 的 `appendSync`；测试覆盖 rename `EPERM`、rename `EBUSY`、unlink `EBUSY` | 三种故障均在轮转时抛出，`uncaught-exception` 与后续 `exit-end` 返回失败 | 三种故障均清空当前段后继续写入；两条记录均可从当前文件读出，当前文件 ≤512 KiB，`writeFailureCount=0` |
+| R5-3 异步关键文件轮转降级 | `src/shell/product/a9-diagnostics-log.js` 的 `appendAsync`；测试用 `maxFileBytes=2048` 连续写 60 条 `main-thread-stall` | `renameSync`/异步 rename `EPERM` 使每次写入返回 `false`，记录丢失 | 60 次全部返回 `true`，`writeFailureCount=0`，最后一条在 `critical.jsonl`，当前文件 ≤2048 bytes，内存字节计数随清空归零 |
+
+轮转降级只吞掉旧 `previous` 删除失败和非 `ENOENT` 改名失败；改名失败后清空当前文件再追加最新记录。目标的 `lstat` 普通文件检查保持原样，`main.jsonl` 无 `previous` 的行为保持不变。
+
+### 9.2 新增已知限制
+
+- 熔断期间进程被强杀，当前这次 IPC 的开始记录会丢失。这是熔断不拖慢 IPC 的代价，不修。
+- 轮转降级时，当前段里的旧记录被清空，只保证最新记录落盘。
+- 磁盘单次写入耗时在 30～49 ms 之间时，每次 IPC 多等一次写入时间。复审实测 40 ms 磁盘下 20 次 IPC 合计 854 ms，单次最长 50.2 ms。
+- 第 33 次及以后的未捕获异常不再落盘，但仍然走错误框路径，进程继续运行。
+
+本轮注入持续失败的 5000 次同步调用在开发机 Node 20 实测总阻塞 48.34 ms，未超过 250 ms，因此不增加限流。
+
+### 9.3 本轮验证命令、结果和证据
+
+所有命令均在 `/tmp/a9-62-diagnostics` 执行；Node 命令前使用 `env -u NODE_OPTIONS -u ELECTRON_RUN_AS_NODE`。
+
+| 项 | 命令/原始证据 | 结果 | 证据层级 |
+|---|---|---|---|
+| 1. 红测 | `baseline=$(git show 43d37b81e686e56e983ceb592f6ce0f16f8e8647:src/shell/product/a9-diagnostics-log.js); A9_62_REVIEW_LOGGER=<baseline 临时副本> env -u NODE_OPTIONS -u ELECTRON_RUN_AS_NODE /Users/qlyf/.nvm/versions/node/v20.17.0/bin/node src/shell/node_modules/jest/bin/jest.js --config src/shell/jest.config.js --runInBand --runTestsByPath src/shell/tests/product/a9-diagnostics-log.test.ts`；原始输出 `/tmp/a9-62-r5-red.txt`，SHA-256 `18f3faad3f601fe86a2df7197e60c4dfd24867e5c410a2c1c6fe2e24559d1796` | 28 项：22 PASS、6 FAIL。失败为 R5-1 成功写入上限、R5-1 持续失败计数、R5-2 的 rename `EPERM`、rename `EBUSY`、unlink `EBUSY` 三例、R5-3 异步 rename `EPERM` | 开发机 Node 20 |
+| 2. 绿测 | `env -u NODE_OPTIONS -u ELECTRON_RUN_AS_NODE /Users/qlyf/.nvm/versions/node/v20.17.0/bin/node src/shell/node_modules/jest/bin/jest.js --config src/shell/jest.config.js --runInBand --runTestsByPath src/shell/tests/product/a9-diagnostics-log.test.ts` | 28/28 PASS | 开发机 Node 20 |
+| 3. Shell 日常集合 | `env -u NODE_OPTIONS -u ELECTRON_RUN_AS_NODE PATH=/Users/qlyf/.nvm/versions/node/v20.17.0/bin:$PATH /Users/qlyf/.nvm/versions/node/v20.17.0/bin/node scripts/verify_integration.mjs --daily --module shell` | 75/75 套件通过，1640 PASS、12 跳过、0 FAIL；相对上一轮 75 套件、1634 PASS、12 跳过，新增 6 条 PASS 与本轮 6 个回归测试一一对应；构建、lint、测试退出码均为 0 | 开发机 Node 20 |
+| 4. Electron 19 场景 | `env -u NODE_OPTIONS -u ELECTRON_RUN_AS_NODE /Users/qlyf/.nvm/versions/node/v20.17.0/bin/node src/shell/tests/product/run-a9-diagnostics-electron.cjs --electron=/Users/qlyf/.cache/w7-electron-22.3.27/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron --out=/tmp/a9-62-diagnostics/outputs/a9-62/r5-complete --dialog-mode=capture --case=smoke,startup-failure,stall-stage,stall-ipc,kill-stage,kill-ipc,rejection,window-events,normal-exit,ipc-failure,fifo-exit,slow-startup,early-exit,early-quit,cancel-quit-stop,cancel-quit-leave,slow-uncaught,steady-2m,uncaught-flood` | 19/19 PASS；`steady-2m` 为 120 次真实 IPC，`uncaught-flood` PASS | 开发机 Electron 22.3.27 |
+| 5. 差异与空白 | `git diff --check`；提交后 `git diff --name-only 43d37b81e686e56e983ceb592f6ce0f16f8e8647 HEAD` | `git diff --check` PASS；提交后文件名仅为本任务书、`a9-diagnostics-log.js`、`a9-diagnostics-log.test.ts` | 开发机 Node 20 |
+| 6. 系统临时目录 | 测试 `afterEach` 清理 `a9-62-log-test-*` 沙箱；完成后 `find /tmp -maxdepth 1 \( -name 'a9-62-log-test-*' -o -name 'a9-62-r5-*' -o -name 'a9-62-baseline-logger-r5.js' \) -print` | 测试沙箱与本轮临时证据清理后新增残留为 0 | 开发机 Node 20 |
+
+### 9.4 NOT_PERFORMED 与裁决
+
+Win7/Win10 实机、打包、远端、推送、发布、候选冻结、门 A/B、原生错误框点击和完整后台 Runtime/Runner 清理均为 `NOT_PERFORMED`。本轮证据只支持开发机 Node 20 与开发机 Electron 22.3.27，不写成 Win7 通过。
+
+需要负责人裁决的取舍：无新增裁决。本轮按已明确的熔断不加限流、轮转降级保最新记录、32 条未捕获异常上限和错误框继续运行取舍实施。

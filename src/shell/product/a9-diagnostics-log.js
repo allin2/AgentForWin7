@@ -120,9 +120,20 @@ function createDiagnosticsLog(options) {
     const bytes = Buffer.byteLength(line, 'utf8');
     if (state.bytes + bytes > state.limit) {
       if (state.previousPath) {
-        try { await io.promises.unlink(state.previousPath); } catch (error) { if (error.code !== 'ENOENT') throw error; }
-        try { await io.promises.rename(state.activePath, state.previousPath); } catch (error) { if (error.code !== 'ENOENT') throw error; }
-        state.previousBytes = state.bytes;
+        let rotated = false;
+        try { await io.promises.unlink(state.previousPath); } catch (error) { if (error.code !== 'ENOENT') { /* continue with best-effort rotation */ } }
+        try {
+          await io.promises.rename(state.activePath, state.previousPath);
+          rotated = true;
+        } catch (error) {
+          if (error.code === 'ENOENT') rotated = true;
+          else {
+            // Keep the newest record even when rotation is unavailable.
+            await io.promises.writeFile(state.activePath, '', 'utf8');
+            state.bytes = 0;
+          }
+        }
+        if (rotated) state.previousBytes = state.bytes;
       } else {
         await io.promises.writeFile(state.activePath, '', 'utf8');
       }
@@ -149,9 +160,20 @@ function createDiagnosticsLog(options) {
     const bytes = Buffer.byteLength(line, 'utf8');
     const rotate = existingBytes + bytes > emergency.limit;
     if (rotate) {
-      try { io.unlinkSync(emergency.previousPath); } catch (error) { if (error.code !== 'ENOENT') throw error; }
-      try { io.renameSync(emergency.activePath, emergency.previousPath); } catch (error) { if (error.code !== 'ENOENT') throw error; }
-      emergency.previousBytes = existingBytes;
+      let rotated = false;
+      try { io.unlinkSync(emergency.previousPath); } catch (error) { if (error.code !== 'ENOENT') { /* continue with best-effort rotation */ } }
+      try {
+        io.renameSync(emergency.activePath, emergency.previousPath);
+        rotated = true;
+      } catch (error) {
+        if (error.code === 'ENOENT') rotated = true;
+        else {
+          // Keep the newest record even when rotation is unavailable.
+          io.writeFileSync(emergency.activePath, '', { encoding: 'utf8', flag: 'w' });
+          existingBytes = 0;
+        }
+      }
+      if (rotated) emergency.previousBytes = existingBytes;
       existingBytes = 0;
     }
     io.writeFileSync(emergency.activePath, line, { encoding: 'utf8', flag: 'a' });
@@ -208,11 +230,11 @@ function createDiagnosticsLog(options) {
         suppressedCount += 1;
         return true;
       }
-      uncaughtRecorded += 1;
     }
     try {
       appendSync(encode(event, event === 'exit-end' ? { ...values, suppressedCount } : values));
       stats.writtenCount += 1;
+      if (event === 'uncaught-exception') uncaughtRecorded += 1;
       return true;
     } catch (_error) {
       stats.writeFailureCount += 1;
