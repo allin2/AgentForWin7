@@ -30,8 +30,17 @@
 原有其他任务改动保留，远端尚无本次修复结果，详见 A9-48 §9。
 后继负责人回复“推送”，授权单独提交本轮改动并推送公开 `origin/main`；PR #14 合并仍待决定。
 
+本轮 A9-64/A9-65 收口（2026-11-12，负责人要求“推进64，65收口”）：
+`APPROVED_FOR_IMPLEMENTATION`。实际主线基线 `4dfabf18…`，保留既有 dirty/untracked。
+A9-65 收口包含已独立复核返修的本地提交、合入 main、接口决定补记、任务登记及受影响消费者验证。
+A9-64 只固定 `923bf875…` 的独立审查输入并登记任务；审查由负责人转交，最终审查结论到达前不合入产品。
+本轮不新增产品能力、依赖、系统权限或远端写入。Win7 新窗口、打包、门 A/B、公开推送与发布均未授权。
+安全、完整性、生命周期或源码漂移失败停止依赖动作；普通集成失败在原范围内最小修复并保留首失败。
+
 | 任务书 | 类型 | 状态 | Phase-Gate | Win7 验证 |
 |---|---|---|---|---|
+| [A9-65（可见等待与诊断接线；独立返修复核完成，本地收口）](A9_65_VISIBLE_WAITS_AND_DIAGNOSTICS.md) | PRODUCT_RELIABILITY_HARDENING | APPROVED_FOR_IMPLEMENTATION | A9_65_DEVELOPER_VERIFIED | NOT_PERFORMED |
+| [A9-64（搜索与列目录响应性；最终独立审查待回执，产品未合入）](A9_64_SEARCH_LIST_RESPONSIVENESS.md) | PRODUCT_RELIABILITY_HARDENING | APPROVED_FOR_IMPLEMENTATION | A9_64_DEVELOPER_VERIFIED | NOT_PERFORMED |
 | [A9-63（fail-loud 批次 1：清理期限与持久化、Git 投影诊断；开发机交付完成）](A9_63_FAIL_LOUD_BATCH1.md) | Reliability Hardening | APPROVED_FOR_IMPLEMENTATION | A9_63_DEVELOPER_VERIFIED | NOT_PERFORMED |
 | [A9-62（主进程诊断落盘与进程级兜底；开发机交付完成，见 ADR-0328）](A9_62_DIAGNOSTIC_FLIGHT_RECORDER.md) | PRODUCT_RELIABILITY_HARDENING | APPROVED_FOR_IMPLEMENTATION | A9_62_DEVELOPER_VERIFIED | NOT_PERFORMED |
 | [A9-61（开发机交付完成；Win7复验未执行）](A9_61_CHECKPOINT_RESPONSIVENESS.md) | PRODUCT_RELIABILITY_BUGFIX | APPROVED_FOR_IMPLEMENTATION | A9_61_DEVELOPER_VERIFIED | NOT_PERFORMED |

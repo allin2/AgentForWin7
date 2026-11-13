@@ -15,6 +15,9 @@
 
 ## 当前交付、进行中的工作与授权
 
+- [A9-65](tasks/A9_65_VISIBLE_WAITS_AND_DIAGNOSTICS.md)：`A9_65_DEVELOPER_VERIFIED`。准确返修已提交为`6ba877d…`，当前正作本地主线收口；原独立复核41项定向、1708项Shell日常和3项Electron场景按产品/测试准确字节继承。关闭等待只报告并保留锁，成功后继续关闭；决定见ADR-0329。当前整合直接验证尚待本轮结果，不能提前记PASS。Win7、打包、门A/B、公开推送及发布NOT_PERFORMED。
+- [A9-64](tasks/A9_64_SEARCH_LIST_RESPONSIVENESS.md)：`A9_64_DEVELOPER_VERIFIED`。产品分支准确提交`923bf875…`，执行代理返修复测213项通过；最终独立审查提示词已交负责人转交，独立结论尚未取得。仅任务书及索引登记到主线，产品未合入；Win7与打包NOT_PERFORMED。
+
 - [A9-62](tasks/A9_62_DIAGNOSTIC_FLIGHT_RECORDER.md)：`A9_62_DEVELOPER_VERIFIED`。主进程诊断日志落盘与进程级兜底已合入 main，合并提交 `d04629a…`，分支尖端 `afbaa65f…`，决定见 ADR-0328。三轮独立复审后，末次返修由合入会话复核；仅开发机 Node 20 与 Electron 22.3.27 证据。Win7 实机和原生错误框点击为 `NOT_PERFORMED`。
 - [A9-63](tasks/A9_63_FAIL_LOUD_BATCH1.md)：`A9_63_DEVELOPER_VERIFIED`。fail-loud 批次 1 已合入 main，合并提交 `a6a3fd3…`，分支尖端 `e841523b…`；仅开发机证据。清理辅助命令的 10 秒期限待 Win7 校准，诊断字段尚无界面读取方。Win7 实机为 `NOT_PERFORMED`。
 - [A9-61](tasks/A9_61_CHECKPOINT_RESPONSIVENESS.md)：`A9_61_DEVELOPER_VERIFIED`。最终源`4ae74f32…`；产品`6c460fd9…`独审P0/P1为0，后继仅修测试清理。第6台Shell G0为76套件、1634 PASS，另12项慢项已同机补跑通过；Workspace新机271项与6000基线、Mac完整272项通过，专项25项及Mac Electron22/Node16真实入口5项通过。兄弟工作区pending秘密窗口已红绿闭环，shutdown P2按负责人决定保留。第6台已回收，凭据未漂移，短命密钥撤销。本轮授权本地main整合，保留无关dirty；Win7/Win10、门A/B、公开推送发布NOT_PERFORMED。原G0实际首FAIL及摘要纠正见任务书§11。
