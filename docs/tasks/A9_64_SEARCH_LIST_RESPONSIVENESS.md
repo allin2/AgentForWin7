@@ -5,7 +5,7 @@ Status: APPROVED_FOR_IMPLEMENTATION
 Task Type: PRODUCT_RELIABILITY_HARDENING
 Target Branch: a9-64-search-list-responsive
 Source Baseline: 4dfabf18f41b4f75dd3c910fd0149d1995c5ac93
-Phase-Gate: A9_64_DEVELOPER_VERIFIED
+Phase-Gate: A9_64_REVIEW_P1_BLOCKED
 Win7-Validation: NOT_PERFORMED
 ```
 
@@ -113,6 +113,33 @@ P2 跳过列表：list 两处子目录失败入口统一计数，`skipped` 详�
 
 性能参照加载方式：`r4-perf-probe.cjs` 用 `git show` 取得两个历史 service 的原始 TypeScript，以既有 TypeScript 5.3.3 转译并内存加载，依赖解析到当前构建中未变化的运行依赖。基线至当前的 workspace 源码差异仅为 service 与 types，types 的变更仅新增错误码类型联合，其余运行依赖源码未变。返修后加载当前 `dist/a9-workspace-service.js`。JSON 记录源码及转译/构建哈希。全程不改写被测产品文件、不创建或修改主工作区。原探针的总耗时包含 25 ms 定时器收尾；短行性能探针的总耗时不包含该收尾，三版本口径一致。
 
+### 第五轮：本次审核问题修复核验报告
+
+结论：执行代理确认 P0-1、P1-1 与 P2-2 在提交 `923bf875043b6c48924445a4ca46a55ada47a70b` 已修复，开发机定向复测通过。P2-1 的性能提示已有同字节修复证据。本节不是独立审核签发，也不改变原审核对 `9ab87046661ef6ec94e9b9bad3b6e4e1ecb1735b` 的 FAIL。
+
+本次负责人要求修复所附审核问题。执行代理进入指定工作树 `/Users/qlyf/Developer/a9-64-search-list-responsive` 时，实际分支为 `a9-64-search-list-responsive`，HEAD 已是上述修复提交，工作区干净。该提交是被审提交的直接后继；本次保留已有修复，不重复实现，也不改写历史提交。本次新增变更只有本任务书的核验记录，未提交、未推送。原审核的 500 个目录与 600 组场景统计不作为本轮实测数字。
+
+| 问题 | 实际修复及核验 | 结论与证据层级 |
+|---|---|---|
+| P0-1 排序重复膨胀 | 既有修复删除自写归并，使用基线原生 `localeCompare` 排序。两文件目录仅返回 `a_b.txt`、`File.txt`，总数 2、不截断。 | 开发机直接复测 PASS。原生排序中途不能取消，限制继续保留。 |
+| P1-1 等价夹具漏检 | 常驻测试包含两文件反例、200 个固定种子随机树。每树递归/非递归各检查四个上限，逐项比较完整 entries、truncated、totalEntries，共 1600 组，无 mismatch。 | 开发机直接复测 PASS。旧源码在同一测试集有 186 个随机树用例及最小反例失败。 |
+| P2-1 搜索耗时提示 | 既有修复把行循环 checkpoint 改为每 256 行检查，保留文件间检查。第四轮短行搜索三轮中位数为基线 1158.27 ms、修复 1297.85 ms，比值 1.12；不能与原审核不同夹具的 1.60 直接比较。 | `INHERITED_EVIDENCE`，开发机 Node 20。当前源码和重新构建 JS 的 SHA-256 均与原性能 JSON 完全相同；本轮未重跑性能探针。 |
+| P2-2 list 跳过总数缺失 | 既有修复新增 `skippedTotal`。真实 100 个子目录配合 readdir 的 EACCES 替身，详情恰 50 项、总数 100。 | 开发机直接复测 PASS。此项证明计数与详情上限，不构成目标平台 ACL 证据。 |
+
+本轮直接验证使用 Node `v20.17.0`。沿用第三轮 `NODE20` 前缀，补齐 PATH 指向该 Node 的 bin，确保 npm 子进程也使用相同运行时。
+
+| 检查 | 命令/证据 | 本轮结果 |
+|---|---|---|
+| 当前构建与定向回归 | `NODE20 scripts/verify_integration.mjs --module workspace --test-file tests/unit/a9-64-search-list-responsive.test.ts`；`outputs/a9-64/recheck-923bf875-targeted.log` | workspace 编译通过；213/213 测试通过。 |
+| 同一测试的旧源码反证 | `NODE20 outputs/a9-64/recheck-923bf875-red.cjs`；同前缀 `-red.log`、`-red.json`、`-red-summary.json` | 旧源码 188 项失败、25 项通过。失败包括两文件反例、186 个随机树用例及 list 总量测试。 |
+| 身份与原性能证据适用性 | `outputs/a9-64/recheck-923bf875-identity.json`；`outputs/a9-64/perf-fixed-r4.json` | 产品源码与 HEAD 一致；源码 SHA-256 为 `91a86e7c6032cc7d668fa9e865d9f0328587e9b4144f63825a43065ae070177a`，构建 JS 为 `6a5e919868fe3c145c96f686cf1686920a739c87a4e1a6d0f32c6b8cd148fe65`。两者均匹配原性能证据。 |
+| 历史日常回归 | `outputs/a9-64/daily-workspace-r4.log` | 第四轮原始日志为 25/25 套件、484/484 测试通过。本轮未重复执行，不计入本轮直接证据。 |
+| 差异与清理 | `git diff --check`；`outputs/a9-64/recheck-923bf875-temp-check.json` | 差异检查通过；反证运行新增临时目录残留 0，既有目录保留。 |
+
+旧源码反证脚本以 `git show` 读取准确的被审 service，用现有 TypeScript 转译到系统临时目录。仅将相对运行依赖解析到当前 workspace dist，并通过 Jest moduleNameMapper 替换测试的 service 入口。当前测试文件保持不变，产品源码及当前 dist 均不回退；临时夹具、转译文件和 Jest cache 在 finally 删除。反证只证明该测试集能发现原缺陷，不作为旧版本兼容性或完整回归结论。
+
+本次未重跑全部十七项独立审核。性能探针、完整 workspace/core 回归及开发机 Electron 22.3.27 内置 Node 16.17.1 运行均非本轮直接证据。Win7 实机、打包、正式门 A/B、合入主工作区和推送均为 `NOT_PERFORMED`。本轮无产品变化，无新增依赖、权限或候选；后续独立审核可直接使用现有修复提交与本轮红绿证据。
+
 ## 4. 已知限制与边界
 
 - 单个文件的读取仍是同步的，上限 1 MiB；时间片让出发生在文件之间和文本行扫描期间。
@@ -121,3 +148,41 @@ P2 跳过列表：list 两处子目录失败入口统一计数，`skipped` 详�
 - Win7 机械盘上的阈值未校准；本轮仅有开发机 Node 20 证据。
 - 本轮未连接 Win7、未打包、未执行正式 Gate A/B、未推送；这些均为 `NOT_PERFORMED`。
 - `check_docs` 对任务未登记 `docs/tasks/README.md` 的失败是预期结果；索引登记由负责人会话在合入时完成。
+
+## 2026-11-12 收口登记
+
+负责人要求推进A9-64/A9-65收口并索取A9-64独立审查提示词。本轮只将任务书登记到主线，产品修复仍固定在独立分支923bf875…，最终独立审查待回执；不能将执行代理复测当成独立审查签发。提示词在主仓库outputs/a9-64-dev-r3/FINAL_INDEPENDENT_REVIEW_PROMPT_20261113.md。
+主线的文档登记不代表产品合入或Win7通过。原排序审核FAIL、同步原生排序及单文件读取限制保持。
+
+## 2026-11-13 独立审查阻断
+
+负责人返回独立报告：a9-64-search-list-responsive工作树outputs/a9-64/review-20261113T015456Z-9b89e3b2/REVIEW.md，准确源923bf875…，开发机结论不建议合入。P1-1为异步扫描期间目录替换导致外部文件沿用outsideWorkspace=false；P2-1为任务书add/add冲突。原审核FAIL保留，产品继续阻断合入。
+执行代理在既有收口范围内于原分支实施最小修复和红绿验证；原分支补记与main收口登记全部保留。主线不加载该产品补丁，不将分支自查提升为独立复审或Win7证据。后继修复和准确输入见分支任务书及outputs/a9-64/p1-revision-20261113。
+
+## 2026-11-13 独立审查阻断与范围内返修
+
+独立报告为outputs/a9-64/review-20261113T015456Z-9b89e3b2/REVIEW.md，绑定923bf875…，结论不建议合入main。P1-1为异步扫描期间根或子目录被替换，旧outsideWorkspace标记仍用于外部目标；P2-1为任务书add/add集成冲突。原排序P0修复的通过证据及新P1阻断并存，不互相抵销。报告和原FAIL不改判。
+负责人在既有“推进64、65收口”任务中返回本报告；本轮在原批准范围内修复已复现竞态，并协调保留任务书两侧记录。实际分支a9-64-search-list-responsive，开始HEAD923bf875…；main为641a0a3…，产品不合入main。仅修改Workspace service、直接回归和本任务书；主线只补真实状态和任务记录，不改变权限、公开schema、持久化、依赖、原生、系统配置、排序或容量上限，不连接目标机、不打包、不推送。
+原分支未提交的第五轮补记已逐字节保存到p1-revision-20261113/TASK_BEFORE.md。main任务书完整包含该补记，因此先以完整main文本协调分支任务书，再追加本节；原FAIL、第五轮核验及main收口登记全部保留。此为文档协调，不代表已经执行产品合并。
+返修前同一新增13项回归全部FAIL，原213项仍PASS。反例覆盖原生事件循环根替换、readdir边界根/子目录替换、同名新目录、外部符号链接、子realpath等待、行扫描让出以及文件替换为外部链接。返修后226/226通过。首轮回归补强记录保留，准确证据集中在outputs/a9-64/p1-revision-20261113。
+实现先在首次await前绑定canonical目标、dev/ino与birthtime，在真实I/O前后、实际让出后及返回前复核根与当前目录。漂移或身份无法确认返回既有DIRECTORY_READ_FAILED；不返回沿用旧归属的扫描结果，不将身份错误吞为普通read_failed。搜索对旧Dirent指向的文件重新lstat，只读取仍为普通文件的目标；新链接按stat_failed明确跳过。新调用对已有外部目标仍允许并正确标为outsideWorkspace=true。
+上述检查用于异步边界的一致性，不能声明为对抗任意跨进程ABA替换的原子文件系统沙箱。Win7的目录身份字段及实际Reparse Point行为仍NOT_PERFORMED。当前开发机修复完成不解除独立复审阻断；后继最终记录及准确输入在本目录追加。
+
+### 开发机返修结果与复审输入
+
+产品及直接回归已本地提交为382e002…，父提交923bf875…。后继任务书提交不改产品字节。当前状态仍为A9_64_REVIEW_P1_BLOCKED：执行代理确认反例关闭，不代替独立复审签发。
+
+| 检查 | 本轮直接结果 | 证据 |
+|---|---|---|
+| 相同回归红绿 | 旧源13 FAIL、213 PASS；新源226/226 PASS | red-final.log、green.log |
+| Workspace/Core实际消费者 | 25套件497 PASS；40套件924 PASS，六模块当前输出构建通过 | daily-workspace-core.log |
+| 6000文件基线 | 3/3 PASS | baseline-6000.log |
+| 原报告根替换反例 | Node20、Electron22/Node16各4种场景均DIRECTORY_READ_FAILED，不返回结果 | race-node20.json、race-node16.json |
+| 根/子目录、原生新目录及符号链接 | 两运行时各8/8 PASS | directory-identities-node20.json、directory-identities-node16.json |
+| 原消费者探针 | 两运行时各12/12 PASS，含真实Core→Workspace及取消 | consumer-node20.json、consumer-node16.json |
+| 同口径性能 | 三轮轮换，中位耗时为基线1.10倍；10万项取消总58.36ms，实际abort后0.24ms | performance.json |
+| 大目录响应性 | 10万目录项最长停顿估计15.05ms；2万文件搜索2.05ms，精确文件边界未截断 | large-probe.json |
+
+原消费者探针仅把文件metadata错误注入位置由statSync改为新消费者的lstatSync，全部原断言保留；来源与SHA见PROBE_PROVENANCE.json。原报告脚本未改，原审查证据未覆盖。本轮性能重新测量，不再把旧服务同字节性能记录继承给新服务。最长停顿是10ms定时器间隔减10ms的估计；开发机数值不构成Win7承诺。
+P2以协调后的完整任务书同步到两条分支；保留第五轮补记、main收口登记、新审查及本轮返修。准确两侧文档提交及只读合并预演写入DOC_COORDINATION.json，不为解决文档冲突合入产品。
+最终准确源码/构建/脚本哈希、保护与清理结果见本目录RESULT_FINAL.json。原独审P1仍待独立复核；main产品、Win7、Win10、完整GUI链路、打包、门A/B、推送与发布均NOT_PERFORMED。
