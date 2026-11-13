@@ -79,7 +79,10 @@ function verify(mode, runRoot, code, signal) {
   if (mode === 'rejection') { assert(has('unhandled-rejection', 'errorCode', 'EIO')); assert.equal(read('alive.json').alive, true); }
   if (mode === 'renderer-wait') {
     const result = read('renderer-wait.json');
-    assert(!result.shown.hidden && result.shown.text.includes('8 秒')); assert(result.cleared && result.directoryInDrawer);
+    const seconds = result.shown.text.match(/主进程已有 (\d+) 秒/);
+    assert(!result.shown.hidden && seconds && Number(seconds[1]) >= 8);
+    assert(result.shown.observedAfterMs >= 8000);
+    assert(result.cleared && result.directoryInDrawer);
   }
   if (mode === 'shutdown-stall') {
     const shutdown = read('shutdown-stall.json');

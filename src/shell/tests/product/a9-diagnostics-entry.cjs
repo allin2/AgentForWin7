@@ -175,13 +175,25 @@ if (mode.startsWith('baseline-')) {
         if (mode === 'renderer-wait') {
           const assert = require('assert');
           holdNextSnapshot = true;
+          const waitStartedAt = Date.now();
           await window.webContents.executeJavaScript('window.__a965pending = window.win7Agent.a9.snapshot(); true');
-          await new Promise(resolve => setTimeout(resolve, 8300));
-          const shown = await window.webContents.executeJavaScript(`(() => {
-            const node = document.getElementById('main-response-wait');
-            return { hidden: node.hidden, text: node.textContent };
-          })()`);
-          assert.equal(shown.hidden, false); assert(shown.text.includes('8 秒'));
+          let shown;
+          // Observe the actual UI state: an early threshold timer can leave the
+          // first eligible notification to the next one-second sample.
+          const waitDeadline = waitStartedAt + 10000;
+          do {
+            shown = await window.webContents.executeJavaScript(`(() => {
+              const node = document.getElementById('main-response-wait');
+              return { hidden: node.hidden, text: node.textContent };
+            })()`);
+            if (!shown.hidden) break;
+            await new Promise(resolve => setTimeout(resolve, 20));
+          } while (Date.now() < waitDeadline);
+          shown.observedAfterMs = Date.now() - waitStartedAt;
+          const seconds = shown.text.match(/主进程已有 (\d+) 秒/);
+          assert.equal(shown.hidden, false);
+          assert(seconds && Number(seconds[1]) >= 8);
+          assert(shown.observedAfterMs >= 8000, 'wait indicator appeared before its threshold');
           assert(shown.text.includes(observedDiagnostics.snapshot().directory));
           await releaseSnapshot();
           await window.webContents.executeJavaScript('window.__a965pending');

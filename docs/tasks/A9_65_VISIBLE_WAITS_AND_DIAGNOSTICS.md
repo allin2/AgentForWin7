@@ -194,3 +194,21 @@ green.log 保留原事实；夹具改为真实启动事件初始化日志，秘�
 本轮开始时main为4dfabf18…；本工作树HEAD为ea6dc13e…，四份产品/测试文件及本任务书未提交。主工作区38项既有修改与未跟踪文件已在候选外核SHA并备份，所有无关内容保留。
 独立复核报告为outputs/a9-65/review-fix/independent-verification-20261112/RESULT.json。当前四份产品/测试文件SHA与该报告逐项相同；本任务书追加本段前的SHA也相同。41项定向、1708项Shell日常及3项Electron场景仅按准确字节记INHERITED_EVIDENCE，不宣称本轮重跑。旧实现3/5/8条反向失败及原索引检查FAIL保持。
 本轮无新产品、原生、依赖或夹具变化。先完成本地提交与干净树整合，再以实际合并源码执行最短Electron消费者和受影响回归；README登记及ADR补记在集成端完成。最终绑定、直接验证和保护核对统一保存在主仓库outputs/a9-65-closeout-20261113。
+
+## 2026-11-12 主线直接验证与收口结果
+
+产品返修已在6ba877d…提交，随后连同ea6dc13e…的完整特性合入本地main。ADR-0329登记既有接口取舍；任务索引补齐，不再存在本任务原来的两项文档登记缺失。A9-64只登记任务书和独审提示词，产品不随本轮合入。
+
+| 本轮检查 | 直接结果 | 边界与证据 |
+|---|---|---|
+| 七模块依赖闭包编译与Shell静态门 | PASS | Node20.17.0；实际main源码加原dirty，shell-daily.log |
+| Shell日常集合 | 78套件，1710 PASS、12项按日常规则省略 | 包含本任务41项；不是全量产品或目标平台结论 |
+| 必需字段慢检查 | 12/12 PASS | 单独按名称选择，required-fields.log；未选择项不冒充本轮直接执行 |
+| 6000文件基线 | 3/3 PASS | 当前构建Workspace，workspace-baseline-6000.log |
+| 真实Electron22/Node16 | 关闭等待、正常退出PASS；等待提示修正版单场景PASS | capture原生框、受控清理外设；非Win7，非真实Office清理 |
+| 文档检查 | PASS | 主线原dirty保持；准确最终检查见RESULT_FINAL.json |
+
+首轮Electron等待提示FAIL保留在electron/RESULT.json，退出码7、断言hidden仍为true。夹具固定等待8300ms没有观察业务状态；候选外受控时序用准确生产Preload证明首次定时回调7999ms时仍为null，8999ms下次采样才报告，见WAIT_FIXTURE_MIN_REPRO.json。该受控时序不冒充首轮真实回调计时。
+后继仅修改两份Electron夹具为最多10秒的状态轮询，并断言真实显示不得早于8秒、显示已等待秒数至少8、诊断目录正确、原请求返回后隐藏以及诊断抽屉可读。不是简单增加固定sleep；产品8秒观察阈值、1秒采样及请求结果保持不变。两夹具已通过Electron22内置Node16语法检查。准确main产品加载、修正版夹具的renderer-wait场景PASS，实际观察8366ms，记录在electron-renderer-r2。
+本轮未改产品，无新增依赖、权限、原生或模型调用。继承的原独立41项、1708项和三场景报告与首次FAIL均保留，不将后继夹具冒充独立复审。当前结果绑定main提交加原dirty及准确产品、夹具SHA；driver里的sourceBaseline字段是原任务基线4dfabf18…，本轮实际输入以RESULT_FINAL.json及其加载哈希为准。
+主线保护快照、反向重构校验和恢复stash保留；分支及已有证据均不删除。当前开发机收口完成；Win7、Win10、打包、门A/B、公开推送和发布仍为NOT_PERFORMED。

@@ -15,7 +15,7 @@
 
 ## 当前交付、进行中的工作与授权
 
-- [A9-65](tasks/A9_65_VISIBLE_WAITS_AND_DIAGNOSTICS.md)：`A9_65_DEVELOPER_VERIFIED`。准确返修已提交为`6ba877d…`，当前正作本地主线收口；原独立复核41项定向、1708项Shell日常和3项Electron场景按产品/测试准确字节继承。关闭等待只报告并保留锁，成功后继续关闭；决定见ADR-0329。当前整合直接验证尚待本轮结果，不能提前记PASS。Win7、打包、门A/B、公开推送及发布NOT_PERFORMED。
+- [A9-65](tasks/A9_65_VISIBLE_WAITS_AND_DIAGNOSTICS.md)：`A9_65_DEVELOPER_VERIFIED`。产品返修`6ba877d…`已合入本地main，后继仅修Electron夹具的固定等待。main保留既有dirty，直接Shell日常78套件/1710 PASS，12项必需字段慢检查和6000文件基线3项另跑通过；Electron关闭等待、正常退出通过，等待提示首轮FAIL保留，语义等待修正版单场景PASS。文档检查通过，决定见ADR-0329。准确源码/夹具/收尾绑定在outputs/a9-65-closeout-20261113/RESULT_FINAL.json。Win7、打包、门A/B、公开推送及发布NOT_PERFORMED。
 - [A9-64](tasks/A9_64_SEARCH_LIST_RESPONSIVENESS.md)：`A9_64_DEVELOPER_VERIFIED`。产品分支准确提交`923bf875…`，执行代理返修复测213项通过；最终独立审查提示词已交负责人转交，独立结论尚未取得。仅任务书及索引登记到主线，产品未合入；Win7与打包NOT_PERFORMED。
 
 - [A9-62](tasks/A9_62_DIAGNOSTIC_FLIGHT_RECORDER.md)：`A9_62_DEVELOPER_VERIFIED`。主进程诊断日志落盘与进程级兜底已合入 main，合并提交 `d04629a…`，分支尖端 `afbaa65f…`，决定见 ADR-0328。三轮独立复审后，末次返修由合入会话复核；仅开发机 Node 20 与 Electron 22.3.27 证据。Win7 实机和原生错误框点击为 `NOT_PERFORMED`。
