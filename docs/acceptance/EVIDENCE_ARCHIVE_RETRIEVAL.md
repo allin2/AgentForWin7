@@ -19,6 +19,9 @@
 | `archive-20261026-slice2` | 2026-10-26 | WIN7-54 门 A 修复轮 repair-1～10、13 与 tmp 共 12 个集合（开发机测试夹具与沙箱，647,850 文件）；见下文 |
 | `archive-20261026-slice3` | 2026-10-26 | Alpha 2 历史准备：w48 门 A 准备、diagnostic-3b 准备、rehearsal-3 准备 3 个集合（495,314 文件）；见下文 |
 | `archive-20261026-slice4` | 2026-10-26 | **不在 GitHub**；131 个加密附件在外置“相机盘”，本机保留恢复索引。A9-39 outputs/预演/w46～w53 材料与 WIN7-41～54 旧候选共 4 组 127 个集合；按 UUID 入口取回 |
+| `archive-20261030-space-r1` | 2026-10-30 | **不在 GitHub**；86 个加密附件在外置“相机盘”。空间回收 5 组 82 个候选：A9-43 P5 中间产物、A9-42 `.work`、69 个临时沙箱、迁移恢复副本、三棵工作树 `outputs/`；按 UUID 入口取回 |
+| `archive-20261108-space-r2` | 2026-11-08 | **不在 GitHub**；5 个加密附件在外置“相机盘”。WIN7-55 证据账本、`.acceptance/a9-39`、Win10 入口证据、A9-44 发布准备与 23 个旧报告；本机原件已删除；恢复见 [外置盘恢复说明](EXTERNAL_ARCHIVE_RESTORE.md) |
+| `archive-20261109-outputs-b1` | 2026-11-09 | **不在 GitHub**；3 个加密附件在外置“相机盘”。`outputs/a9-49-dev-package-20261107`（A9-49 开发包回执，开发诊断级）、`outputs/a9-42-tools`（A9-42 工具与暂存）、`outputs/alpha4-r1`（WIN7-57 接受证据，含 OWNER_ACCEPTANCE.json）；本机原件经负责人批准已全部删除；恢复见 [外置盘恢复说明](EXTERNAL_ARCHIVE_RESTORE.md) |
 
 上述批次使用同一恢复密钥。密钥不在 GitHub，由负责人保管；位置与离机备份要求见私有仓库 README。
 
@@ -192,7 +195,7 @@ slice3 同法：catalog 为 `catalog-alpha2-history.json`，共享包为 `alpha2
 | 材料 | 工作树外的保留位置 | 本轮核验 |
 |---|---|---|
 | 314e 的 20 个未提交文件、整合树的 1 个未提交文件 | 上述台账的 `dirty-backups/`；含 tracked 补丁、原文件归档和逐文件清单 | 实际解包，原字节、模式与 SHA-256 一致 |
-| WIN7-55 冻结候选、双构建、正式/补充证据、开发账本及未归档准备材料，共 22 个根 | `.acceptance/evidence/a9-alpha2-integration-r2-e596c58-20261026/`，保留原工作树相对路径 | 文件字节、模式、目录成员与符号链接目标一致 |
+| WIN7-55 冻结候选、双构建、正式/补充证据、开发账本及未归档准备材料，共 22 个根 | `.acceptance/evidence/a9-alpha2-integration-r2-e596c58-20261026/`，保留原工作树相对路径；2026-11-08 起本机原件已删除，见下方更新 | 文件字节、模式、目录成员与符号链接目标一致 |
 | 第四批已恢复的 117 个整合树历史集合 | `.acceptance/maintenance/archive-20261026-slice4/verified/<组>/restored/<集合>/` | 当前原件与既有恢复件逐项重比；131 个本地加密附件重新核 SHA |
 
 上述两类证据材料合计核验 514,179 个目录成员。归档略过的文件和 FIFO 类型另在独立保留根保存；
@@ -202,6 +205,11 @@ WIN7-55 候选及两次构建保留副本的 ZIP SHA 均为 `7de63dd8db0fde0f7c7
 以下材料为 `KEEP`：独立保留根、两个 dirty 归档、本轮清单、slice4 的 catalog/manifest、131 个本地加密附件、
 117 个恢复集合及原归档密钥。密钥仍在原有受限位置，没有复制到工作树或上传。
 slice4 的远端草稿不作为本次恢复依据；未经另轮确认，不得清理这些本地恢复来源。
+
+> 2026-11-08 更新：负责人按准确清单批准方案甲。独立保留根
+> `.acceptance/evidence/a9-alpha2-integration-r2-e596c58-20261026/` 的 KEEP 解除，本机原件已删除。
+> 加密副本在外置盘批次 `archive-20261108-space-r2`，恢复见 [外置盘恢复说明](EXTERNAL_ARCHIVE_RESTORE.md)。
+> 恢复后，该根位于 `<输出目录>/acceptance-evidence-a9-alpha2-integration-r2/` 下。本段其余 KEEP 项不变。
 
 > **更正（2026-10-26 08:59 America/Los_Angeles）**：上表“第四批已恢复的 117 个整合树历史集合”所列
 > `archive-20261026-slice4/verified/` 已不存在。Claude Code 会话在负责人批准删除“还原副本 verified/”后执行删除，

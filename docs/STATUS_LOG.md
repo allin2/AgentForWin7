@@ -1,3 +1,26 @@
+## AGENTS.md 文件整理Win7专项开发实测（2026-11-11 UTC）
+
+现有源 `99e1728d…` / ZIP `15b77c9c…` / run `2a55eed5…` 在普通agent/Session1/Medium完成规则整理实测，结果仅 `DEV_CHANNEL` PASS。
+真实产品先预览，确认后移动2份匹配文件；5份保留源和已有冲突目标字节不变。两轮规则加载SHA一致，1次产品尝试、8次真实模型HTTP200/TLS1.3，原配置哈希不变。
+执行轮原 `completed_with_warnings/unverified` 保持，外部字节核对PASS单列。首次退出回调留下测试数据库及缓存；进程结束后复制测试SQLite证据并核SHA，再独立清理该单一沙箱，原始false标记保留。
+六份主证据哈希/大小及SQLite再次核验完成，最后目标进程/任务0、锁inactive，窗口15.154分钟内关闭。仅C盘隔离模拟桌面；真实桌面根、跨卷、新目标目录创建及正式门A/B、发布均NOT_PERFORMED。产品未改。
+准确边界见 [ENGINEERING_03 §10.12](tasks/ENGINEERING_03_WIN7_DEV_CHANNEL.md#1012-agentsmd-文件整理实测准备2026-11-11-utc) 及本机 `outputs/file-sort-win7-r1/RESULT_FINAL.json`。
+
+## A9-58 Win7开发验证完成（2026-11-11 UTC）
+
+源码 `99e1728d…` / ZIP `15b77c9c…` / run `21687dbe…` 在普通agent/Session1/Medium取得 `DEV_CHANNEL` PASS。10项产品检查、3262文件、SQLite、正常退出及中文草稿密文/重启零重放通过；1次产品尝试、4次回环、外部模型0。
+首传600秒超时保留，部分文件前缀SHA匹配后只续传剩余字节，完整ZIP校验与解包通过。目标窗口32.189分钟内关闭，进程/任务0、锁inactive、临时夹具清理完成；开发根23.593GB低于本轮24GB，剩余额度不延用。
+13份主回收文件大小/SHA与两图视觉核验通过。四项审查UNKNOWN未整体关闭；同包Win10、原生125%DPI、正式候选、门A/B与发布NOT_PERFORMED。main HEAD及无关dirty/untracked保留，未提交或推送。准确边界与证据见 [A9-58 §7.4](tasks/A9_58_HISTORY_SEARCH_AND_DELIVERY_CARDS.md#74-win7-开发验证完成与窗口关闭) 与本机 `outputs/a9-58-win7-dev-r1/RESULT_FINAL.json`。
+
+
+## A9-57 运行中只读浏览开发交付（2026-11-09 UTC）
+
+最终准确提交 `9c2f45b3…` 已在本地 main 工作区整合，未提交、未公开推送，既有 dirty/untracked 保留。
+A9-57 新增同工作区运行中只读浏览，执行对话 A、草稿、队列、审批、模型上下文和工作区写锁保持绑定；B/C 只读历史不激活。
+独立审核发现并关闭 3 项 P2：未读完成标记、字符串计划正文和浏览期间草稿保存；修后定向浏览/批次/工作台测试 PASS。
+新审核机 Shell G0 PASS，Mac G1 PASS，Mac Electron22 真实产品 8 组 PASS；Win7、Win10、正式候选、门 A/B、推送和发布 `NOT_PERFORMED`。
+原始证据见 [A9-57 §5](tasks/A9_57_BROWSE_WHILE_RUNNING.md#55-最终修复审核机-g0-与-mac-g1-2026-11-09-utc) 与本机 `outputs/a9-57-wp/`。
+
 # 项目状态流水（历史）
 
 ## A9-64 独审P1阻断、分支返修与文档协调（2026-11-13 UTC）
@@ -19,6 +42,18 @@ Electron首轮关闭等待和正常退出PASS；等待提示在固定8.3秒采�
 合并后的树在仓库外工作树跑七模块日常集合，全部通过：gateway 329、workspace 271、state 414、core 923、runner 274、git-adapter 64、shell 1667 另跳过 12。仅开发机 Node 20.17.0 证据，日志在本机 `outputs/a9-62-63-integration-r1/`。
 第三批只改测试与测试助手：runner 契约测试改由清理钩子删除临时目录，四个 release 测试改用 `tempRoot()`。另盘点出 21 个测试文件仍有同类问题，未修，清单在本机 `outputs/test-temp-cleanup-r3/INVENTORY.md`。系统临时目录既有的 43 个 `a9-` 残留已由负责人删除。
 主工作区其他会话的未提交改动保持原样，未暂存、未提交。未推送。Win7 实机为 `NOT_PERFORMED`。
+
+## A9-56 默认入口与行菜单开发交付（2026-11-09 UTC）
+
+InstaBox Opus实现 `f4fa22c0…`；首轮Sol独审P1为当前禁用行不可键盘聚焦。主代理直接修复为 `56129c8b…`，新机Sol源码/内存探针复核P0 0/P1 0。旧源G0因内容P1明确取消，新源Shell G0 69套件/1549 PASS/12 skipped，Mac G1九项PASS。真实Mac Electron22交互17项PASS，含当前行原生Tab/Shift+F10/Down/Return结束与后台行目标绑定；独审未持有Mac原始驱动，该项未独立签PASS，直接证据由主代理保存。UI驱动前期失败及共同根因保留，全部沙箱收尾。
+
+七文件准确合入本地main工作区，HEAD仍为1a25d593…，未提交/公开推送。单次开发ZIP b5eb2464… / 110582812字节，3261文件及八模块入口PASS。三个临时机删除、部署密钥撤销、凭据未变，原两台及monster未操作。新包Win7部署与原生右键、同包Win10、正式门A/B、发布NOT_PERFORMED；旧Win7窗口不复用。准确记录见 [A9-56 §5](tasks/A9_56_CHAT_ENTRY_AND_CONTEXT_MENU.md#5-开发机交付结果2026-11-09-utc)。
+
+## A9-55/A9-54 Win7 开发级运行收尾（2026-11-09 UTC）
+
+源 `4c9adbcc…` / 开发ZIP `6f3578f4…` 的普通agent/Session1 run `3fd90770…` 取得 `DEV_CHANNEL` PASS。系统Documents默认目录、重命名、目录外拒绝、重启零重放及A9-54受影响行为共16组通过。原两次夹具失败保留；负责人只增加第三次次数，原60分钟窗口、23GB及Documents新前缀例外保持。总计14次回环、外部模型0。窗口UTC12:50:07至13:26:39，已关闭。SQLite完整性正常，活动task/turn/run0、进程/任务0、锁inactive、临时沙箱0；两份测试目录和标记保留。
+
+原生系统选择器为受控返回夹具；身份反例只覆盖新run模块夹具。正式门A/B、同包Win10、原生125%DPI、外部模型和发布NOT_PERFORMED。公开CI42610841958的四个测试路径别名失败已定位，一行夹具修复在本地16/16通过，未提交/推送，包字节不变。直接摘要及准确失败见 [A9-55 §9.7](tasks/A9_55_DEFAULT_WORKDIR.md#97-win7-开发级运行完成2026-11-09-utc)。
 
 ## A9-48 alpha.5 / WIN7-58 负责人接受并公开发布（2026-11-06 UTC）
 
@@ -131,6 +166,17 @@ Git/错误三态/工具异常终态的桩证据单列，不写成真实后端结
 真实外部模型、Mac 提交、推送和发布为 NOT_PERFORMED。
 准确绑定见 [A9-46 §5.7](tasks/A9_46_WORKBENCH_MINIMAL_INCREMENT.md#57-局域网回收与-win7-开发级补证2026-11-05)
 及本机 `outputs/a9-46-workbench-r1/win7-r1/RESULT.json`。
+
+## A9-45 严格模板 system 修复与 InstaBox 工作流闭环（2026-11-03 UTC）
+
+执行代理交付 `3de9bee8…`，本地分支 a9-45-system-message、私有分支 box/sys400c。
+Gateway 默认合并非空 system 到开头，保持文本顺序、工具关联、图片校验及摘要数据权限声明；保留构造级 passthrough 对照，不新增 UI 或持久化字段。
+Linux 新计算机 G0 与 Mac G1 均为 19 组、305 项 PASS；产品独审 P0=0/P1=0 按准确未变字节记 INHERITED_EVIDENCE。
+首轮 G0 的旧两条 system 断言 FAIL 及原 G1 FAIL 保留；执行代理只改 J1 两行断言，未删除语义检查。
+负责人批准追加一台仅计算工作机后，确定性包装器完成测试修正提交、私有推送和复验，无新增模型调用。
+三台工作机已回收，21 个作业日志哈希与 TMPDIR 核验 PASS；母机暂停，部署密钥为空。
+当前 main 保留四个未提交修复文件，原 HEAD 与已有修改未改动。真实同事后端、Win10/Win7、打包、main 提交、公开推送及发布均 NOT_PERFORMED。
+准确绑定与限制见 [任务书 §8](tasks/A9_45_SYSTEM_MESSAGE_COMPATIBILITY.md#8-最终开发机交付与工作流结果) 和本机 outputs/a9-45-system-message-r1/FINAL_RESULT.json。
 
 ## 运维类调整改记本流水，不再立 ADR（2026-10-26）
 
@@ -7960,11 +8006,805 @@ codex 5 项测试缺口中 3 项已补断言（失败提示路径、单文件运
 开发机 macOS、Node 20.17.0：`npm run test:local` 7 模块 PASS，78.99 秒，临时目录顶层条目前后均为 199；
 新增断言经三次错误注入均变红。产品代码未改；Win7 运行 NOT_PERFORMED。
 
+## 2026-10-30 空间回收批次 r1：本机副本移至外置盘
+
+负责人批准 A 方案，并要求先移至外置盘、可随时取回，不直接删除。
+执行代理在主会话完成打包、校验、真实恢复与删除；独立审核 NOT_PERFORMED。
+
+范围 5 组 82 个候选，逻辑 3.42 GiB：`space-p5-r1r2`（A9-43 P5 六个中间产物）、
+`space-a9-42-work`（A9-42 三个 `.work`）、`space-tmp-sandboxes`（69 个临时沙箱）、
+`space-migration-check`（2026-10-26 迁移恢复副本）、`space-worktree-outputs`（三棵工作树 `outputs/`）。
+不包括 `prepared-version-r7`、`prepared-version-r10`、`a9-office-zip-kzXh66`，三者仍被文档按路径引用。
+
+外置批次 `archive-20261030-space-r1` 位于相机盘，UUID `C8BF5026-0077-3F03-AA08-019E0A1DC444`。
+格式沿用 slice4：SHA-256 共享对象去重、AES-256-CBC 加密、逐文件清单记录 mode 与 SHA-256。
+密钥仅在本机，0600，未复制到外置盘。批次已登记到 `docs/acceptance/EXTERNAL_ARCHIVE.json`。
+
+验证：86 个加密附件 SHA-256 全部一致；82 个候选源树逐文件复核 0 缺失 0 不符；
+真实恢复 6 次全部 `DECRYPT_EXTRACT_RECONSTRUCT_SHA256_PASS`，其中一次经登记表入口。
+删除 60,102 个文件，每文件删前复核 SHA-256，0 失败。
+开发机空闲 12 GiB → 16 GiB；差额小于逻辑字节，因 APFS 克隆与块粒度。
+
+本机保留 `developer-formal-profile-r1/A9_43_BUILD_RESULT.json`（711 字节），
+因 A9_43 文档第 304 行引用该路径；其归档副本 SHA `57d38427…` 与之一致。
+证据层级：开发机。不构成 Win7 或 Win10 验收证据。详见批次内 `README.md`。
+
+## 2026-10-30 更正：沙箱清理台账三处记载与实测不符
+
+负责人要求检查 `outputs/space-cleanup-20261031/CLEANUP_RECORD.json` 对应的清理报告。
+执行代理只读复核，发现三处记载与实测不符。删除动作本身不需要恢复。
+证据层级：开发机；复核基线 HEAD f7aa648；Win7 与 Win10 NOT_PERFORMED。
+
+| 台账记载 | 实测 |
+|---|---|
+| `reference_checks`：没有文档或证据 JSON 引用已删路径 | 三个未入库文件按 `/tmp/` 前缀引用已删目录：`outputs/next-version-r1/p5-integration/employee-r1/retained-fixtures.json` 引用 129 个，同目录 `synthetic-triple-build.json` 与 `electron-runtime-direct.cjs` 各引用 `a9-batch2-TEST_ONLY-Jy96vC`。原检查只匹配 `/private/tmp/`。入库目录（docs、scripts、release、src）引用 0 处；三个文件的 SHA-256 未被 docs 或 outputs 内其他文件引用。 |
+| `retained_with_reasons`：剩余 10 个工作树 | 实际 11 个，差 1 个，原因 UNKNOWN。 |
+| 同条：每个工作树都有未提交或分支独有工作 | 11 个分支领先 main 的提交数均为 0，只剩 2～24 个未提交文件，无一棵树的未提交文件全部与 main 相同。已移除的 `t3/fix-release-verification` 有独有提交 5cd4a0f，保留在该分支。 |
+
+影响：`synthetic-triple-build.json` 记录的三次同哈希构建（ZIP `b7095b03…`）现在只剩记录，ZIP 本体已删。
+三个文件按员工原始记录保留，不改写。
+
+回收站：`~/.Trash` 对本会话返回 Operation not permitted。
+`outputs/next-version-r1/cleanup-assessment-r1/execution-r1/RESTORE_MAP.json` 的 43 项原路径均不存在。
+负责人确认这些项已从回收站删除，本机不再保留；该批次不能再从回收站恢复。
+
+工作树处理（负责人批准按建议执行）：先移除 9 个工作树，负责人随后问剩余两棵能否清理，同一流程再移除 `t3-2eec9b08` 与 `t3-a4ba8d41`（A9-42 两名员工的树）。
+11 个 T3 工作树全部移除，`git worktree list` 中 `.t3/worktrees` 项为 0；两棵员工树只含 9 个未跟踪或已修改脚本，包共 0.2 MiB。
+移除前，每棵树的未提交文件、未跟踪文件与被忽略的 `outputs/` 已打包到 `outputs/worktree-archive-20261030/<树名>/`，
+含 `files.tar`、`tracked.diff`、`meta.json`、`MANIFEST.sha256`；不含可再生的 `src/*/dist`。
+11 个包均已解包并逐文件比对 SHA-256，0 不一致；移除前再次确认工作树自归档后未变化，且各分支指针前后相同。
+11 个分支领先 main 的提交数均为 0，34 个 `t3/*` 分支全部保留。
+其中 `t3-f34d2687` 的 `outputs/` 含 25,510 个文件，共 97.9 MiB 的归档包；其余 8 个包合计不足 6 MiB。
+开发机可用空间 69 GiB。工作树移除后，T3 中指向这些路径的会话无法再在原目录工作，须从分支或归档包恢复。
+此前已移除的 `t3/fix-release-verification` 与 `t3/a9-43-controller-cleanup` 两棵树，其被忽略的 `outputs/` 当时未核对，现无法核验。
+
+TMPDIR 沙箱：负责人批准后删除 12 个 `TEST_ONLY` 沙箱，du 合计 5.92 GiB，开发机可用空间 69.42 → 75.39 GiB，台账 `outputs/tmpdir-sandbox-cleanup-20261030/DELETE_LOG.json`。
+它们创建于 10-30 20:09～20:20（太平洋时间），来自 `a9-package.test.mjs` 旧版代码的两次运行，运行者 UNKNOWN。
+删除前核查：无进程持有、无符号链接指向、无硬链接；60 个文件的哈希被文档引用，共 4 个不同哈希，在主工作区均有逐字节相同副本。
+`$TMPDIR` 里 `a9-p2-controller`（814 个，480 MiB）、`A9-V26-TEST_ONLY`（142 个，187 MiB）等历史残留不在本次批准范围，未删。
+
+第二批测试修复：controller、authority、deny-set、`a9-42-real-model-direct`、`a9-42-real-model-trial`、win10 共用夹具改为退出时自动清理，已提交 bd69a4b。
+修复前以空 TMPDIR 单次运行实测残留：controller 59 个目录（35.8 MiB）、authority 8、deny-set 7、direct 18、trial 2、win10-entry 2。
+修复后通过数不变（48、8、7、7、24、28；win10-contract 14、win10-input-binding 22），残留均为 0。
+`report-verifier` 实测残留 0，`a9-lifecycle` 已有 `afterEach` 清理，`a9-batch2-contract.test.ts` 由 `verify_integration.mjs` 的 TMPDIR 隔离兜底，三者未改。
+
+同批处理：三个 release 测试改用 `tempRoot` 助手，已提交 f3f95b8。
+开发机 Node 20.17.0、TMPDIR 指向空目录：`a9-package` 112/112，`v25-prepare-kit` 6 通过 1 跳过，
+`v26-prepare-kit` 91 通过 2 跳过，0 失败，跑完 TMPDIR 残留 0 个文件。
+
+## 2026-10-31 UTC：InstaBox 环境、官方登录与文件流转模拟
+
+负责人要求先配置环境、登录 agent 账号并模拟流程。
+执行代理据此停止推进真实产品工作包，未修复 Linux 基线问题。
+证据层级为开发机；准确范围与资源见 [ENGINEERING_06 §3](tasks/ENGINEERING_06_INSTABOX_ENVIRONMENT.md#3-当前结果)。
+
+执行代理完成四账号工作区身份核对，并将四组凭据存入 Mac 钥匙串。
+两台已获准确删除授权的旧机均已删除。
+执行代理只在 ci 账号配置一台新 Box，固定模板、开发用 Node 和依赖输入。
+Claude Code 的官方 claude.ai 登录与 Codex 的官方 ChatGPT 登录均完成。
+状态命令直接确认登录；凭据文件为 0600，原始登录日志和一次性输入文件已删除。
+
+Box 以 `bd69a4b6…` 为基线生成模拟提交 `b5572f9d…`。
+私有 staging 分支为 `eng06/environment-simulation-r1`。
+执行代理在 Mac fetch 后核对四文件哈希和输入指纹一致，产品文件改动为 0。
+回执为 `outputs/instabox-setup-r1/mac-receipt.json`。
+模拟完成后，执行代理撤销临时 GitHub deploy key `168274459` 并核对登记不存在。
+
+Linux 日常集合整体 FAIL：workspace 的 Windows 路径大小写用例失败，其余六模块测试退出码为 0。
+Box 文档检查 FAIL：干净 staging 缺少历史记录引用的提交对象 `8b032772…`。
+本轮未修复这两项；日常集合的两项既有省略保留。
+执行代理已删除本次失败保留的准确测试沙箱。
+真实模型请求为 0；独立模型审核、Win10 和 Win7 均为 NOT_PERFORMED。
+本轮未提交本地 main，未推送公开 origin，未发布产品。
+
+执行代理于 UTC `07:22:56` 核对 ci 的 `eng06-ci-worker` 仍 running 且 runtime.ready=true。
+机器 ID 为 `m_agqzboircdw7bvgzhpg5pv2zra`。
+该 Box 的自动删除时间为 UTC `2026-10-31T10:50:10.064056Z`；暂停不取消期限。
+登录材料只留在当前 Box；本轮未创建快照或 fork，也未改变自动删除期限。
+
+## 2026-10-31 UTC：czl 母机登录与镜像前置
+
+负责人后继要求先用 czl 一台登录 Codex、agy、Claude 并配置 T3 后端，再保存私有镜像。
+执行代理使用 `eng06-czl-agy`，未从 Mac 或 ci 复制登录材料。
+证据层级为开发机；工具基线 `bd69a4b6…`，版本和准确资源见 [ENGINEERING_06 §3.3](tasks/ENGINEERING_06_INSTABOX_ENVIRONMENT.md#33-czl-母机配置与私有镜像前置)。
+
+执行代理直接核对三项官方登录保留，agy 首次配置完成。
+执行代理安装 T3 用户服务，固定回环监听与四工具 PATH。
+首页 HTTP200、匿名会话未认证、匿名 WebSocket ticket HTTP401。
+执行代理修复钥匙串启动入口；官方守护进程重启后登录库自动解锁。
+原始登录日志与一次性输入均已清理。
+
+T3 Connect 首次设备授权未在十分钟内收到浏览器批准，CLI 超时退出。
+当前 T3 Connect Authorization=missing，私有镜像为 BLOCKED，未发出创建请求。
+母机没有设置自动删除期限；平台空闲暂停和最长运行规则继续生效。
+
+执行代理操作 agy 配置菜单时误发 `config`，触发一次模型生成。
+执行代理未批准其 `ls -la` 请求，已终止会话，专用工作区文件数为 0。
+本阶段提交模型轮次为 1；供应商内部请求数 UNKNOWN。
+此前 ci 模拟阶段的零请求结论保持原时间范围，不用于本阶段。
+本轮未运行产品工作包；独立模型审核、Win10 与 Win7 均为 NOT_PERFORMED。
+
+## 2026-10-31 UTC：czl 私有完整镜像保存完成
+
+负责人回复“好了”后，执行代理直接核对新一轮 T3 官方授权成功。
+设备授权 CLI 退出码为 0；监督入口已删除原始授权日志。
+执行代理重启 T3 用户服务后，核对 Environment link=provisioned、通道可达。
+前节首次设备授权超时与当时 BLOCKED 事实保留；当前状态以后继结果为准。
+证据层级为开发机；工具基线 `bd69a4b6…`。
+
+执行代理创建镜像 `eng06-czl-base-r1-20261031`。
+镜像 ID 为 `sn_agqzcjtcjpqyjt5xxcfn3cdwam`。
+创建时间为 UTC `2026-10-31T08:49:34.279875Z`，后续读取确认 status=ready。
+镜像属于 czl 工作区；接口缺省 visibility 按官方 schema 判为 private。
+完整交付清单为 `outputs/instabox-czl-base-r1/IMAGE_MANIFEST.json`。
+
+执行代理使用在线磁盘快照，保存 root 与 `/data`，不保存内存和运行进程。
+保存前文件同步完成，一次性输入与原始登录日志无残留。
+本次按负责人明确范围保留三项模型登录和 T3 身份，只用于 czl 恢复。
+逻辑磁盘容量为 root 16 GiB、`/data` 20 GiB；镜像实际存储占用 UNKNOWN。
+母机有归属未确认的交互进程；执行代理未停机或终止这些进程。
+
+保存后母机仍 running、runtime.ready=true，且无自动删除期限。
+执行代理核对 T3 和钥匙串服务 active，T3 Connect 可达。
+匿名会话 authenticated=false，匿名 WebSocket ticket HTTP401，监听保持回环。
+快照恢复新实例验证与完整母机重启为 NOT_PERFORMED。
+恢复实例继承同一 T3 身份，不将其与源母机并行用作两个 Worker。
+T3 Antigravity ACP Provider 认证和 Mac 客户端环境列表检查均为 NOT_PERFORMED。
+产品工作包、独立模型审核、Win10 与 Win7 仍为 NOT_PERFORMED。
+本轮未提交 main、推送公开 origin、跨账号共享镜像或发布产品。
+
+## 2026-10-31 UTC：czl 项目环境与单机工作流试跑
+
+负责人要求在 czl 测试工作流，并核对项目开发快照缺口。
+执行代理在母机独立目录补齐项目源码、Node `20.17.0`、九处依赖与 T3 项目登记。
+证据层级为开发机；产品基线 `bd69a4b6…`，环境入口 `b5572f9d…`。
+环境准备与七模块构建 PASS；输入指纹 `af2b312e…` 与 Mac 一致。
+日常集合 FAIL，复现 workspace 路径大小写用例；其余六模块测试退出 0。
+文档检查 FAIL，staging 仍缺历史 Git 对象 `8b032772…`。
+
+长时间 exec 的 API 回执中断；执行代理未重复启动日常测试。
+执行代理回收完整日志及各命令状态，顶层退出码保留 UNKNOWN。
+执行代理确认没有进程使用本次沙箱后，回收证据并删除沙箱；临时目录最终为空。
+五份原始文件逐项 SHA-256 相同，原始失败保留。
+
+Mac 的 Linked environments 关闭，T3 跨机器能力查询返回 `capability_denied`。
+执行代理未修改设置或改用其他入口启动模型；真实模型工作包 BLOCKED。
+ACP 官方工件与独立凭据存在，实际调用为 NOT_VERIFIED。
+执行代理在私有分支提交报告 `3e87a552…`，Mac fetch 并校验报告和指纹。
+产品文件改动为 0；临时 deploy key `168291374` 已撤销，母机临时凭据文件已删除。
+
+母机保持 running，无自动删除期限，T3 和钥匙串服务 active。
+当前项目环境未保存到旧快照，快照恢复、完整重启与独立模型审核为 NOT_PERFORMED。
+完整发布组、完整 `npm test`、Win10 与 Win7 为 NOT_PERFORMED。
+本轮未提交或集成本地 main，未推送公开 origin。
+准确范围和结果见 [ENGINEERING_06 §3.4](tasks/ENGINEERING_06_INSTABOX_ENVIRONMENT.md#34-czl-项目环境与工作流试跑)。
+
+## 2026-10-31 UTC：工作流 r4 设计与 D7 裁决
+
+更正：上节"真实模型工作包 BLOCKED"写过头。T3 Labs 开关只阻断 T3 跨机器派单。
+设计中的 exec 加无头 CLI 路径没有尝试，模型工作包为 NOT_PERFORMED；回执已更正并保留原值。
+负责人选择方案甲：`docs:check` 从 Box 的 G0 移到 Mac 的 G1，记为 D7。
+执行代理写出 r4 设计稿，D8 与 D9 待裁决；r3 保留不动，见 [ENGINEERING_06 §3.5](tasks/ENGINEERING_06_INSTABOX_ENVIRONMENT.md#35-工作流-r4-设计与-d7-裁决)。
+本节无远端变更、模型请求或代码修改；只读核对了四个账号的机器与上限。
+
+## 2026-10-31 UTC：czl 登录快照克隆验证
+
+负责人问：是否只登录一次，之后按需从快照建机。执行代理先核对官方文档，再用 Codex 子进程在 czl 做三次有界验证。
+第一次因母机在运行停止；负责人选择乙，执行代理于 `13:49:57Z` 通过接口暂停母机。
+第二次读结果时遇到传输错误，子进程未对账就删机，结果丢失，结论 UNKNOWN。
+第三次分离了读结果与清理，增加只读重试和“结果未读回则不删机”分支，结论 `snapshotLoginReusable=PASS`。
+
+证据层级为开发机，基线 `bd69a4b6…`，快照 `sn_agqzcjtc…`。两台克隆同时各发 1 次 Codex 与 1 次 Claude Code 最短请求，4 次均返回 `OK`。
+读结果重试 0 次。凭据文件 4 个检查点均无变化，未触发令牌刷新。克隆两台均已删除，账号内只剩暂停的母机。
+模型请求当日累计 6 次（第二次 2 次，第三次 4 次），达到约定上限。
+
+未验证项：刷新轮换下的并发安全 UNKNOWN；母机登录是否受影响 UNKNOWN；快照老化后的行为、长期复用、agy 登录、更大并发均为 NOT_PERFORMED。
+克隆开机即以共享身份启动 T3，必须在建机后立即停用。
+第三次子进程被中断两次，其间无建机与模型请求。
+准确范围和结果见 [ENGINEERING_06 §1.4](tasks/ENGINEERING_06_INSTABOX_ENVIRONMENT.md#14-czl-登录快照克隆验证2026-10-31-后继指示)。
+
+## 2026-10-31 UTC：r4 按 D8 甲改写并处理 D9
+
+登录快照克隆验证 PASS 后，负责人选 D8 甲：每账号一份登录快照，工作包按需建机、用完删机。原稿“每账号一台常驻 Worker”撤回，原稿已备份。
+负责人授权执行代理处理 D9，采用推荐项甲：Linux 上省略 workspace 大小写用例，Mac 的 G1 照常执行；代码改动未开始，须先按 C14 登记范围。
+r4 改动：取消常驻 Worker、常驻只读部署密钥与 `sweep`；读、写部署密钥各为每包短命一把；新增登录快照维护规则（§11.1）和 `BLOCKED_LOGIN` 失败类；建机后立即停 T3；结果未读回不删机。
+刷新轮换下的并发安全、母机登录是否受影响、快照老化后的行为仍为 UNKNOWN，写入 r4 §15。
+r4 仍是设计稿，不授权实现。本节无远端变更、模型请求或代码修改。
+见 [ENGINEERING_06 §3.5](tasks/ENGINEERING_06_INSTABOX_ENVIRONMENT.md#35-工作流-r4-设计与-d7-裁决)。
+
+## 2026-10-31 UTC：workflow r4 的 P0 本地实现
+
+负责人指示“直接登记甲”，执行代理在 ENGINEERING_06 §1.5 登记 P0 本地实现范围后实现。证据层级为开发机，基线 `bd69a4b6…`，所有改动未提交。
+交付：`cloud.py` 扩展、`box-job.sh` 与 `box_job.py`、`wp.py`，以及 D9 在 `scripts/verify_integration.mjs` 中的省略逻辑。
+离线测试 `test_cloud.py` 15 项、`test_box_job.py` 9 项、`test_wp.py` 23 项全部通过，三组测试各重复运行后均无临时目录和进程残留。
+D9 在 Mac 默认文件系统和大小写敏感磁盘映像上各验证一次；映像已卸载并删除。
+测试发现并修复一处缺陷：作业刚启动时 `status` 可能误报进程已死。
+r4 追加 §18，记录与正文的差异。远端验证、Linux 上运行、真实 InstaBox 与 GitHub 调用、模型写入类组合均为 NOT_PERFORMED。
+本节无远端变更、无模型请求；已跟踪文件仅改动 `scripts/verify_integration.mjs`。
+见 [ENGINEERING_06 §1.5](tasks/ENGINEERING_06_INSTABOX_ENVIRONMENT.md#15-workflow-r4-的-p0-本地实现范围2026-10-31-后继指示)。
+
+## 2026-10-31 UTC：workflow r4 的 P0 远端验证
+
+负责人指示“先甲后乙”。执行代理按 [ENGINEERING_06 §1.6](tasks/ENGINEERING_06_INSTABOX_ENVIRONMENT.md#16-workflow-r4-的远端验证先-p0后-p12026-10-31-后继指示) 完成甲的必需项，结果 PASS。
+证据层级为开发机；基线 `b5572f9d…`，提交 `f693c415…`，私有 staging 分支 `box/p0a`。
+本阶段只建 1 台，模型请求为 0。Node `20.17.0` 准备、错误 SHA 拒绝、丢失启动回执恢复均 PASS。
+Linux workspace G0 PASS，慢测试及大小写用例明确省略；Mac G1 八项检查 PASS，包含 workspace。
+执行代理补齐 G1 的任务指定模块并集，离线回归 cloud 17 项、wp 26 项 PASS。
+
+open 曾因启动回执 UNKNOWN 保留机器；执行代理核对作业 MISSING 与密钥撤销后，在原机恢复。
+Mac 首次 G1 和三次收尾读取曾因传输失败停止；失败日志保留，最终直接只读核对取得完整回执。
+异常类型包括 TLS EOF 与 timeout，具体网络根因 UNKNOWN。
+收尾 `outputs/wp-p0-r1/verify-final.json` 确认只剩 suspended 母机、部署密钥为空、Mac 本轮临时目录为空。
+本轮未提交 main、未向公开 origin 推送，未改变旧 Linux FAIL。
+甲必需项与收尾均完成，执行代理按已有授权进入乙的审核模式实现与真实员工调用。
+
+## 2026-10-31 UTC：workflow r4 的 P1 执行包未完成提交
+
+执行代理完成审核模式实现，开发机离线回归 33 项 PASS；新增 Git 元数据目录检查后，审核组 8 项 PASS。
+工具改动未提交，开发机基线 `bd69a4b6…`；`py_compile` PASS，测试临时目录与作业监督进程残留为 0。
+
+执行代理在 czl 从已批准快照建 1 台 p1a，远端基线 `b5572f9d…`，环境指纹 `af2b312e…`。
+Codex `0.160.0` 调用一次，限时 900 秒，实际 33.382 秒。任务结果 FAIL，没有新提交。
+探针文件 106 字节且精确内容 PASS；`git add` 无法创建包内 Git 元数据的 index.lock，错误为 Read-only file system。
+实际启动已含 `workspace-write` 和准确包内 `--add-dir`，仍遭拒绝。同目录在沙箱外可写；具体策略根因 UNKNOWN。
+CLI 退出 0 不等于执行任务 PASS。事件只有一个完整 turn，供应商内部模型请求数 UNKNOWN；usage 原件保留。
+
+首次回收的 `GET me` 传输失败，执行代理重读原作业成功，没有重复模型调用。
+执行代理回收 stdout/stderr、最终报告与探针并逐项校验 SHA-256；凭据元数据无变化。
+后续只做无模型最小诊断；两次 sandbox 探针退出 101、2，未取得有效挂载证据。
+G0、推送、Mac G1 与 Claude Code 审核均为 NOT_PERFORMED；不把审核额度改作第二次执行。
+完整回收后 p1a 工作机已删除；UTC `16:39:32Z` 最终核对只剩 suspended 母机、部署密钥为空、Mac 本轮临时目录为空。
+四个作业临时目录均清理，Box 删除前无 `win7-job-*` 残留。读密钥存在约 46 秒，写密钥未生成。
+Mac 文档检查为 396 份文档、66 份任务书 PASS，差异格式检查 PASS。本地 main 未提交，公开 origin 未推送。
+完整范围与证据见 [ENGINEERING_06 §1.6](tasks/ENGINEERING_06_INSTABOX_ENVIRONMENT.md#16-workflow-r4-的远端验证先-p0后-p12026-10-31-后继指示)。
+
+## 2026-10-31 UTC：后继目标与包装器提交候选准备
+
+负责人要求先跑通工作流，再通过工作流开发暗色主题。
+执行代理完成后继原因分析和本地候选准备，证据层级为开发机，基线 `bd69a4b6…`。
+Codex 官方文档明确 Git 元数据保护；固定 `rust-v0.160.0` 源码存在只读规则和指针解析。
+该分析不替代 p1a 的实际挂载证据。旧 FAIL 与 policyRootCause=UNKNOWN 保留。
+
+执行代理推荐由包装器在员工退出后核对文件并提交，员工保留 `workspace-write`。
+候选仅在 `outputs/wp-p1-r2-preparation/`，尚未接入 `wp.py`。
+真实 Git 第三次检查为 10 项 PASS。前两次夹具错误及日志保留，三次均无新增临时目录残留。
+提交职责变化与后继执行预算尚未裁决；未启动新机器、模型或远端写操作。
+暗色主题尚未进入 Demo 或产品实现。本地 main 未提交，公开 origin 未推送。
+范围与准备事实见 [ENGINEERING_06 §1.7](tasks/ENGINEERING_06_INSTABOX_ENVIRONMENT.md#17-后继目标与本地修复准备2026-10-31)。
+
+## 2026-10-31 UTC：包装器提交与有界重跑已获批准
+
+负责人明确选择包装器提交和有界重跑两项甲。
+范围见 [ENGINEERING_06 §1.8](tasks/ENGINEERING_06_INSTABOX_ENVIRONMENT.md#18-包装器提交与有界重跑2026-10-31-负责人确认)。
+执行代理已接入 `wp.py commit --manifest` 与 `commit_files.py`。
+Codex 保留 workspace-write，只修改、自检和报告；包装器在员工退出后核对准确文件并创建一次提交。
+开发机安装后真实 Git 10 项、工作包工具 37 项检查 PASS，无新增临时目录残留。
+证据为 `outputs/wp-p1-r2/LOCAL_TESTS.json`，绑定 `bd69a4b6…` 和未提交工具字节。
+
+本轮只用 czl，最多串行两台；执行与审核各一次、各 900 秒。
+只推私有 staging 的 `box/p1r2a`；审核包不提交、不推送。
+母机保持 suspended；不提交本地 main，不连接 Win10 或 Win7。
+此前准备段的“尚未裁决”保留为历史，本段记录后继有效批准。
+
+## 2026-11-01 UTC：执行链路通过，独立审核 BLOCKED_LOGIN
+
+执行代理完成本轮执行链路，证据层级为开发机。
+基线 `b5572f9d…`，包装器提交 `b9ecdb7c…`，只推私有 staging 的 `box/p1r2a`。
+Codex `0.160.0` 调用一次，17.559 秒；探针 106 字节准确，没有暂存或提交。
+包装器核对清单后创建单父提交；Linux 提交机制检查 PASS。
+G0 state 为 25 组、391 项测试 PASS；Mac G1 八项检查 PASS。
+
+Claude Code `2.1.288` 审核调用一次，1.756 秒后退出 1。
+原作业明确返回 OAuth 会话过期且刷新失败，状态 BLOCKED_LOGIN。
+独立内容审核 NOT_PERFORMED，P0/P1 数量 UNKNOWN；完整工作流尚未通过。
+事件记录 duration_api_ms=0、modelUsage 为空、token 用量为 0；供应商内部请求数 UNKNOWN。
+执行代理没有重试，没有追加机器或模型调用。
+
+回收驱动漏识别 `authentication_failed`，在 `drive.py:153` 断言失败。
+执行代理回收原作业并单独记录准确认证错误，没有改写原驱动字节或失败日志。
+提前全局收尾检查也曾 FAIL；组合断言各项值未记录，根因 UNKNOWN。
+该检查与 G1 重叠，后续串行检查 PASS；未人工删除目录。
+
+两包凭据元数据均无变化；全部作业日志已回收并核对字节数及 SHA-256。
+审核 HEAD 保持交付提交，工作区干净，新增提交 0；未运行 G0、未申请写密钥、未推送。
+两台工作机均已删除；UTC `00:03:57Z` 最终只剩 suspended 母机，部署密钥和本次临时目录为空。
+本地 main 未提交，公开 origin 未推送；Win10 与 Win7 均为 NOT_PERFORMED。
+两次调用额度已消耗；暗色主题尚未进入 Demo、实现或构建。
+范围与直接证据见 [ENGINEERING_06 §1.8.1](tasks/ENGINEERING_06_INSTABOX_ENVIRONMENT.md#181-有界重跑结果执行-2026-10-31-utc收尾-2026-11-01-utc)。
+
+## 2026-11-01 UTC：负责人批准仅补独立审核
+
+负责人在 Q1 选择甲，批准提案 `536857d6…`。
+执行代理按 [ENGINEERING_06 §1.9](tasks/ENGINEERING_06_INSTABOX_ENVIRONMENT.md#19-仅补独立审核与官方登录恢复2026-11-01-负责人确认) 登记后继范围。
+新任务 p1r3b 最多使用 czl 一台新审核机；官方 Claude 登录一次、900 秒。
+负责人完成网页授权；允许该机 Claude 凭据预期更新，保留前后元数据。
+随后只读审核一次、900 秒，绑定开发机提交 `b9ecdb7c…`。
+不重跑执行或 G0/G1；不唤醒母机，不更新快照，不推送。
+旧 BLOCKED_LOGIN 与旧证据哈希保持；后继结论待直接证据。
+
+## 2026-11-01 UTC：后继独立审核完成，组合工作流开发机 PASS
+
+执行代理完成 p1r3b 官方登录、独立审核及资源回收。
+组合结论绑定 `b9ecdb7c…`；既有执行、包装器提交、G0 与 G1 未重跑。
+Claude Code 独立审核一次为 P0=0、P1=0，耗时 16.659 秒。
+审核额外使用只读 od/head 检查准确对象字节；命令清单偏差已登记，不隐去该限制。
+官方登录一次耗时 139.631 秒；原始私密日志和输入已删除。
+Codex 凭据未变；审核后凭据与登录后新基线一致，工作区干净且零新增提交。
+执行代理核验本轮五个作业日志；连同前轮共 17 个作业逐项核对字节数与 SHA-256。
+准确审核机已删，只剩暂停母机；部署密钥及本次临时目录为空，私有 refs 未变。
+首次 open 的一秒后台时限中断保留；只读对账确认无新机后才继续获批建机。
+本轮一台、一次登录、一次审核额度已消耗；供应商内部请求数 UNKNOWN。
+本地 main 未提交，公开 origin 未推送；Win10 与 Win7 为 NOT_PERFORMED。
+旧 p1a FAIL、p1r2 BLOCKED_LOGIN 和 UNKNOWN 保留。
+工作流探针 PASS 不代表暗色主题已实现；执行代理接着准备 Demo 与后继产品范围。
+准确结果见 [ENGINEERING_06 §1.9.1](tasks/ENGINEERING_06_INSTABOX_ENVIRONMENT.md#191-后继审核与组合工作流结果2026-11-01-utc) 及 `outputs/wp-p1-r3/FINAL_RESULT.json`。
+
+## 2026-11-01 UTC：暗色主题 Demo 完成，后继范围待批准
+
+执行代理完成 [A9-44](tasks/A9_44_WORKBENCH_DARK_THEME.md) 草案。
+开发机 Renderer 基线为 `bd69a4b6…`；工作流产品基线建议为 `b9ecdb7c…`。
+Demo 使用真实 Renderer 加内存夹具，产品源码未修改。
+第二版材料为本机 `outputs/a9-dark-theme-demo-r2/`。
+十场景、浅暗切换与窄窗导航共 12 项检查 PASS，页面错误 0。
+浏览器已关闭，本次系统临时 profile 已删除，无新增残留。
+
+首版恢复记录夹具遮挡常规消息，第二版只在恢复场景加入该记录。
+早期代码场景未触发按需文件列表加载，修复为先选择文件页。
+第二版窄窗首检被代码检查器遮挡，执行代理修正检查顺序。
+首次失败与首版材料保留，产品布局未修改。
+执行代理已在本线程展示截图对照；完整交互 Demo 另附文件。
+负责人确认 NOT_PERFORMED；展示不等于批准。
+
+草案建议手动浅暗切换、默认浅色、按产品数据配置记住选择。
+外观入口和新持久化格式均待裁决，不调用 Provider 设置保存主题。
+新增两台串行机器、各一次执行与审核为预算建议，尚未执行。
+后继提问前，执行代理补充一次审核机官方登录预算建议。
+理由是原快照已有 OAuth 过期直接证据；该次登录限时 900 秒。
+只有负责人批准后才更新该审核机凭据，不更新快照或唤醒母机。
+建议交付本地 `a9-44-dark-theme` 分支，不合入 main。
+这些仍是提案，不借用 §1.9 已耗尽的额度。
+母机与快照边界保持；本轮没有新增远端或模型调用。
+本地 main 未提交，公开 origin 未推送；Win10 与 Win7 为 NOT_PERFORMED。
+
+## 2026-11-01 UTC：A9-44 产品方案与有界执行获批
+
+负责人在 grilling 中对产品方案和预算均选择甲。
+准确批准提案为 `bbe3694a…`，原件与选择保存在本机 `outputs/a9-44-dark-theme-r1/`。
+执行代理登记 A9-44 为 APPROVED_FOR_IMPLEMENTATION，并追加 ADR-0312。
+产品采用第二版 Demo 配色、默认浅色、手动切换与版本化 localStorage。
+实现基线为 `b9ecdb7c…`，证据层级为开发机。
+
+负责人批准 dark1a 执行机与 dark1b 审核机串行存在，最多两台。
+Codex 执行与 Claude Code 独立审核各一次，各限时 900 秒。
+审核前官方 Claude 登录一次，限时 900 秒；仅该次登录允许预期凭据变化。
+包装器仅推私有 `box/dark1a`，交付本地 `a9-44-dark-theme` 分支。
+执行代理不合入 main，不推公开 origin，不唤醒母机或更新快照。
+Win10 与 Win7 为 NOT_PERFORMED；本记录不签产品验证结论。
+
+## 2026-11-01 UTC：A9-44 实现与开发检查完成，独立审核受登录超时阻断
+
+执行代理通过获批工作流完成产品提交 `7e45ee5c…`。
+证据层级为开发机，父提交 `b9ecdb7c…`。
+Codex 一次执行耗时 217.289 秒，定向检查 72 项 PASS。
+员工未暂存、提交或推送，确定性包装器核对四文件后创建提交。
+私有 `box/dark1a` 推送及 Mac 专用引用回收完成。
+
+Box G0 与 Mac G1 八项均 PASS。
+两处 shell 日常集合各 63 个套件、1429 项 PASS、12 项省略。
+执行代理用真实 Electron 22.3.27 完成五次独立启动、17 项 PASS。
+首次浅色、暗色重启、profile 隔离与未知版本回退取得直接证据。
+主题切换未调用 Provider 保存，Renderer 隔离策略未变。
+界面夹具 14 项、主要颜色 14 组 PASS，文本最低 5.59∶1。
+动画结束后的窄窗几何补查 PASS，原动画中截图保留。
+
+首次员工 TMPDIR 只读失败与四次本地驱动失败保留。
+本机启动环境变量及导航前调试等待修正只涉及验证驱动。
+产品提交未随验证驱动修正变化。
+Mac G1 的 Jest 延迟退出提示保留，最终进程退出码为 0。
+完整安装闭包构建、完整用户退出流程与逐帧录像为 NOT_PERFORMED。
+
+审核机 dark1b 官方登录一次，900 秒后超时。
+负责人未在私密输入工具期限内提供授权码。
+执行代理未重启登录，Claude Code 独立审核调用为 0。
+P0/P1 数量 UNKNOWN，整体 BLOCKED，不签 DEVELOPER_VERIFIED。
+本地交付分支尚未建立；准确产品提交与私有分支已保留。
+
+执行代理已核对 11 个回收作业的日志字节数及 SHA-256。
+两台串行工作机均已删除，只剩 suspended 母机。
+凭据元数据未变，登录原始日志和输入已删。
+部署密钥为空，本次进程及系统临时目录无残留。
+本轮两台、一次执行和一次登录额度已消耗，不自动追加。
+本地 main 未提交或合入，公开 origin 未推送。
+Win10 与 Win7 为 NOT_PERFORMED。
+准确结果见 [A9-44 §8](tasks/A9_44_WORKBENCH_DARK_THEME.md#8-产品实现与本轮结果) 与本机 `outputs/a9-44-dark-theme-r1/FINAL_RESULT.json`。
+
+## A9-44 后继仅补独立审核获批
+
+负责人在后继 grilling Q1 选择“甲：批准仅补审核 (Recommended)”。
+范围绑定开发机提交 `7e45ee5c…`，提案 SHA-256 为 `cddaf506…`。
+执行代理登记 [A9-44 §9](tasks/A9_44_WORKBENCH_DARK_THEME.md#9-负责人批准仅补独立审核)。
+新增预算为 czl 审核机一台、官方登录一次、只读审核一次。
+登录与审核各限时 900 秒，不追加重试，不重跑已通过阶段。
+审核完成且 P0/P1 为零后建立本地交付分支。
+失败或发现 P0/P1 时停止并报告，不追加模型调用。
+原失败与 §8 的 BLOCKED 结论保留，新轮审核尚未执行。
+准确确认见本机 `outputs/a9-44-dark-theme-review-r2/OWNER_APPROVAL.json`。
+
+## A9-44 补审核官方登录再次超时，机器已回收
+
+本轮绑定开发机提交 `7e45ee5c…`，整体仍为 BLOCKED。
+负责人已通过 grilling 批准新增预算，批准记录保留。
+执行代理创建一台 dark1r1b，准确基线与输入指纹核对完成。
+官方登录一次于 UTC `03:11:41Z` 启动，900 秒后超时。
+执行代理未收到私密授权码，未重启登录，审核调用为 0。
+独立审核为 NOT_PERFORMED，P0/P1 数量 UNKNOWN。
+
+执行代理核验四个回收作业的日志字节数与 SHA-256 后删除审核机。
+凭据元数据未变，登录原始日志、输入与进程文件已删除。
+审核机工作区干净，准确 HEAD 未变，新增提交为 0。
+最终只剩 suspended 母机，部署密钥与本次 Mac 临时目录为空。
+私有引用未变，本地交付分支未建立，原开发机产品检查结论保留。
+
+首次本机准备命令因工具后台时限为 1 秒而停止。
+执行代理只读核对无新机器或工作包后才重新启动准备命令。
+本轮实际只新建一台机器，该中断没有新增远端建机。
+新增一台机器和一次登录额度已耗用，不自动追加。
+后继先确认负责人能完成网页授权，再裁决必要的新额度。
+本地 main 未提交或合入，公开 origin 未推送。
+Win10 与 Win7 均为 NOT_PERFORMED。
+准确结果见 [A9-44 §9.1](tasks/A9_44_WORKBENCH_DARK_THEME.md#91-补审核登录超时与收尾)。
+
+## A9-44 负责人确认网页授权就绪并批准新一轮补审核
+
+负责人在后继 grilling Q1 选择“甲：现在就绪并批准 (Recommended)”。
+负责人确认现在能完成官方网页授权及私密输入。
+新提案 `96cbc37a…` 绑定开发机提交 `7e45ee5c…`。
+本轮仅新增 dark1r2b 一台、官方登录一次、只读审核一次。
+登录与审核各限时 900 秒，失败或发现 P0/P1 停止并报告。
+执行代理不重跑已通过阶段，不追加重试，不改变旧失败。
+审核完成且 P0/P1 为零后建立本地交付分支。
+准确确认见本机 `outputs/a9-44-dark-theme-review-r3/OWNER_APPROVAL.json`。
+
+### A9-44 新一轮官方登录成功，只读审核已启动
+
+本轮绑定开发机提交 `7e45ee5c…`，工作机 dark1r2b 准备完成。
+负责人通过私密输入卡提供授权码，官方登录取得 PASS。
+Claude 凭据按批准更新，Codex 凭据未变，审核新基线已保存。
+执行代理删除已使用的本机私密输入文件，未记录授权码内容。
+Claude Code 唯一一次只读审核已启动，最长 900 秒。
+审核结果尚未回收，本地交付分支未建立。
+
+### A9-44 独立代码审核零项，本地分支已建立，读取证据缺口待裁决
+
+本轮独立代码审核为 PASS_NO_P0P1，绑定开发机提交 `7e45ee5c…`。
+Claude Code 一次、155.533 秒，P0=0、P1=0。
+执行代理核对 32 次工具调用与五个作业回收日志。
+审核只使用只读工具与允许的独立 Git 命令，未执行产品代码或委派。
+一次搜索正则失败后由成功搜索补足同一 CSS 覆盖。
+一次回收 HTTP 502 后只重试读取，未增加审核调用。
+
+执行代理核对审核后工作区及凭据不变后删除审核机。
+最终只剩 suspended 母机，部署密钥及本次临时目录为空。
+本地 `a9-44-dark-theme` 已建立，指向准确产品提交。
+建立分支前后 main 的 HEAD 与工作区状态相同。
+
+执行代理发现审核未留下原始约束读取证据，记为 NOT_VERIFIED。
+工具调用未显示读取 AGENTS、Win7 约束、当前任务书或 A9 总合同。
+初始化事件也不能证明它们已自动加载。
+任务单未提供本地未入库任务书，也未明确列出 A9 总合同。
+执行代理保留该准备缺口，不改写独立代码审核结论。
+
+整体暂为 BLOCKED，DEVELOPER_VERIFIED 暂缓登记。
+执行代理已准备仅接受本次开发机结果的准确提案，等待负责人裁决。
+该提案不增加机器或模型调用，不替代 Win10 或 Win7 结论。
+原失败和前轮结果保留，本轮未合入或提交 main，未推公开 origin。
+材料见本机 `outputs/a9-44-dark-theme-review-r3/ACCEPTANCE_PROPOSAL.md`。
+
+### A9-44 负责人接受本次开发机结果
+
+负责人在后继 grilling 中选择“甲：接受本次结果 (Recommended)”。
+负责人接受开发机提交 `7e45ee5c…` 的已有运行检查与独立代码审核。
+准确接受提案为 `47d4138e…`，原件与完整哈希保留。
+执行代理据此登记 A9_44_DEVELOPER_VERIFIED。
+本地交付分支 `a9-44-dark-theme` 继续指向该准确提交。
+
+独立代码审核保持 PASS_NO_P0P1，P0=0、P1=0。
+原始约束读取证据继续为 NOT_VERIFIED。
+负责人只接受本次开发机结果，不建立长期豁免。
+执行代理保留任务单准备缺口与后继原始约束读取要求。
+本次未新增机器、官方登录或模型调用，未重跑已通过的产品检查。
+
+准确提问与负责人选择见本机 `outputs/a9-44-dark-theme-review-r3/OWNER_ACCEPTANCE.json`。
+后继组合结果见同目录 `FINAL_RESULT.json`。
+该结果替代裁决前的当前阻断状态，不改写旧 BLOCKED、FAIL 或审核原文。
+执行代理未修改 AGENTS、Accepted ADR 或产品字节。
+本地 main 未提交或合入，公开 origin 未推送。
+Win10、Win7、PR 与发布均为 NOT_PERFORMED。
+
+### A9-44 按后继指令集成本地 main
+
+负责人在执行代理说明下一步为本地集成后，要求“按照工作流推进”。
+执行代理按该指令，将开发机 main 从 `bd69a4b6…` 快速前进至 `7e45ee5c…`。
+本次包含既有工作流两提交和产品一提交，共九文件。
+执行代理未新建提交，未改写历史，暂存区为空。
+
+执行代理核对九文件与准确目标提交逐字节一致。
+原有修改和未跟踪文件内容全部保全。
+三个同名字节相同文件的原件与原权限已保留。
+`prepare-linux.sh` 采用目标 0755 权限，原 0644 副本仍在保留目录。
+首次预检因误判目标权限停止，失败发生在移动文件和合入前。
+该诊断保留，不记为产品失败。
+
+准确授权解释、合入输出与结果见本机 `outputs/a9-44-local-integration-r1/`。
+结果文件为 `INTEGRATION_RESULT.json`，任务记录见 [A9-44 §9.5](tasks/A9_44_WORKBENCH_DARK_THEME.md#95-按负责人后继指令集成本地-main)。
+Phase-Gate 保持 A9_44_DEVELOPER_VERIFIED，读取证据保持 NOT_VERIFIED。
+执行代理未新增机器、登录、模型调用或远端动作，未重跑已通过的产品检查。
+开发包构建尚未执行，Win10 与 Win7 均为 NOT_PERFORMED。
+公开 origin 推送、PR 与发布均为 NOT_PERFORMED。
+
+### A9-44 单次开发构建与新包校验完成
+
+执行代理继续按负责人“按照工作流推进”完成本地开发构建。
+本次为开发机证据，源码 `7e45ee5c…`，新 ZIP 为 `da7cbc74…`。
+包大小 110537425 字节；打包器总调用为 1。
+执行代理重新编译七模块，核对 3257 个清单文件及三个主题文件。
+执行代理从新 ZIP 解包，八个 JavaScript 入口加载 PASS。
+三份原生输入和关键 EXE/binding 哈希匹配原锁，未重建原生模块。
+
+执行代理复用 A9-32 开发 Profile，不改变生产者或锁。
+alpha.2 与 A9-32 是既有开发标签，不承接 WIN7-56 身份。
+包明确 `external_acceptance_eligible=false`，未分配候选号或正式签发。
+准确包、清单与原始结果见本机 `outputs/a9-44-developer-package-r3/`。
+任务记录见 [A9-44 §9.6](tasks/A9_44_WORKBENCH_DARK_THEME.md#96-单次开发构建与新-zip-直接校验)。
+
+第一轮因依赖符号链接被 Git 列为未跟踪，在打包前停止。
+执行代理确认原因，只在临时副本排除已核对目标的九个依赖链接。
+第二轮因执行代理把后台总时限误设为 1 秒，在打包前停止。
+执行代理确认无本轮进程后清理沙箱，原 r1、r2 结果保留。
+第三轮按 900 秒构建上限完成；两次失败轮的打包器调用均为 0。
+
+构建、诊断和解包沙箱均已删除，本次临时目录无残留。
+主工作区原有文件、状态和 HEAD 保持；未新增提交或远端动作。
+新包实际 Electron、Windows 原生运行、Win10 与 Win7 均为 NOT_PERFORMED。
+A9-44 目标运行需要适用 main 例外及目标窗口，当前尚未取得。
+执行代理未连接目标机，不沿用旧版本目标额度。
+
+### A9-44 后继指令：Win7 增量开发级运行已登记
+
+负责人在增量流程说明后要求“下面推动 win7 实际验收”。
+执行代理登记本次 main 范围为 APPROVED_FOR_IMPLEMENTATION，见 A9-44 §9.7。
+准确源码 `7e45ee5c…`，开发包 `da7cbc74…`。
+run 为 `0f817a86-53d5-4f53-918d-8718374119b3`，holder 为 `a944-0f817a86`。
+UTC 窗口为 `2026-11-01T09:24:58.038253Z` 至 `10:24:58.038253Z`。
+本轮含只读准入、传输、运行、回收与收尾；最后 10 分钟不开始新场景。
+真实模型请求预算为 0。
+
+本次仅开放准确包的主题切换、正常关闭及同数据目录重启恢复。
+执行代理复用既有开发通道，不重跑已完成且输入未变的开发机检查。
+只允许本轮新目录，不接管 holder，不清历史，不沿用旧容量例外。
+身份、安全、完整性、凭据或生命周期未知立即停止。
+锁冲突、20 GB 根上限或 50 GB 剩余空间门不满足即停依赖动作。
+结果只标 DEV_CHANNEL，不产生正式 Win7 PASS。
+不包括正式候选、门 A/B、模型调用、Box、提交、推送、PR 或发布。
+
+完整输入和运行记录位于本机 `outputs/win7-dev/a9-44-0f817a86-53d5-4f53-918d-8718374119b3/`。
+登记后执行代理发起一次只读 status；未上传或运行产品。
+
+### A9-44 本次只读准入 BLOCKED，未上传或运行产品
+
+run `0f817a86…` 的一次 status 于 UTC `2026-11-01T09:27:42.489Z` 返回。
+证据层级为 DEV_CHANNEL，源码 `7e45ee5c…`，包 `da7cbc74…`。
+严格主机键及通道绑定的主机、系统、账户与 agent SID 核对完成。
+agent explorer 位于 Session 1；活动未锁定控制台为 NOT_VERIFIED。
+开发根 33,070,009,414 字节，超过本轮 20 GB 上限。
+C: 剩余 854,836,502,528 字节。
+旧锁 holder 为 `a942-751c-7f41ca1c`，active=false。
+查询时根内映像进程 0、A9-DEV 任务 0、解包未知标记 false。
+
+执行代理按容量与锁边界停止依赖动作，未取写锁、上传或启动产品。
+本次真实模型请求、目标写入、任务创建及进程启动均为 0。
+无需本 run 的 stop，不使用 close，未删除历史材料。
+本轮结果为 BLOCKED，不是产品 FAIL；主题链路仍为 NOT_PERFORMED。
+准确结果在本轮目录 `FINAL_RESULT.json`，任务记录见 A9-44 §9.8。
+
+执行代理准备最小处置提案，尚未批准或执行。
+提案仅为本 run 申请 35 GB 根上限及空闲旧 holder 接管。
+不自动延长原窗口，不改通用容量门，不清历史，不追加模型请求。
+文档检查首次因索引锚点不被检查器识别而 FAIL。
+执行代理恢复索引的稳定文件链接，保留原失败日志后复查。
+
+### A9-44 负责人批准准确容量例外与空闲旧锁接管
+
+负责人回复“批准”，准确提案 SHA 为 `c48e59fb…`。
+执行代理保存本轮 `OWNER_APPROVAL.json`，登记 A9-44 §9.9。
+仅 holder `a944-0f817a86` 可在原窗口剩余额度内使用 35 GB 上限。
+仅准许接管已观察到的 inactive 旧 holder，且锁 UTC 不得变化。
+接管前再次核对零根内映像进程、零任务和无解包未知标记。
+执行代理在独占锁内增加相同条件，避免 status 后锁状态变化仍接管。
+通用 20 GB 上限、50 GB 剩余空间门及原截止时间保持。
+产品源码与包字节不变，真实模型请求预算仍为 0。
+
+开发机容量边界检查 PASS。
+本次只读复查因执行代理误设后台总时限为 1 秒而中断。
+该中断发生在取写锁之前，保留为 ORCHESTRATION_TIMEOUT。
+执行代理按足额工具时限再执行只读准入，不延长目标窗口。
+候选外驱动使用准确包的真实 main/preload/Renderer，不选择工作区。
+目标产品运行尚未执行，原 BLOCKED 不改判。
+
+### A9-44 准确包完成 Win7 首轮加载，候选外 preload 断言 FAIL
+
+执行代理在原窗口内完成准确空闲旧锁接管。
+普通 agent 活动控制台直接核验为 Session 1。
+源码 `7e45ee5c…`、包 `da7cbc74…` 的传输和独立目录准备为 PASS。
+ZIP 3258 个文件包含 3257 个清单文件及清单自身。
+运行时副本 79 个文件包含根发布清单，本地初次 78 的计数错误已登记。
+
+首轮证据层级为 Win7 实机 DEV_CHANNEL，产品报告为 FAIL。
+3257 个文件逐项 SHA、SQLite 原生查询及六模块加载为 PASS。
+真实产品 main、工作台和 preload API 已加载。
+五项运行时隔离开关符合预期。
+驱动读取未返回的 preload 字段并与路径比较，隔离断言停止。
+主题切换、截图与重启均未执行，不以退出码 0 改判。
+
+执行代理回收结构化首失败，并核对零进程、零任务和锁空闲。
+解包未知标记为 false，开发根 33.96 GB。
+本轮目录 `recovered/` 和 `FINAL_STATUS_RESULT.json` 保留原字节。
+执行代理按原范围只修候选外取证，使用新 profile 和独立证据。
+新驱动观察真实窗口构造参数，要求准确包内 preload 路径。
+五项实际运行时隔离开关及真实 API 检查保持。
+产品源码与包未变，不追加窗口、模型或历史删除。
+准确诊断见本轮 `DRIVER_DIAGNOSIS_R2.json`，任务见 A9-44 §9.10。
+
+### A9-44 第二轮准备完成后因启动预留门限停止
+
+第二轮准备于 UTC `2026-11-01T10:10:24.553Z` 完成为 PASS。
+本地启动门限为 UTC `10:10:00Z`，为运行、回收及收尾预留时间。
+编排器返回 `INSUFFICIENT_EXECUTION_AND_RECOVERY_TIME`。
+执行代理未调用第二轮 agent-run，未启动第二轮产品或任务。
+主题切换、截图与重启为 NOT_PERFORMED。
+修正驱动的 Win7 运行验证为 NOT_VERIFIED。
+证据层级为 Win7 实机 DEV_CHANNEL，源码与包仍为 `7e45ee5c…`、`da7cbc74…`。
+执行代理不放宽门限补跑，原窗口与最后 10 分钟边界保持。
+准确停止记录见本轮 `SECOND_ATTEMPT_STOP.json`，任务见 A9-44 §9.11。
+
+### A9-44 本次 Win7 增量开发级运行已收尾，组合结果 BLOCKED
+
+执行代理完成原窗口内收尾，绑定源码 `7e45ee5c…`、包 `da7cbc74…`。
+证据层级为 Win7 实机 DEV_CHANNEL，任务见 A9-44 §9.12。
+最终 status 于 UTC `2026-11-01T10:14:26.952Z` 返回。
+零根内映像进程、零 A9-DEV 任务、锁 active=false、解包未知 false。
+开发根为 33,964,386,263 字节，C: 剩余 853,920,481,280 字节。
+本 run 文件与历史材料均保留，未调用 stop 或 close。
+
+已回收文件通过秘密扫描、大小与 SHA 核对。
+未生成截图，视觉检查为 NOT_PERFORMED。
+首轮候选外断言 FAIL 与第二轮时间门停止均保留。
+主题切换、切换后正常退出及同 profile 重启为 NOT_PERFORMED。
+修正驱动的 Win7 运行验证为 NOT_VERIFIED。
+本次不形成产品缺陷结论，不产生正式 Win7 PASS。
+
+执行代理写入 `FINAL_DEV_CHANNEL_RESULT.json`，不覆盖首次 `FINAL_RESULT.json`。
+真实模型请求为 0，无新增构建、审核、提交、推送、PR 或发布。
+原窗口未延长，后续只补未完成链路，但须取得新窗口及适用容量授权。
+准确 source 与包未变时，不重建产品，不重跑 G0/G1 或代码审核。
+
+### A9-44 负责人同意新窗口，只补驱动验证和主题链路
+
+负责人回复“同意”，执行代理登记 A9-44 §9.13。
+新 run 为 `3b726a4b…`，分支 main，源码 `7e45ee5c…`，开发包 `da7cbc74…`。
+窗口为 UTC `2026-11-01T10:20:42.758211Z` 至 `11:20:42.758211Z`。
+最后 10 分钟不开始新场景，真实模型请求上限为 0。
+仅该窗口沿用本会话 holder 的 35 GB 容量例外。
+只接受本 holder 的 inactive 锁，不接管其他 holder。
+执行代理增加准确时间容量分支，产品与锁接管规则未变。
+只补修正驱动的隔离取证与真实主题链路，不重建或重传准确包。
+新范围和输入保存在本机 `outputs/win7-dev/a9-44-3b726a4b-c647-4f33-8bb2-986a6e80295f/`。
+旧 BLOCKED、FAIL 与第二轮未启动结果保留，正式 Win7 验收未执行。
+
+### A9-44 新窗口主题增量完成，Win7 实机 DEV_CHANNEL
+
+执行代理完成 run `3b726a4b…`，准确源码 `7e45ee5c…`、包 `da7cbc74…`。
+证据层级为 Win7 实机 DEV_CHANNEL，28 项诊断检查 PASS。
+controller 10 项、首次 UI 9 项、重启 UI 9 项均 PASS。
+修正后的候选外驱动 SHA 为 `6794306c…`，产品字节未变。
+
+真实包内 main、preload 与工作台完成浅色默认和真实输入切换暗色。
+首次产品正常退出后，新进程从同 profile 恢复暗色。
+真实输入改回浅色，再次正常退出；未强制退出或主动刷写存储。
+五项实际隔离开关、包内 preload 绑定、Renderer 无 Node 与 CSP 均 PASS。
+两次 UI 仅观察到 snapshot 与 diagnostics IPC，无 Provider 保存或模型请求。
+3257 个清单文件逐项 SHA、SQLite 3.43.1 内存查询及六模块加载 PASS。
+
+执行代理回收 11 个结果、截图与日志文件，秘密扫描和 SHA 核验 PASS。
+四张 1104×690 截图已逐张查看，浅色、暗色及重启暗色均正确。
+视觉回执为本轮 `VISUAL_VERIFICATION.json`。
+最终 status 于 UTC `2026-11-01T10:32:40.480Z` 返回。
+零根内映像进程、零 A9-DEV 任务、锁 active=false、解包未知 false。
+开发根 34,476,442,461 字节，C: 剩余 853,396,860,928 字节。
+本窗口提前收尾，不消耗剩余额度新增场景。
+
+执行代理写入本轮 `FINAL_DEV_CHANNEL_RESULT.json`，任务见 A9-44 §9.14。
+新构建、审核、Box、登录、模型请求与 ZIP 重传均为 0。
+未调用 stop 或 close，历史与本 run 文件保留。
+旧 BLOCKED、FAIL 与第二轮未启动结果不改判。
+Win7-Validation 更新为 DEV_CHANNEL，Phase-Gate 保持 A9_44_DEVELOPER_VERIFIED。
+本轮未选择工作区，不包括 Runner、Office、真实模型或逐帧首屏录像。
+正式验收、冻结、门 A/B、提交、公开推送、PR 与发布均未执行。
+
+## 2026-11-02 暗色主题含 InstaBox CI 真实串跑
+
+负责人要求按需重跑加入 CI 的全工作流，范围见 ENGINEERING_06 §1.13。
+执行代理以 `7e45ee5c…` 为基线，Codex 一次执行 150.250 秒。
+包装器按准确清单新增 31 行 CI 文件，提交 `6f4f070c…`，只推私有 `box/theme-ci-r1`。
+新机 Claude 独审一次 115.882 秒，原主题差异与 CI 配置 P0=0、P1=0。
+两份完整任务书成功内嵌；四份检出原件有读取命令引用，原始日志保留。
+新审核机在独审退出后运行 G0：63 组、1429 PASS、12 省略；七模块编译和 shell lint 均 PASS。
+Mac G1 九项 PASS，正确绑定新机 G0，未重复运行 shell 测试。
+
+完整串跑为 BLOCKED，证据层级为开发机。
+CI run `41449669106` 的 head 为 `6f4f070c…`，push 触发成功。
+instabox-medium 等待超过 240 秒仍未分配 runner，执行代理取消本 run。
+GitHub 最终 completed/cancelled，runner_id=0、runner_name 为空、steps=[]。
+CI 主题测试为 NOT_PERFORMED；调度根因为 UNKNOWN，不记成产品测试失败。
+官方 CI 页或已登录的 instabox ci 才提供 waiting/refused 原因；API Key 不能读取该入口。
+现有 gh 身份不能查询 App 安装范围；本机无 instabox CLI，本轮未安装、未新登录、未扩大权限或新增 secrets。
+本地对账有一次只读查询失败，保留原始错误后恢复读取；未重发 CI。
+CI 配置仅在私有工作分支，没有改默认分支或宣称主分支 CI 已落地。
+
+两台工作机均已删除，staging 部署密钥为空，原母机保持 suspended。
+11 个作业的日志大小和 SHA 核对 PASS，作业临时目录均删除；本次 Mac 临时目录无残留。
+快照凭据元数据无变化；两包与本轮回收文件没有 Claude 令牌命中。
+产品源码字节未变，本地只读复核历史 Win7 DEV_CHANNEL 28 项和 11 文件为 PASS。
+该部分明确继承 `7e45ee5c…`、包 `da7cbc74…`、run `3b726a4b…`，未新增构建或产品/Win7 运行。
+准确回执位于本机 `outputs/eng06-theme-ci-r1/`，详细结果见 ENGINEERING_06 §1.13.1。
+本地 main 未新建提交；公开 origin、PR、发布与正式验收未执行。
+
+## 2026-11-07 A9-49 Win7 开发级验证收尾
+
+执行代理完成 [A9-49 §8.2](tasks/A9_49_RUNTIME_FAILURE_HARDENING.md#82-win7-开发级运行结果与收尾) 的已授权窗口。
+Win7 结果为 DEV_CHANNEL PASS；正式 Win7 验收为 NOT_PERFORMED。
+绑定 main `ef6a6922…`、开发 ZIP `dbc4f55d…`、manifest `186aa32f…`，包仍为 dirty 开发诊断包。
+负责人已允许沿用 inactive holder `a946lanrx`，并要求保留旧实例。
+执行代理未重建或修改产品，未使用 --steal、stop 或 close。
+
+run `bcd96c89…` 在 DCCS-CHAIZL-PC / build 7601 的普通 agent / Session 1 执行。
+Electron 22.3.27 / Node 16.17.1 下，17 组 HTTP 与 17 项真实产品 IPC 检查 PASS。
+正常入口及三种受限状态均退出码 0；SQLite integrity=ok、活动 task/turn/run 总数 0。
+回环请求 25 次、外部模型 0 次、连接 0，临时沙箱已删除。
+UTC 09:47:48 后检确认本轮无进程或任务残留，旧 alpha.5 四进程集合不变，锁 inactive。
+开发根 16,155,407,376 字节，C: 剩余 864,567,074,816 字节，均满足预算。
+
+上下文中断后，执行代理恢复读取已完成的结果，没有重复上传或运行用例。
+执行代理复算 13 份回收文件、5 份材料及 212 个实际加载模块的哈希。
+其他 14 个既有 dirty 文件与运行前哈希一致，历史失败保留。
+收尾期间 ENGINEERING_06 新增角色机登录授权记录，执行代理保留该并发文档变更。
+原始结果位于本机 `outputs/a9-49-win7-dev-20261107/TARGET_RUN.json`，
+产品原件为 `outputs/win7-dev/a9-49-bcd96c89/RESULT.json`，本地复核为同轮 `RESULT_REVIEW.json`。
+Win7-Validation 更新为 DEV_CHANNEL，Phase-Gate 保持 A9_49_DEVELOPER_VERIFIED。
+本轮仅使用一个 run，窗口提前收尾，第二个 run 未使用。
+同包 Win10、外部模型、正式候选、门 A/B、提交、公开推送与发布均未执行。
+
 ## 2026-11-08 — alpha.6 / WIN7-59 限定接受与公开
 
 负责人按 ADR-0318 接受准确源码 484baff4… / ZIP 241af4ca… 的既有 Win7 DEV_CHANNEL 证据及已知限制，替代本版 Gate A/B。
 旧基线加全部后继差异独审 P0/P1 零项，旧 P2 两项关闭。14 文件只读冻结保持；恢复未知 PID 负向用例及最终包 Windows 可靠性组的覆盖限制保留。
 标签 `v0.3.0-alpha.6-win7-59` 指向准确源码。UTC `2026-11-08T01:44:23Z` 公开 release `437966857`；4 个附件草稿及公开后回下载大小/SHA/GitHub digest 一致。无重建、新目标运行、模型请求或删除。完整证据在 `outputs/alpha6-r1/publish/`。
+
+## 2026-11-08 — 外置盘批次 archive-20261108-space-r2 与本机原件删除
+
+本条是开发机空间回收，不新增 Win7 证据，不改变任何签发范围。
+另一执行代理已把 5 个候选加密复制到“相机盘”批次 `archive-20261108-space-r2`（manifest `7c1bb00a…`），
+并以批内恢复脚本完成 5 个候选的恢复演练，结果均为 `RESTORE_SHA256_PASS`。
+删除前，执行代理复核了条目数：5 个候选的文件、符号链接、FIFO 数与本机原件一致。
+`a9-44` 发布准备目录有 22 个文件修改时间晚于归档。它们是与主仓库硬链接共享的 git 对象，SHA-256 与清单一致。
+逐文件哈希与原件的独立对照为 NOT_PERFORMED。
+负责人确认密钥只在本机、归档只在外置盘，后续工作无需本机备份，并批准方案甲。
+执行代理分 4 批删除 27 项原件：WIN7-55 证据账本、`.acceptance/a9-39`、`.acceptance/engineering-win10-entry-r1`、
+`outputs/a9-44-release-preparation-r1` 与 `outputs/` 下 23 个旧报告。无残留。
+df 可用空间增加 4,465,082,368 字节，台账为 `.acceptance/maintenance/cleanup-20261108-space-r2/DELETION_LEDGER.json`。
+同步更新 EXTERNAL_ARCHIVE.json（`index_only_batches`）、EXTERNAL_ARCHIVE_RESTORE.md、
+EVIDENCE_ARCHIVE_RETRIEVAL.md、STATUS.md 与 ENGINEERING_03 的保留位置表述。DECISIONS 正文未改。
+原始报告中“修复了 3 个工程问题”与过程描述不一致，准确清单为 UNKNOWN；盘上 README 的文件系统与卷 UUID 有误，未改写。
 
 ## 2026-11-09 — A9-54/A9-55 开发机交付与本地整合
 
@@ -7978,6 +8818,33 @@ A9-54 尖端 `0e782023…`，A9-55 最终尖端 `933c0d50…`。负责人批准�
 
 Win7只读前检直接取得开发根21265475529字节、C:剩余857399635968字节；holder a946lanrx inactive、进程/任务0。默认20GB已超，因此写入BLOCKED。A9-55§9.5提出一次60分钟、该run23GB上限及普通agent系统Documents新测试目录例外，待负责人确认。不删除历史材料，不借历史例外，不签门A/B或新发布。
 
+
+## 2026-11-10 — A9-57 Win7 开发级验证与关闭窗口
+
+源码 `9c2f45b3…` / ZIP `a2309321…` / manifest `a1c251fb…`，最终 run `b61c096d…` 为 `DEV_CHANNEL` PASS。普通 agent/Session1/Medium 经真实包内 main/preload/IPC/Runtime/SQLite 完成八组只读浏览行为和一次重启零重放，SQLite完整且活动task/turn/run与锁均0。两次尝试共15次回环、外部模型0；11份回收文件大小/SHA核对通过。首轮漏blocked终态的夹具FAIL、首次SFTP超时及原始回执保留；同字节ZIP在前缀SHA核验后续传完成。
+
+UTC `08:55:33.548Z` 提前关闭60分钟窗口，实际44.090分钟。本轮两个run进程/任务0、锁inactive、无解包未知；四个旧A9-55进程保持。开发根22993068763字节，低于本窗口23GB。目标新ZIP缓存与完整产品树保留，旧窗口未替换。稳定800像素浏览布局NOT_VERIFIED；原生125%DPI、同包Win10、正式门A/B、公开推送与发布NOT_PERFORMED。详情见 [A9-57 §6.7](tasks/A9_57_BROWSE_WHILE_RUNNING.md#67-第二次尝试完成与窗口关闭) 与本机 `outputs/a9-57-win7-dev-r2/RESULT.json`。
+
+## A9-58 完整历史搜索与任务交付卡片开发交付（2026-11-10 UTC）
+
+准确私有提交 `99e1728d…` 完成执行包、独立 Claude 审查、Shell/State G0 与 Mac G1；staging 分支已推送，临时机和部署密钥已回收。Mac Electron22 真实入口 9 项 PASS，外部模型请求 0，SQLite 完整性与活动生命周期清理 PASS。审查未发现 P0，4 项迁移兼容性/性能事项保留 UNKNOWN。
+本地 main 未新建提交，既有 dirty/untracked 保留。Win7、同包 Win10、正式候选、门 A/B、公开 origin 推送与发布 `NOT_PERFORMED`；快照未更新。首轮 UI 夹具失败与修复后 PASS 均保留在 `outputs/a9-58-wp/ui-r1`、`ui-r2`、`ui-r3`。
+
+
+## 2026-11-11 UTC — A9-59 alpha.8 Win7与真实DeepSeek开发验证
+
+绑定d5b99b62…/ZIP36491b75…/run29401f88…。普通agent/Session1/Medium，14项产品与4项DeepSeek检查取得DEV_CHANNEL PASS；真实消息1011ms，外部2次/回环7次、工具0，三份原配置SHA未变。准确收尾、旧包4进程保留与未执行范围见[A9-59 §5.2](tasks/A9_59_ALPHA8_CLOSEOUT.md#52-当前-alpha8-win7-开发验证完成)。不改旧FAIL/UNKNOWN，不签正式门或发布。
+
 ## 2026-11-13 UTC — A9-64 独立复审后本地收口
 
 A9-64复审绑定e7905f53…建议合入，原异步归属P1关闭且P2文档冲突已协调。执行代理合并到本地main，提交8069a5ba837b9173fa078f0852d5df29b26177ac，原基线13cbc55b…与A9-65保留。直接开发机七模块构建/静态门、Workspace500/500、Core924/924、Shell五文件879/879、双运行时消费者各12/12 PASS。原FAIL及同步TOCTOU/ABA限制保留；复审竞态、红绿和性能按同字节标INHERITED_EVIDENCE。ADR-0330及任务书末节登记边界。Win7、Win10、完整GUI、打包、门A/B、推送发布NOT_PERFORMED；最终证据outputs/a9-64-main-closeout-20261113/RESULT_FINAL.json。
+
+## 2026-11-13 UTC — A9-66/A9-67 云端工作包与本地工作区交付
+
+两批绑定私有提交 aa3f68ac3b322d489d6fa30f4e3cb17b0979678f。开发使用 Box Codex，新独审按负责人要求使用 Claude Code，实际响应 claude-opus-5-5，effort UNKNOWN。旧 7751df50、9de03c57 的审核 FAIL 保留。新独审无新增 P0/P1，恢复目录、目录 chmod、checkpoint 替换反例均已关闭。新增非阻断 P2 保留：会话内删除恢复区后需重新打开工作区；不自动重绑旧恢复身份。
+
+新 Linux 审核机 Workspace 592 PASS / 1 D9，Core924、State435、Gateway332 通过。首轮 Shell 的 Office 两项超时保留 FAIL，根因 UNKNOWN。隔离文件 5/5 通过；不改源码、期限或断言，新完整 Shell 1744/1744 通过。最终 G0 按增量规范继承同源码已通过模块并采用新 Shell 运行，Mac G1 PASS。原证据不改判。
+
+33 文件已整合到本地 main 工作区，未提交；HEAD 仍为 44ddaf90…，原 dirty/untracked 与 Runtime 45s/30s 保留。当前七模块编译/静态检查、20 项 Runtime 消费者通过。Electron22/Node16 当前编译产物反例与真实 Runtime/Core/State/受控 Provider 链路通过，700 轮历史恢复得到 40 条 oracle 消息，同步全量历史调用 0，准备阶段取消不多发请求。ADR-0331、两份任务书与索引更新。
+
+临时机与短命密钥按原工作包流程回收，凭据元数据未漂移的记录保留；失败认证包的未知字段不补写为 0。单文件同步后态、元数据规模、非原子文件系统/SQLite 边界保留。Win7/Win10、完整 GUI、Windows ACL、打包、冻结、门 A/B、公开推送和发布均 NOT_PERFORMED。证据入口 outputs/a9-66-67-instabox/FINAL_RESULT.json。

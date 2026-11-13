@@ -70,6 +70,8 @@ class FakeApi:
         self.create_transport_error = False
         self.created = 0
         self.job_starts = []
+        self.missing_originals = set()
+        self.originals_checked = []
 
     def machine_record(self, mid):
         m = self.machines[mid]
@@ -127,6 +129,9 @@ class FakeApi:
                 return self.ok(json.dumps(self.t3))
             if script == wp.CREDENTIAL_META:
                 return self.ok(json.dumps(self.creds))
+            if script == wp.ORIGINALS_PRESENT:
+                self.originals_checked.append(argv[4:])
+                return self.ok(json.dumps({name: name not in self.missing_originals for name in argv[4:]}))
         if argv[:2] == ["bash", "-c"]:
             if script == wp.GENERATE_KEY:
                 if self.generate_failures > 0:
@@ -249,6 +254,27 @@ class OpenTests(WorkPackageBase):
         self.assertEqual(self.api.deleted, ["m_test1"])
         self.assertEqual(self.package.load()["state"], "ABORTED")
 
+    def test_stop_t3_script_treats_a_missing_t3_unit_as_stopped(self):
+        # The identity assertion only holds on the machine; the rest of the script runs here with stub commands.
+        script = "\n".join(line for line in wp.STOP_T3.splitlines() if not line.startswith("assert "))
+        stubs = self.root / "stubs"
+        stubs.mkdir()
+        log = self.root / "systemctl.log"
+        (stubs / "systemctl").write_text(
+            '#!/bin/bash\necho "$*" >> "%s"\n'
+            'case "$*" in *LoadState*) echo "$LOAD";; *is-active*) echo "$ACTIVE";; esac\n' % log, encoding="utf-8")
+        (stubs / "pgrep").write_text("#!/bin/bash\nexit 1\n", encoding="utf-8")
+        for stub in stubs.iterdir():
+            stub.chmod(0o755)
+        for load, active, stopped in (("not-found", "inactive", False), ("loaded", "active", True)):
+            log.write_text("")
+            environment = dict(os.environ, PATH=str(stubs) + os.pathsep + os.environ["PATH"], LOAD=load, ACTIVE=active)
+            done = subprocess.run([sys.executable, "-c", script], env=environment, capture_output=True, text=True,
+                                  check=True, timeout=20)
+            out = json.loads(done.stdout)
+            self.assertEqual((out["t3Installed"], out["stopExitCode"], out["cloudflaredExists"]), (stopped, 0, False))
+            self.assertEqual(any(line.startswith("--user stop") for line in log.read_text().splitlines()), stopped)
+
     def test_low_disk_aborts_before_any_key_exists(self):
         self.api.available = 1024 ** 3
         with self.assertRaisesRegex(wp.WpError, "DISK_TOO_SMALL"):
@@ -306,6 +332,23 @@ class CloseTests(WorkPackageBase):
         state = self.package.load()
         self.assertEqual((state["state"], state["pushedCommit"], state["machineDeleted"]), ("PUSHED", HEAD, True))
         self.assertIsNotNone(state["keys"]["write"]["revokedAt"])
+
+    def test_deferred_g0_skips_the_execution_g0_and_still_pushes(self):
+        runner = self.prepared()
+        result = runner.close(defer_g0=True)
+        self.assertEqual((result["state"], result["g0"]), ("PUSHED", "DEFERRED"))
+        self.assertNotIn("g0-t1", [args[args.index("--job-id") + 1] for args in self.api.job_starts])
+        self.assertEqual(self.package.load()["g0"], {"result": "DEFERRED", "location": "REVIEW_MACHINE"})
+        self.assertEqual(self.api.deleted, ["m_test1"])
+
+    def test_g0_flag_is_refused_for_an_execution_package(self):
+        runner = self.open_package()
+        sheet = self.root / "TASK.md"
+        sheet.write_text("task")
+        with self.assertRaisesRegex(wp.WpError, "G0_FLAG_IS_FOR_REVIEW_PACKAGES"):
+            runner.run("codex", sheet, g0=True)
+        self.assertEqual(self.package.state["state"], "OPENED")
+        runner.abort("test")
 
     def test_unreadable_result_keeps_the_machine(self):
         runner = self.prepared()
@@ -442,6 +485,133 @@ class ReviewTests(WorkPackageBase):
             argv = done.stdout.splitlines()
             self.assertNotIn("--add-dir", argv)
             self.assertEqual(argv[argv.index("--sandbox") + 1], mode)
+
+    def local_repo(self, files):
+        repo = self.root / "repo"
+        for name, text in files.items():
+            (repo / name).parent.mkdir(parents=True, exist_ok=True)
+            (repo / name).write_text(text, encoding="utf-8")
+        return repo
+
+    def uploaded_sheet(self):
+        sheets = [data for route, data in self.api.uploads.items() if route.split("&")[0].endswith("TASK.md")]
+        self.assertEqual(len(sheets), 1)
+        return sheets[0].decode("utf-8")
+
+    def test_task_sheet_embeds_local_originals_and_lists_required_reads(self):
+        runner = self.open_package()
+        runner.repo_root = self.local_repo({"docs/tasks/LOCAL.md": "# Local task\nscope line\n",
+                                            "docs/DECISIONS.md": "one\ntwo\nthree\nfour\n"})
+        self.api.work = {"head": BASE, "dirty": False, "commits": 0}
+        sheet = self.root / "TASK.md"
+        sheet.write_text("Review the commit.", encoding="utf-8")
+        runner.run("claude", sheet, mode="review", timeout=300, embeds=["docs/tasks/LOCAL.md", "docs/DECISIONS.md:2-3"],
+                   require_read=["docs/WIN7_CONSTRAINTS.md", "AGENTS.md"])
+        text = self.uploaded_sheet()
+        self.assertTrue(text.startswith("Review the commit.\n"))
+        self.assertIn("- `AGENTS.md`\n- `docs/WIN7_CONSTRAINTS.md`\n", text)
+        self.assertIn("# Local task\nscope line\n````", text)
+        self.assertIn("two\nthree\n````", text)
+        self.assertNotIn("four", text)
+        self.assertIn("ORIGINALS_READ:", text)
+        self.assertEqual(self.api.originals_checked, [["AGENTS.md", "docs/WIN7_CONSTRAINTS.md"]])
+        state = self.package.state
+        self.assertEqual(state["requiredOriginals"], ["AGENTS.md", "docs/WIN7_CONSTRAINTS.md"])
+        self.assertEqual([(e["path"], e["lines"]) for e in state["embedded"]],
+                         [("docs/tasks/LOCAL.md", [1, 2]), ("docs/DECISIONS.md", [2, 3])])
+        self.assertEqual(state["taskSheetSha256"], wp.digest(text.encode("utf-8")))
+        runner.wait_job("emp-t1", 30, interval=0.05)
+        runner.close()
+
+    def test_required_original_missing_from_the_checkout_stops_before_upload(self):
+        runner = self.open_package()
+        self.api.missing_originals = {"docs/tasks/LOCAL.md"}
+        sheet = self.root / "TASK.md"
+        sheet.write_text("task", encoding="utf-8")
+        with self.assertRaisesRegex(wp.WpError, "REQUIRED_ORIGINAL_NOT_IN_CHECKOUT_EMBED_IT:docs/tasks/LOCAL.md"):
+            runner.run("codex", sheet, require_read=["docs/tasks/LOCAL.md"])
+        self.assertFalse(any(route.split("&")[0].endswith("TASK.md") for route in self.api.uploads))
+        self.assertEqual(self.package.state["state"], "OPENED")
+        runner.abort("test")
+
+    def test_unsafe_embeds_are_refused(self):
+        runner = self.open_package()
+        runner.repo_root = self.local_repo({"docs/a.md": "x\n", "docs/key.md": "k = ibk_" + "a" * 32 + "\n"})
+        (self.root / "outside.md").write_text("outside", encoding="utf-8")
+        sheet = self.root / "TASK.md"
+        sheet.write_text("task", encoding="utf-8")
+        for embed, message in (("docs/key.md", "SECRET_IN_TASK_SHEET"), ("../outside.md", "EMBED_NOT_A_REPOSITORY_FILE"),
+                               ("docs/a.md:1-5", "EMBED_RANGE_OUTSIDE_FILE"), ("docs/a.md:3-1", "EMBED_RANGE_OUTSIDE_FILE")):
+            with self.assertRaisesRegex(wp.WpError, message):
+                runner.run("codex", sheet, embeds=[embed])
+        with self.assertRaisesRegex(wp.WpError, "INVALID_REQUIRED_ORIGINAL"):
+            runner.run("codex", sheet, require_read=["../AGENTS.md"])
+        self.assertEqual(self.package.state["state"], "OPENED")
+        runner.abort("test")
+
+    def test_review_records_which_required_originals_the_tools_referenced(self):
+        events = [{"type": "assistant", "message": {"content": [
+                      {"type": "tool_use", "name": "Read", "input": {"file_path": "/data/home/wp/t1/work/AGENTS.md"}}]}},
+                  {"type": "result", "result": "P0=0, P1=0\nORIGINALS_READ: AGENTS.md"}]
+        self.api.job_code["emp"] = "import json\nfor e in %r: print(json.dumps(e))" % events
+        runner = self.open_package()
+        self.api.work = {"head": BASE, "dirty": False, "commits": 0}
+        sheet = self.root / "TASK.md"
+        sheet.write_text("Review.", encoding="utf-8")
+        runner.run("claude", sheet, mode="review", timeout=300, require_read=["docs/WIN7_CONSTRAINTS.md"])
+        runner.wait_job("emp-t1", 30, interval=0.05)
+        self.assertEqual(runner.close()["state"], "CLOSED")
+        evidence = self.package.state["originalsReadEvidence"]
+        self.assertEqual((evidence["result"], evidence["declared"]), ("NOT_VERIFIED", "AGENTS.md"))
+        self.assertEqual(evidence["referenced"], {"AGENTS.md": True, "docs/WIN7_CONSTRAINTS.md": False})
+
+    def test_codex_command_records_count_as_references(self):
+        events = [{"type": "item.completed", "item": {"type": "command_execution",
+                                                      "command": "/bin/bash -lc 'cat AGENTS.md docs/WIN7_CONSTRAINTS.md'"}},
+                  {"type": "item.completed", "item": {"type": "agent_message",
+                                                      "text": "ORIGINALS_READ: AGENTS.md, docs/WIN7_CONSTRAINTS.md"}}]
+        self.api.job_code["emp"] = "import json\nfor e in %r: print(json.dumps(e))" % events
+        runner = self.open_package()
+        self.api.work = {"head": BASE, "dirty": False, "commits": 0}
+        sheet = self.root / "TASK.md"
+        sheet.write_text("Review.", encoding="utf-8")
+        runner.run("codex", sheet, mode="review", timeout=300, require_read=["docs/WIN7_CONSTRAINTS.md"])
+        runner.wait_job("emp-t1", 30, interval=0.05)
+        runner.close()
+        evidence = self.package.state["originalsReadEvidence"]
+        self.assertEqual(evidence["result"], "REFERENCED")
+        self.assertEqual(evidence["declared"], "AGENTS.md, docs/WIN7_CONSTRAINTS.md")
+
+    def test_review_g0_runs_on_the_fresh_review_machine_after_the_reviewer(self):
+        runner = self.open_package()
+        self.api.work = {"head": BASE, "dirty": False, "commits": 0}
+        sheet = self.root / "TASK.md"
+        sheet.write_text("Review.", encoding="utf-8")
+        runner.run("claude", sheet, ["Read"], ["shell"], mode="review", timeout=300, g0=True)
+        runner.wait_job("emp-t1", 30, interval=0.05)
+        result = runner.close()
+        self.assertEqual((result["state"], result["g0"]), ("CLOSED", "PASS"))
+        jobs = [args[args.index("--job-id") + 1] for args in self.api.job_starts]
+        self.assertEqual(jobs[-2:], ["emp-t1", "g0-t1"])
+        self.assertIn("shell", self.api.job_starts[-1])
+        state = self.package.load()
+        self.assertEqual((state["g0"]["location"], state["workAfterG0"]),
+                         ("REVIEW_MACHINE", {"head": BASE, "dirty": False, "commits": 0}))
+        self.assertTrue((self.package.directory / "collected/g0-t1/stdout.log").exists())
+        self.assertEqual([c for c in self.github.calls if c[1] == "write"], [])
+        self.assertEqual(self.api.deleted, ["m_test1"])
+
+    def test_review_g0_is_skipped_when_the_reviewer_changed_the_repository(self):
+        runner = self.open_package()
+        self.api.work = {"head": HEAD, "dirty": False, "commits": 1}
+        sheet = self.root / "TASK.md"
+        sheet.write_text("Review.", encoding="utf-8")
+        runner.run("codex", sheet, mode="review", timeout=300, g0=True)
+        runner.wait_job("emp-t1", 30, interval=0.05)
+        with self.assertRaisesRegex(wp.WpError, "REVIEW_WORKSPACE_CHANGED_MACHINE_KEPT"):
+            runner.close()
+        self.assertEqual(self.package.state["g0"]["result"], "NOT_PERFORMED")
+        self.assertNotIn("g0-t1", [args[args.index("--job-id") + 1] for args in self.api.job_starts])
 
     TOKEN = b"sk-ant-oat01-" + b"T" * 48
 
@@ -639,7 +809,15 @@ class ReceiveTests(unittest.TestCase):
         done = subprocess.run(argv, cwd=str(cwd), capture_output=True, text=True, timeout=timeout)
         return done
 
-    def receive(self, tip, **state):
+    def review_state(self, tip, **changes):
+        state = {"task": "r1", "mode": "review", "base": tip, "state": "CLOSED", "machineDeleted": True,
+                 "g0": {"result": "PASS", "location": "REVIEW_MACHINE"},
+                 "workAfterG0": {"head": tip, "dirty": False, "commits": 0},
+                 "workerFingerprint": fingerprint.input_fingerprint(self.repo)["sha256"]}
+        state.update(changes)
+        return state
+
+    def receive(self, tip, g0_from=None, **state):
         package = wp.Package(self.root / "out", "t1")
         package.create()
         package.state = {"task": "t1", "account": "czl", "machineName": "wp-t1", "snapshotId": "sn_x", "base": self.base,
@@ -650,7 +828,36 @@ class ReceiveTests(unittest.TestCase):
         package.save()
         runner = wp.Wp(None, None, package, "git@example.invalid:x.git", run_local=self.local, repo_root=self.repo,
                        mac_remote=str(self.stage))
-        return runner.receive(), package
+        return runner.receive(g0_from), package
+
+    def test_deferred_g0_without_a_review_package_is_refused(self):
+        tip = self.employee_commit({"src/workspace/a.ts": "changed\n"})
+        with self.assertRaisesRegex(wp.WpError, "G0_DEFERRED_REQUIRES_REVIEW_G0"):
+            self.receive(tip, g0={"result": "DEFERRED", "location": "REVIEW_MACHINE"})
+        self.assertEqual(self.calls, [])
+
+    def test_review_g0_replaces_module_reruns_except_platform_modules(self):
+        tip = self.employee_commit({"src/workspace/a.ts": "changed\n", "src/shell/b.ts": "new\n"})
+        receipt, package = self.receive(tip, self.review_state(tip), allowedPaths=["src/"],
+                                        g0={"result": "DEFERRED", "location": "REVIEW_MACHINE"})
+        self.assertEqual(receipt["overall"], "PASS", receipt)
+        self.assertEqual(receipt["checks"]["g0FreshReviewMachine"]["result"], "PASS")
+        self.assertEqual((receipt["g0"], receipt["g0Location"]), ("PASS", "REVIEW_MACHINE:r1"))
+        self.assertEqual([c[-2:] for c in self.calls[1:]], [["--module", "workspace"]])
+        self.assertEqual(receipt["checks"]["moduleTests"]["coveredByFreshReviewG0"], ["shell"])
+        self.assertEqual(package.state["state"], "CLOSED")
+
+    def test_review_g0_on_another_commit_or_failing_does_not_count(self):
+        tip = self.employee_commit({"src/workspace/a.ts": "changed\n"})
+        for changes in ({"base": "d" * 40}, {"g0": {"result": "FAIL", "location": "REVIEW_MACHINE"}},
+                        {"machineDeleted": False}, {"workAfterG0": {"head": tip, "dirty": True, "commits": 0}},
+                        {"workerFingerprint": "0" * 64}):
+            shutil.rmtree(self.root / "out", ignore_errors=True)
+            self.calls = []
+            receipt, _ = self.receive(tip, self.review_state(tip, **changes),
+                                      g0={"result": "DEFERRED", "location": "REVIEW_MACHINE"})
+            self.assertEqual(receipt["checks"]["g0FreshReviewMachine"]["result"], "FAIL", changes)
+            self.assertEqual((receipt["overall"], self.calls), ("FAIL", []))
 
     def test_clean_package_passes_every_check_and_leaves_no_worktree(self):
         tip = self.employee_commit({"src/workspace/a.ts": "changed\n"})

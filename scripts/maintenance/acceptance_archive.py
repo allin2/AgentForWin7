@@ -126,6 +126,8 @@ def run(args):
         raise ArchiveError('UNKNOWN_OR_DUPLICATE_CANDIDATE')
     downloads = child(base, 'out')
     for asset in [catalog['shared_objects'], selected[0]['archive']]:
+        if asset is None:
+            continue
         path = child(downloads, asset['asset'])
         if path.stat().st_size != asset['bytes'] or sha256(path) != asset['sha256']:
             raise ArchiveError('ARCHIVE_ASSET_SHA256_MISMATCH')
@@ -156,7 +158,7 @@ def run(args):
     report = read_json(report_path)
     if (report.get('status') != 'DECRYPT_EXTRACT_RECONSTRUCT_SHA256_PASS'
             or report.get('asset_sha256') != selected[0]['archive']['sha256']
-            or report.get('shared_asset_sha256') != catalog['shared_objects']['sha256']):
+            or report.get('shared_asset_sha256') != (catalog['shared_objects'] or {}).get('sha256')):
         raise ArchiveError('RESTORE_REPORT_BINDING_MISMATCH')
     return {'status': 'PASS', 'restore_report': str(report_path),
             'restored_directory': str(output / 'restored' / args.candidate),

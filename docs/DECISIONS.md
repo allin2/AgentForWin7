@@ -5396,6 +5396,25 @@ Claude P2-1、P2-3 已补测试，P2-4 已修复；P2-2 按裁决保留为 K7。
 
 - 签发记录 SHA-256：`00b59230b474c8d7d2044d059d312c8146a96932dfe560815ebc5b33665ac274`。旧门 A/B 未执行事实保留，本次候选外接受决定替代对应流程，不回填旧运行标签。
 
+## ADR-0312 A9-44 手动主题与版本化外观存储
+
+- 状态：Accepted（负责人在 grilling Q1 选择“甲：采用方案（推荐）”）。
+- 范围：正式 A9 工作台，开发基线 `b9ecdb7c…`；准确提案 `bbe3694a…`，负责人裁决见 `outputs/a9-44-dark-theme-r1/OWNER_APPROVAL.json`。
+- 决定：默认浅色；设置抽屉增加独立外观区，提供浅色、暗色手动切换。暗色采用第二版 Demo 的石墨灰底与青绿色操作色。跟随系统不纳入本轮。
+- 数据格式：按既有产品数据配置，在隔离 Renderer 的 localStorage 保存 `{schemaVersion:1, theme:"light"|"dark"}`。只接受版本 1 与两种枚举。缺失、损坏、未知版本或读取异常回退浅色；写入失败保留本次切换并提示无法记住选择。
+- 启动：首次工作台内容绘制前由外部脚本读取选择；不放宽 CSP，不新增文件 IPC。文件源持久化或数据目录隔离不能满足时报告，不自行改存储架构。
+- 边界：主题切换不调用 Provider setSettings，不重连模型，不读取凭据。Renderer 隔离、权限、安全合同和冻结候选保持原约束。
+- 验证：执行代理按 A9-44 §4 检查启动、重启、异常存储、颜色和界面覆盖；开发机结果不能替代 Win7 实机结论。远端预算另按负责人 Q2 及任务书 §7 执行。
+
+## ADR-0313 A9-45 通用 Provider 的 system wire 归一化
+
+- 状态：Accepted（2026-11-03，负责人明确要求确认并通过 InstaBox 工作流修复交接问题；本条记录该范围内的接口实现决定）。
+- 问题：产品 Core 生成多条 system，通用 Provider 原样发送，拒绝非首条 system 的兼容模板返回 400。开发机回环 HTTP 反例见 A9-45。错误体不足以确认同事实际供应商。
+- 决定：通用 OpenAIProviderConfig 增加可选内存参数 systemMessagePolicy，取值 merge-leading 或 passthrough；缺省 merge-leading。默认在原 wire 校验后按原序合并非空 system 文本，以两个换行拼接并放在 index 0。其余消息顺序保持；不修改源输入。passthrough 保留旧报文映射。
+- 兼容边界：单条非空开头 system 与无 system 报文保持原样；空字符串 system 丢弃，空白文本不 trim。保留摘要的 authority: data_only 原文及工具关联，不能绕过图片角色验证。
+- 产品边界：沿用产品 Provider 默认构造，无新增设置 UI 或持久化字段，因此不改 schemaVersion。历史固定 DeepSeek 适配器不改。Core、权限、审计、持久化和安全合同保持原约束。
+- 验证：严格模板桩的 passthrough 400 与默认首句/工具续步成功、Gateway 回归、新建审核机 G0 和 Mac G1。真实同事后端和 Win7 实机继续 NOT_PERFORMED。
+
 ## ADR-0314 A9-47 运行中草稿与手动发送
 
 - 状态：Accepted（2026-11-06 UTC，负责人对准确功能范围选择“推进这项（推荐）”）。

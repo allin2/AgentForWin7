@@ -807,6 +807,8 @@ A9-45 阶段中夹具收到 5 个请求：包内 Gateway 不合并的对照被�
 负责人看过 §9.19 的发版报告、K1～K9 裁决和未执行项后，于 2026-11-04 回复“接受”。
 执行代理据此登记结论 A9_44_WIN7_57_PASS_WITH_KNOWN_LIMITS，记录为本机 `outputs/alpha4-r1/OWNER_ACCEPTANCE.json`。
 
+> 2026-11-09 注：经负责人批准，`outputs/alpha4-r1/` 本机原件已删除并整体加密归档至外置批次 `archive-20261109-outputs-b1`（相机盘；恢复密钥由负责人保管，登记见 `docs/acceptance/EVIDENCE_ARCHIVE_RETRIEVAL.md`）。上文本机路径为当时记录，原件按该批次 README 取回；结论 A9_44_WIN7_57_PASS_WITH_KNOWN_LIMITS 不变，取回材料不得冒充新的实机证据。
+
 | 项 | 内容 |
 |---|---|
 | 范围 | 仅源码 `a2b4aa8…`、ZIP `46a6f792…`、Win7 run `c980ca14…`；冻结记录 `0f4743d3…` 未变 |

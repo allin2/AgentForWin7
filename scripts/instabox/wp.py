@@ -51,6 +51,10 @@ SHARED_DOCS = ("docs/STATUS.md", "docs/STATUS_LOG.md", "docs/tasks/README.md", "
 SECRET_PATTERNS = (re.compile(r"ibk_[A-Za-z0-9]{20,}"), re.compile(r"gh[pousr]_[A-Za-z0-9]{30,}"),
                    re.compile(r"sk-[A-Za-z0-9_-]{20,}"), re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"))
 MODULES = ("gateway", "workspace", "state", "core", "runner", "git-adapter", "shell")
+# Modules whose Linux G0 differs from the Mac (D9 omits a case-insensitive check on Linux).
+PLATFORM_MODULES = ("workspace",)
+TASK_SHEET_LIMIT = 1024 * 1024
+EMBED_SPEC = re.compile(r"(?P<path>[^:]+?)(?::(?P<start>[1-9][0-9]*)-(?P<end>[1-9][0-9]*))?\Z")
 NODE_ROOTS = (".", "src/core", "src/gateway", "src/git-adapter", "src/runner", "src/shell",
               "src/shell/office-lite", "src/state", "src/workspace")
 
@@ -60,11 +64,14 @@ assert os.environ['HOME']=='/data/home' and pwd.getpwuid(os.getuid()).pw_name=='
 def run(a):
  r=subprocess.run(a,capture_output=True,text=True,timeout=20)
  return {'exitCode':r.returncode,'value':r.stdout.strip()}
+load=run(['systemctl','--user','show','-p','LoadState','--value','t3code.service'])
+installed=load['value']!='not-found'
 before=run(['systemctl','--user','is-active','t3code.service'])
-stop=run(['systemctl','--user','stop','t3code.service'])
+# A snapshot without the T3 backend has nothing to stop.
+stop=run(['systemctl','--user','stop','t3code.service']) if installed else {'exitCode':0,'value':''}
 after=run(['systemctl','--user','is-active','t3code.service'])
 p=subprocess.run(['pgrep','-x','cloudflared'],capture_output=True,text=True)
-print(json.dumps({'wasInitiallyActive':before['value']=='active','stopExitCode':stop['exitCode'],'after':after['value'],'cloudflaredExists':p.returncode==0}))
+print(json.dumps({'t3Installed':installed,'wasInitiallyActive':before['value']=='active','stopExitCode':stop['exitCode'],'after':after['value'],'cloudflaredExists':p.returncode==0}))
 """
 CREDENTIAL_META = r"""
 import datetime,hashlib,json,os,stat
@@ -138,6 +145,11 @@ WORK_STATE = r"""
 set -euo pipefail
 cd "/data/home/wp/$1/work"
 printf '{"head":"%s","dirty":%s,"commits":%s}\n' "$(git rev-parse HEAD)" "$([ -n "$(git status --porcelain)" ] && echo true || echo false)" "$(git rev-list --count "$2..HEAD")"
+"""
+ORIGINALS_PRESENT = r"""
+import json,os,sys
+work=sys.argv[1]
+print(json.dumps({p: os.path.isfile(os.path.join(work,p)) for p in sys.argv[2:]}))
 """
 INPUT_FINGERPRINT = r"""
 set -euo pipefail
@@ -524,16 +536,23 @@ class Wp:
             self.pkg.set(machineDeleted=False, deleteError=str(error)[:80])
 
     # ---- run / poll ----
-    def run(self, agent, task_file, allowed_tools=(), modules=(), mode="execute", timeout=EMPLOYEE_SECONDS):
+    def run(self, agent, task_file, allowed_tools=(), modules=(), mode="execute", timeout=EMPLOYEE_SECONDS,
+            embeds=(), require_read=(), g0=False):
         if self.s.get("state") != "OPENED":
             raise WpError("EMPLOYEE_ALREADY_STARTED_OR_PACKAGE_NOT_OPEN")
         if mode not in ("execute", "review") or not 1 <= timeout <= EMPLOYEE_SECONDS:
             raise WpError("INVALID_EMPLOYEE_MODE_OR_TIMEOUT")
         if any(module not in MODULES for module in modules):
             raise WpError("INVALID_MODULE")
+        if g0 and mode != "review":
+            raise WpError("G0_FLAG_IS_FOR_REVIEW_PACKAGES")
         task = self.s["task"]
-        sheet = Path(task_file).read_bytes()
         paths = self.paths()
+        sheet, sheet_record = self.compose_task(Path(task_file).read_bytes(), embeds, require_read)
+        present = self.read_json(["python3", "-c", ORIGINALS_PRESENT, paths["work"], *sheet_record["requiredOriginals"]], 20)
+        missing = [name for name in sheet_record["requiredOriginals"] if present.get(name) is not True]
+        if missing:
+            raise WpError("REQUIRED_ORIGINAL_NOT_IN_CHECKOUT_EMBED_IT:" + ",".join(missing)[:150])
         if agent == "codex":
             argv = bash(CODEX, paths["wp"], "read-only" if mode == "review" else "workspace-write")
         elif agent == "claude":
@@ -552,13 +571,87 @@ class Wp:
             self.upload(self.token_path(), self.claude_token, "0600")
         self.pkg.receipt("employee-plan", {"agent": agent, "mode": mode, "timeout": timeout,
                                            "taskSheetSha256": digest(sheet), "claudeAuth": claude_auth,
-                                           "claudeTokenAccount": self.claude_token_account if claude_auth else None})
+                                           "claudeTokenAccount": self.claude_token_account if claude_auth else None,
+                                           "reviewG0": g0, **sheet_record})
         self.pkg.set(agent=agent, mode=mode, employeeTimeoutSeconds=timeout, taskSheetSha256=digest(sheet),
                      modules=list(modules), state="RUNNING", employeeStartedAt=now(), claudeAuth=claude_auth,
-                     claudeTokenAccount=self.claude_token_account if claude_auth else None)
+                     claudeTokenAccount=self.claude_token_account if claude_auth else None, reviewG0=g0,
+                     requiredOriginals=sheet_record["requiredOriginals"], embedded=sheet_record["embedded"])
         self.start_job("emp-" + task, timeout, paths["work"], argv)
         self.renew_lease(force=True)
         return self.s
+
+    def compose_task(self, sheet, embeds, require_read):
+        """Append the required-originals list and the full text of local governance files the checkout lacks."""
+        originals = ["AGENTS.md"]
+        for name in require_read:
+            if name.startswith("/") or ".." in name.split("/") or not name.strip():
+                raise WpError("INVALID_REQUIRED_ORIGINAL")
+            if name not in originals:
+                originals.append(name)
+        text = [sheet.decode("utf-8").rstrip("\n"), "", "---", "", "## Required originals (AGENTS.md section 3)", "",
+                "Before any implementation or review work, read each file below in full from the checkout.",
+                "Summaries, including this task sheet, do not replace them.", ""]
+        text += ["- `%s`" % name for name in originals]
+        text += ["", "Documents embedded below are local governance originals that this checkout does not contain.",
+                 "Treat their text as the original. Do not create or edit them in the checkout.",
+                 "In the final report include one line: `ORIGINALS_READ: <comma-separated paths you actually read>`.", ""]
+        embedded = []
+        root = self.repo_root.resolve()
+        for spec in embeds:
+            match = EMBED_SPEC.fullmatch(spec)
+            if not match:
+                raise WpError("INVALID_EMBED_SPEC")
+            source = (root / match["path"]).resolve()
+            if root not in source.parents or not source.is_file():
+                raise WpError("EMBED_NOT_A_REPOSITORY_FILE")
+            data = source.read_bytes()
+            lines = data.decode("utf-8").splitlines(keepends=True)
+            start, end = (int(match["start"]), int(match["end"])) if match["start"] else (1, len(lines))
+            if start > end or end > len(lines):
+                raise WpError("EMBED_RANGE_OUTSIDE_FILE")
+            excerpt = "".join(lines[start - 1:end])
+            name = source.relative_to(root).as_posix()
+            entry = {"path": name, "lines": [start, end], "sourceSha256": digest(data),
+                     "excerptSha256": digest(excerpt.encode("utf-8"))}
+            embedded.append(entry)
+            text += ["## Embedded original: `%s` lines %d-%d" % (name, start, end), "",
+                     "Source SHA-256 %s; excerpt SHA-256 %s." % (entry["sourceSha256"], entry["excerptSha256"]), "",
+                     "````text", excerpt.rstrip("\n"), "````", ""]
+        composed = ("\n".join(text) + "\n").encode("utf-8")
+        if len(composed) > TASK_SHEET_LIMIT:
+            raise WpError("TASK_SHEET_TOO_LARGE")
+        if any(p.search(composed.decode("utf-8")) for p in SECRET_PATTERNS) or (
+                self.claude_token and self.claude_token in composed):
+            raise WpError("SECRET_IN_TASK_SHEET")
+        return composed, {"requiredOriginals": originals, "embedded": embedded}
+
+    def originals_evidence(self, job_id):
+        """Which required originals the employee's own tool or command records reference; not proof of a full read."""
+        required = self.s.get("requiredOriginals") or []
+        log = self.pkg.directory / "collected" / job_id / "stdout.log"
+        inputs, declared = [], None
+        for line in log.read_text(encoding="utf-8", errors="replace").splitlines():
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(event, dict):
+                continue
+            message = event.get("message") if isinstance(event.get("message"), dict) else {}
+            content = message.get("content") if isinstance(message.get("content"), list) else []
+            inputs += [json.dumps(c.get("input", {})) for c in content if isinstance(c, dict) and c.get("type") == "tool_use"]
+            item = event.get("item") if isinstance(event.get("item"), dict) else {}
+            if item.get("type") == "command_execution":
+                inputs.append(str(item.get("command", "")))
+            final = event.get("result") if event.get("type") == "result" else item.get("text") if item.get("type") == "agent_message" else None
+            for row in str(final or "").splitlines():
+                if row.strip().strip("`").startswith("ORIGINALS_READ:"):
+                    declared = row.strip().strip("`")[len("ORIGINALS_READ:"):].strip()
+        referenced = {name: any(name in value for value in inputs) for name in required}
+        return {"basis": "TOOL_OR_COMMAND_RECORD_REFERENCE", "referenced": referenced,
+                "result": "REFERENCED" if required and all(referenced.values()) else "NOT_VERIFIED",
+                "declared": declared, "embeddedInTaskSheet": [e["path"] for e in self.s.get("embedded") or []]}
 
     def token_path(self):
         return self.home + "/.wp-secrets/claude-oauth-token"
@@ -633,7 +726,7 @@ class Wp:
         return receipt
 
     # ---- close ----
-    def close(self, discard_credentials=False):
+    def close(self, discard_credentials=False, defer_g0=False):
         task = self.s["task"]
         if self.s.get("machineDeleted"):
             raise WpError("ALREADY_CLOSED")
@@ -657,12 +750,15 @@ class Wp:
         for m in self.s.get("modules", []):
             if m not in MODULES:
                 raise WpError("INVALID_MODULE")
-        g0_args = [a for m in self.s.get("modules", []) for a in ("--module", m)]
-        self.start_job("g0-" + task, G0_SECONDS, self.paths()["work"], bash(G0, task, *g0_args))
-        g0 = self.wait_job("g0-" + task, G0_SECONDS + 60)
+        jobs = [("emp-" + task, employee)]
+        if not defer_g0:
+            g0_args = [a for m in self.s.get("modules", []) for a in ("--module", m)]
+            self.start_job("g0-" + task, G0_SECONDS, self.paths()["work"], bash(G0, task, *g0_args))
+            g0 = self.wait_job("g0-" + task, G0_SECONDS + 60)
+            jobs.append(("g0-" + task, g0))
         problems = []
         collected = {}
-        for job_id, status in (("emp-" + task, employee), ("g0-" + task, g0)):
+        for job_id, status in jobs:
             try:
                 collected[job_id] = self.collect_job(job_id, status)
             except (WpError, CloudError) as error:
@@ -672,7 +768,8 @@ class Wp:
             self.pkg.receipt("collect-failed", {"problems": problems})
             raise WpError("COLLECT_FAILED_MACHINE_KEPT")
         self.check_token_absent()
-        g0_summary = self.parse_g0(g0)
+        # A deferred G0 runs later on a fresh review machine the employee never wrote to.
+        g0_summary = {"result": "DEFERRED", "location": "REVIEW_MACHINE"} if defer_g0 else self.parse_g0(g0)
         after = self.read_json(["python3", "-c", CREDENTIAL_META], 25)
         changed = after != self.s["credentialsBaseline"]
         self.pkg.receipt("close-evidence", {"g0": g0_summary, "credentialsChanged": changed, "work": work,
@@ -685,7 +782,7 @@ class Wp:
         pushed = None
         if work["commits"] >= 1:
             pushed = self.with_key("write", lambda: self.push())
-        final = "PUSHED" if pushed and g0_summary["result"] == "PASS" else "FAILED"
+        final = "PUSHED" if pushed and g0_summary["result"] in ("PASS", "DEFERRED") else "FAILED"
         self.pkg.set(pushedCommit=pushed, state=final, failure=None if pushed else "NO_COMMITS")
         if changed and not discard_credentials:
             self.pkg.set(state="CREDENTIALS_HOLD", resumeState=final)
@@ -700,19 +797,37 @@ class Wp:
         except (WpError, CloudError) as error:
             self.pkg.set(state="COLLECT_FAILED", problems=[str(error)])
             raise WpError("COLLECT_FAILED_MACHINE_KEPT") from None
+        task = self.s["task"]
+        work = self.read_json(bash(WORK_STATE, task, self.s["base"]), 20)
+        clean = work == {"head": self.s["base"], "dirty": False, "commits": 0}
+        g0_summary, work_after = {"result": "N/A"}, None
+        if self.s.get("reviewG0"):
+            g0_summary = {"result": "NOT_PERFORMED", "reason": "REVIEW_WORKSPACE_CHANGED"}
+            if clean:
+                g0_args = [a for m in self.s.get("modules", []) for a in ("--module", m)]
+                self.start_job("g0-" + task, G0_SECONDS, self.paths()["work"], bash(G0, task, *g0_args))
+                g0 = self.wait_job("g0-" + task, G0_SECONDS + 60)
+                try:
+                    collected += self.collect_job("g0-" + task, g0)
+                except (WpError, CloudError) as error:
+                    self.pkg.set(state="COLLECT_FAILED", problems=[str(error)])
+                    raise WpError("COLLECT_FAILED_MACHINE_KEPT") from None
+                g0_summary = dict(self.parse_g0(g0), location="REVIEW_MACHINE")
+                work_after = self.read_json(bash(WORK_STATE, task, self.s["base"]), 20)
         self.check_token_absent()
-        work = self.read_json(bash(WORK_STATE, self.s["task"], self.s["base"]), 20)
+        originals = self.originals_evidence("emp-" + task)
         after = self.read_json(["python3", "-c", CREDENTIAL_META], 25)
         changed = after != self.s["credentialsBaseline"]
         result = employee["result"]
         completed = (result.get("exitCode") == 0 and not result.get("timedOut")
                      and result.get("signal") is None and result.get("tmpdirRemoved") is True)
-        clean = work == {"head": self.s["base"], "dirty": False, "commits": 0}
         final = "CLOSED" if completed and clean else "FAILED"
         self.pkg.receipt("review-evidence", {"base": self.s["base"], "work": work, "collected": collected,
                                              "cliCompleted": completed, "credentialsChanged": changed,
-                                             "contentVerdict": "NOT_VERIFIED"})
-        self.pkg.set(work=work, credentialsChanged=changed, g0={"result": "N/A"}, reviewCliCompleted=completed,
+                                             "g0": g0_summary, "workAfterG0": work_after,
+                                             "originalsReadEvidence": originals, "contentVerdict": "NOT_VERIFIED"})
+        self.pkg.set(work=work, credentialsChanged=changed, g0=g0_summary, workAfterG0=work_after,
+                     originalsReadEvidence=originals, reviewCliCompleted=completed,
                      state=final, failure=None if completed and clean else "REVIEW_FAILED_OR_WORKSPACE_CHANGED")
         if changed and not discard_credentials:
             self.pkg.set(state="CREDENTIALS_HOLD", resumeState=final)
@@ -769,13 +884,24 @@ class Wp:
             raise WpError("GIT_FAILED_" + args[0].upper().replace("-", "_"))
         return done.stdout
 
-    def receive(self):
+    def receive(self, g0_from=None):
         task, base = self.s["task"], self.s["base"]
+        if self.s.get("g0", {}).get("result") == "DEFERRED" and g0_from is None:
+            raise WpError("G0_DEFERRED_REQUIRES_REVIEW_G0")
         checks = {}
         local_ref = "refs/wp/" + task
         self.git("fetch", "--quiet", self.mac_remote, "+refs/heads/box/%s:%s" % (task, local_ref))
         tip = self.git("rev-parse", local_ref).strip()
         checks["tipMatchesPush"] = self.verdict(tip == self.s.get("pushedCommit"))
+        if g0_from is not None:
+            review_g0 = g0_from.get("g0") or {}
+            fresh = (g0_from.get("mode") == "review" and g0_from.get("base") == tip
+                     and g0_from.get("state") == "CLOSED" and g0_from.get("machineDeleted") is True
+                     and review_g0.get("result") == "PASS" and review_g0.get("location") == "REVIEW_MACHINE"
+                     and g0_from.get("workAfterG0") == {"head": tip, "dirty": False, "commits": 0}
+                     and g0_from.get("workerFingerprint") == self.s.get("workerFingerprint"))
+            checks["g0FreshReviewMachine"] = self.verdict(fresh, {"reviewTask": g0_from.get("task"),
+                                                                  "g0": review_g0.get("result")})
         chain = self.git("rev-list", "--first-parent", "--reverse", "%s..%s" % (base, tip)).split()
         parents = self.git("rev-list", "--parents", "-n", "1", chain[0]).split()[1:] if chain else []
         checks["parentChainStartsAtBase"] = self.verdict(bool(chain) and base in parents)
@@ -794,13 +920,15 @@ class Wp:
         leaks = sum(1 for line in added_lines if any(p.search(line) for p in SECRET_PATTERNS))
         checks["secretScan"] = self.verdict(leaks == 0, {"matchingLines": leaks})
         if all(v["result"] == "PASS" for v in checks.values()):
-            checks.update(self.checks_in_worktree(tip, names))
+            checks.update(self.checks_in_worktree(tip, names, platform_only=g0_from is not None))
         else:
             for name in ("fingerprintMatches", "docsCheck", "moduleTests"):
                 checks[name] = {"result": "NOT_PERFORMED", "reason": "earlier check failed"}
         overall = "PASS" if all(v["result"] == "PASS" for v in checks.values()) else "FAIL"
-        receipt = {"task": task, "base": base, "tip": tip, "overall": overall, "checks": checks,
-                   "g0": self.s.get("g0", {}).get("result"), "credentialsChanged": self.s.get("credentialsChanged")}
+        g0_result = (g0_from.get("g0") or {}).get("result") if g0_from is not None else self.s.get("g0", {}).get("result")
+        receipt = {"task": task, "base": base, "tip": tip, "overall": overall, "checks": checks, "g0": g0_result,
+                   "g0Location": "REVIEW_MACHINE:" + str(g0_from.get("task")) if g0_from is not None else "EXECUTION_MACHINE",
+                   "credentialsChanged": self.s.get("credentialsChanged")}
         self.pkg.receipt("mac-receipt", receipt)
         ledger = self.pkg.directory.parent / "ledger.jsonl"
         with ledger.open("a", encoding="utf-8") as stream:
@@ -815,9 +943,14 @@ class Wp:
     def verdict(passed, detail=None):
         return dict({"result": "PASS" if passed else "FAIL"}, **(detail or {}))
 
-    def checks_in_worktree(self, tip, names):
+    def checks_in_worktree(self, tip, names, platform_only=False):
         modules = sorted(({n.split("/")[1] for n in names if n.startswith("src/") and n.count("/") >= 2}
                           | set(self.s.get("modules", []))) & set(MODULES))
+        covered = []
+        if platform_only:
+            # G0 already ran on a fresh review machine; the Mac repeats only modules whose Linux run differs.
+            covered = [m for m in modules if m not in PLATFORM_MODULES]
+            modules = [m for m in modules if m in PLATFORM_MODULES]
         out = {}
         tree = Path(tempfile.mkdtemp(prefix="win7-eng06-g1-"))
         added = False
@@ -838,7 +971,8 @@ class Wp:
             for module in modules:
                 done = self.run_local(["node", "scripts/verify_integration.mjs", "--daily", "--module", module], root, 1800)
                 ran.append({"module": module, "exitCode": done.returncode})
-            out["moduleTests"] = self.verdict(all(r["exitCode"] == 0 for r in ran), {"modules": ran})
+            out["moduleTests"] = self.verdict(all(r["exitCode"] == 0 for r in ran),
+                                              {"modules": ran, "coveredByFreshReviewG0": covered})
         finally:
             if added:
                 self.run_local(["git", "worktree", "remove", "--force", str(tree / "tree")], self.repo_root, 120)
@@ -878,12 +1012,17 @@ def main():
     runner.add_argument("--mode", choices=("execute", "review"), default="execute")
     runner.add_argument("--timeout", type=int, default=EMPLOYEE_SECONDS)
     runner.add_argument("--claude-token-account", help="Keychain account holding a `claude setup-token` value")
+    runner.add_argument("--embed", action="append", default=[], help="Repository-relative file[:START-END] to append in full")
+    runner.add_argument("--require-read", action="append", default=[], help="Checkout path the employee must read")
+    runner.add_argument("--g0", action="store_true", help="Review package: run G0 on this fresh machine after review")
     sub.add_parser("poll")
     committer = sub.add_parser("commit")
     committer.add_argument("--manifest", type=Path, required=True)
     closer = sub.add_parser("close")
     closer.add_argument("--discard-credentials", action="store_true")
-    sub.add_parser("receive")
+    closer.add_argument("--defer-g0", action="store_true", help="Execution package: G0 runs later on the review machine")
+    receiver = sub.add_parser("receive")
+    receiver.add_argument("--g0-from", help="Closed review package task whose G0 replaces the execution G0")
     args = parser.parse_args()
     url = args.repo_url or "git@github.com:%s.git" % args.repo
     try:
@@ -898,15 +1037,17 @@ def main():
             out = wp.open(args.task, args.base, args.snapshot, args.allow)
         elif args.action == "run":
             tools = [t for t in args.allowed_tools.split(",") if t]
-            out = wp.run(args.agent, args.task_file, tools, args.module, args.mode, args.timeout)
+            out = wp.run(args.agent, args.task_file, tools, args.module, args.mode, args.timeout,
+                         args.embed, args.require_read, args.g0)
         elif args.action == "poll":
             out = wp.poll()
         elif args.action == "commit":
             out = wp.commit(args.manifest)
         elif args.action == "close":
-            out = wp.close(args.discard_credentials)
+            out = wp.close(args.discard_credentials, args.defer_g0)
         else:
-            out = wp.receive()
+            review = Package(args.outputs, args.g0_from).load() if args.g0_from else None
+            out = wp.receive(review)
     except (WpError, CloudError) as error:
         print(json.dumps({"error": str(error)[:200]}))
         raise SystemExit(1)

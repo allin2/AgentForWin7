@@ -116,12 +116,30 @@ export function uploadTimeout(bytes) {
   return Math.max(600, Math.ceil(bytes / 200000));
 }
 export function developmentRootLimit(holder, now = Date.now()) {
+  // A9-66/67 2026-11-13: owner-approved 25 GB DEV_CHANNEL window, exact holder.
+  if (holder === 'a946lanrx' && Number.isFinite(now)
+    && now >= Date.parse('2026-11-13T11:00:00.000Z') && now < Date.parse('2026-11-13T15:00:00.000Z')) return 25e9;
+  // ENGINEERING_03 section 10.12: owner-approved file sorting probe, this window only.
+  if (holder === 'a946lanrx' && Number.isFinite(now)
+    && now >= Date.parse('2026-11-11T03:21:21.650Z') && now < Date.parse('2026-11-11T04:21:21.650Z')) return 24e9;
+  // A9-58 section 7.2: owner-approved 24 GB; exact inactive holder and new window.
+  if (holder === 'a946lanrx' && Number.isFinite(now)
+    && now >= Date.parse('2026-11-11T01:34:31.856Z') && now < Date.parse('2026-11-11T02:34:31.856Z')) return 24e9;
+  // A9-57 section 6.4: owner-approved 23 GB; this holder and window only.
+  if (holder === 'a946lanrx' && Number.isFinite(now)
+    && now >= Date.parse('2026-11-10T08:11:28.130Z') && now < Date.parse('2026-11-10T09:11:28.130Z')) return 23e9;
   // A9-44 §9.18 K6: second alpha.4 shortest-chain run, exact holder and window only.
   if (holder === 'a4w-c980ca14' && Number.isFinite(now)
     && now >= Date.parse('2026-11-04T04:41:05.000Z') && now < Date.parse('2026-11-04T06:11:05.000Z')) return 24e9;
   // A9-44 §9.18 K3: alpha.4 shortest-chain run, exact holder and window only.
   if (holder === 'a4w-c0c02003' && Number.isFinite(now)
     && now >= Date.parse('2026-11-04T04:11:39.000Z') && now < Date.parse('2026-11-04T05:41:39.000Z')) return 24e9;
+  // A9-44 §9.13: owner-approved second window, same session holder; no takeover.
+  if (holder === 'a944-0f817a86' && Number.isFinite(now)
+    && now >= Date.parse('2026-11-01T10:20:42.758211Z') && now < Date.parse('2026-11-01T11:20:42.758211Z')) return 35e9;
+  // A9-44 §9.9: owner-approved capacity exception for this exact run and original window.
+  if (holder === 'a944-0f817a86' && Number.isFinite(now)
+    && now >= Date.parse('2026-11-01T09:33:38.965456Z') && now < Date.parse('2026-11-01T10:24:58.038253Z')) return 35e9;
   // ADR-0310: separately approved fifth window, exact holder and deadline.
   if (holder === 'a942-751c-7f41ca1c' && Number.isFinite(now)
     && now >= Date.parse('2026-10-31T01:16:21.000Z') && now < Date.parse('2026-10-31T02:46:21.000Z')) return 35e9;

@@ -15,6 +15,12 @@ if ($D['operation'] -eq 'acquire') {
       # Keep the trailing empty token when an invocation has released its lease.
       $raw = $Utf8.GetString($bytes); $rawRows = $raw.Replace("`r`n","`n").Split("`n")
       if ($rawRows.Length -ne 5 -or $rawRows[0] -ne '1') { throw 'LOCK_FORMAT_UNKNOWN' }
+      if ($D['holder'] -ceq 'a944-0f817a86' -and $D['steal'] -eq 'true') {
+        # A9-44 §9.9 approves only the observed inactive historical holder.
+        $a944Now = [DateTime]::UtcNow
+        if ($a944Now -lt [DateTime]::Parse('2026-11-01T09:33:38.965456Z').ToUniversalTime() -or $a944Now -ge [DateTime]::Parse('2026-11-01T10:24:58.038253Z').ToUniversalTime() -or $rawRows[1] -cne 'a942-751c-7f41ca1c' -or $rawRows[3] -ne '' -or $rawRows[2] -cne '2026-10-31T02:26:19.5170000Z') { throw 'LOCK_CONFLICT' }
+        if (@(Dev-Processes).Count -ne 0 -or @(Dev-Tasks).Count -ne 0 -or [IO.File]::Exists((Safe ($Root + '\.channel\extraction-active')))) { throw 'TAKEOVER_LIFECYCLE_CHANGED' }
+      }
       if (($rawRows[1] -cne $D['holder'] -or $rawRows[3] -ne '') -and $D['steal'] -ne 'true') { throw 'LOCK_CONFLICT' }
     }
     $text = '1' + "`n" + $D['holder'] + "`n" + [DateTime]::UtcNow.ToString('o') + "`n" + $D['token'] + "`n"

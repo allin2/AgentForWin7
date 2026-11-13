@@ -11,7 +11,9 @@ Win7-Validation: NOT_PERFORMED
 
 ## 当前交付（2026-11-13，开发机）
 
-本批已整合到本地 main 工作区，未提交。实际 HEAD 仍为 44ddaf90…；私有交付绑定 aa3f68ac3b322d489d6fa30f4e3cb17b0979678f。组合范围共 33 文件。原 dirty/untracked 保留，Runtime 原有 45s/30s 配置保留。接口与边界登记为 [ADR-0331](../DECISIONS.md)。
+本批已整合到本地 main 工作区并定点提交为 `c7f51ea…`（37 文件：33 源码 + 2 任务书 + ADR-0331 两文档）。私有交付绑定 aa3f68ac3b322d489d6fa30f4e3cb17b0979678f；33 源码文件与审核版 SHA 逐字节一致。原 dirty/untracked 保留，Runtime 原有 45s/30s 配置保留。接口与边界登记为 [ADR-0331](../DECISIONS.md)。
+
+开发包已构建：复用 A9-32 开发 Profile（`a9-32-input-lock.json`），source `c7f51ea…`，ZIP SHA-256 `0cebc0b0…`，3266 文件，`source_dirty=false`、`external_acceptance_eligible=false`。包内 workspace/dist/async-tree.js、directory-identity.js 等新文件已核对含 A9-66/67 特性标记。构建产物在 `outputs/a9-66-67-dev-package/package/`。
 
 开发员工使用 Box Codex。新独审按负责人要求使用 Claude Code，响应模型为 claude-opus-5-5，effort UNKNOWN。独审未发现新增 P0/P1，建议补验和 G0 通过后整合。原件为 outputs/a9-66-67-instabox/CLAUDE_RECHECK_AA3F.md。原 7751df50、9de03c57 审核失败均保留。
 

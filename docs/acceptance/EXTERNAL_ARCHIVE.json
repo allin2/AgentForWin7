@@ -44,6 +44,35 @@
         "path": "restore_snapshot.py",
         "sha256": "957ddd0b6d6473b6022f5979eb8670f5355b37cd88b9fe72f7532fcc44ce4656"
       }
+    },
+    "archive-20261030-space-r1": {
+      "relative_path": "archive-20261030-space-r1",
+      "catalogs": {
+        "space-p5-r1r2": {
+          "path": "catalogs/catalog-space-p5-r1r2.json",
+          "sha256": "87be3c514a600310083502c2c3c7119ac87b0e39c7c810b3d896bfebd4be036d"
+        },
+        "space-a9-42-work": {
+          "path": "catalogs/catalog-space-a9-42-work.json",
+          "sha256": "16657791cc98732f911a9b7d2564e77843a97a668527037fdf74cdef030164ee"
+        },
+        "space-tmp-sandboxes": {
+          "path": "catalogs/catalog-space-tmp-sandboxes.json",
+          "sha256": "9597baacd4602a3b86faa1ce6e263bcb756d2cf8a5186b1a8b4f279da9d83d04"
+        },
+        "space-migration-check": {
+          "path": "catalogs/catalog-space-migration-check.json",
+          "sha256": "26bb713ae29d7cbc5c79a57fd06847945f02e35d5f0e007a21a27ef9d31cf192"
+        },
+        "space-worktree-outputs": {
+          "path": "catalogs/catalog-space-worktree-outputs.json",
+          "sha256": "364f5d19ee017103b8b4ce81a6c7f4eff2d7585505b3df07ebe33c0452778e6f"
+        }
+      },
+      "restore_tool": {
+        "path": "restore_snapshot.py",
+        "sha256": "3c3c400ff013b4d6174db0020d126a00c0c11cfd4d7850c67237778f767a71e7"
+      }
     }
   },
   "index_only_batches": {
@@ -56,6 +85,15 @@
       "relative_path": "archive-20261026-slice3",
       "assets": "GitHub published Release; not fetched in this migration",
       "restore": "See EVIDENCE_ARCHIVE_RETRIEVAL.md existing gh download instructions"
+    },
+    "archive-20261108-space-r2": {
+      "relative_path": "archive-20261108-space-r2",
+      "assets": "5 encrypted tar per candidate under out/; batch manifest.json sha256 7c1bb00ad71f8e56286261a74a14081539d21e2c498a41799565bf231163115a",
+      "restore_tool": {
+        "path": "restore_snapshot.py",
+        "sha256": "17e8543aa778af64ce581bcee9e9b7f5675f33456210e87b5ccb09e831b5c944"
+      },
+      "restore": "Not restorable by acceptance_archive.py (different format); see EXTERNAL_ARCHIVE_RESTORE.md section for archive-20261108-space-r2"
     }
   }
 }

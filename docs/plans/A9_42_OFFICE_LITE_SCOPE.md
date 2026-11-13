@@ -34,6 +34,8 @@ inspect 返回版本化格式/能力/警告；read 有位置、数量、字节�
 原始版本、tarball URL、注册表 SHA-512 integrity、顶层依赖与解包体积已保存到
 `outputs/a9-42-tools/office-candidate-metadata.json`。该文件是研究材料，不是完整交付锁。
 
+> 2026-11-09 注：`outputs/a9-42-tools/` 已整体加密归档至外置批次 `archive-20261109-outputs-b1`，本机原件经负责人批准删除；文中该前缀路径均为当时记录，取回按该批次 README。
+
 | 候选 | 顶层声明 | 用途/限制 | 结论 |
 |---|---|---|---|
 | mammoth 1.11.0 | Node >=12；BSD-2-Clause；包解压 2,161,895 字节 | DOCX 内容提取；忽略部分格式，转换 HTML 不自带净化 | 候选；只输出结构化纯文本，不直接执行或显示来源 HTML |

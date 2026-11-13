@@ -100,6 +100,8 @@ TMPDIR=/tmp /Users/qlyf/.nvm/versions/node/v20.17.0/bin/node --test scripts/rele
 
 Node16 命令：`TMPDIR=/tmp ELECTRON_RUN_AS_NODE=1 <既有 Electron.app/Contents/MacOS/Electron> outputs/next-version-r1/p2-controller-migration-r1/run-node16-all-sync.cjs`。
 实际 Electron 路径：`/Users/qlyf/Developer/win7-coding-Agent/outputs/a9-42-tools/runtime-inputs/electron-22-darwin-arm64/Electron.app/Contents/MacOS/Electron`。
+
+> 2026-11-09 注：该路径所属的 `outputs/a9-42-tools/` 已整体加密归档至外置批次 `archive-20261109-outputs-b1`，本机原件经负责人批准删除；取回按该批次 README（密钥由负责人保管）。
 适配器只改测试注册和 ESM 导入形式，不是 Node16 原生 node:test。异步 P1 双进程竞争保留 Node20 原生证据。
 controller 的 SSH/SFTP/Git 边界均注入；P1 原有并发测试只启动本机 Node 子进程验证本地账本。
 R0 整链使用显式合成 verifier，不能证明真实产品 ZIP/PE/manifest。入口测试中的 PS/Scheduler 结果是伪执行器数据。

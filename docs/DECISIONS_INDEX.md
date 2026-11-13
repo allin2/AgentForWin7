@@ -315,6 +315,8 @@
 | ADR-0309 | A9-43 缺失 WMI 映像的直接查询与导航夹具顺序 | Accepted |
 | ADR-0310 | A9-43 第五窗口与 35 GB 开发根 | Accepted |
 | ADR-0311 | WIN7-56 同字节实机证据的一次性审核与验收决定 | Accepted |
+| ADR-0312 | A9-44 手动主题与版本化外观存储 | Accepted |
+| ADR-0313 | A9-45 通用 Provider 的 system wire 归一化 | Accepted |
 | ADR-0314 | A9-47 运行中草稿与手动发送 | Accepted |
 | ADR-0315 | A9-48 alpha.5 同包增量验证与合并验收 | Accepted |
 | ADR-0316 | A9-50 显式排队与 Composer 状态 | Accepted |

@@ -1,5 +1,5 @@
 import { spawnSync } from 'child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'fs';
 import { createRequire } from 'module';
 import { tmpdir } from 'os';
 import { dirname, join } from 'path';
@@ -72,6 +72,16 @@ const dailyExcluded = {
   // Exhaustive per-row field mutations of the A9-39 acceptance evaluator (about 90 s); run when that driver or its fixtures change.
   shell: { names: ['required fields reject absence and wrong types before comparison'] },
 };
+// Windows path rules fold case. This workspace test sees the folded duplicate only when fixtures sit on a
+// case-insensitive filesystem, so the daily set omits it on Linux; npm test and --test-file keep it.
+const caseSensitiveFileSystem = (() => {
+  const probe = join(verifyTempDir, 'case-probe');
+  writeFileSync(probe, '');
+  try { return !existsSync(join(verifyTempDir, 'CASE-PROBE')); } finally { unlinkSync(probe); }
+})();
+const platformExcluded = caseSensitiveFileSystem
+  ? { workspace: ['normalizes Windows separators and rejects case-folded duplicates and sensitive paths'] }
+  : {};
 // SQLite tests load the root better-sqlite3 build; another Node ABI fails them for reasons unrelated to the change.
 const sqliteConsumers = ['gateway', 'state', 'shell'];
 
@@ -113,14 +123,21 @@ for (const phase of quick ? ['build'] : ['build', 'test']) {
     if (phase === 'test' && packageJson.scripts?.test) {
       const testArgs = ['test', '--', '--runInBand', '--cacheDirectory', jestCacheDir];
       if (testFiles.length) testArgs.push('--runTestsByPath', ...testFiles);
-      else if (daily && dailyExcluded[moduleName]) {
-        const { paths = [], names = [] } = dailyExcluded[moduleName];
+      else if (daily && (dailyExcluded[moduleName] || platformExcluded[moduleName])) {
+        const { paths = [], names: slowNames = [] } = dailyExcluded[moduleName] ?? {};
+        const platformNames = platformExcluded[moduleName] ?? [];
+        const names = [...slowNames, ...platformNames];
         if (paths.length) testArgs.push('--testPathIgnorePatterns', ...paths);
         if (names.length) {
           const escaped = names.map((name) => name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
           testArgs.push('--testNamePattern', `^(?!.*(?:${escaped.join('|')}))`);
         }
-        console.log(`[verify] NOT_PERFORMED daily slow checks (${moduleName}): ${[...paths, ...names].join(', ')}`);
+        if (paths.length || slowNames.length) {
+          console.log(`[verify] NOT_PERFORMED daily slow checks (${moduleName}): ${[...paths, ...slowNames].join(', ')}`);
+        }
+        if (platformNames.length) {
+          console.log(`[verify] NOT_PERFORMED case-insensitive filesystem checks (${moduleName}): ${platformNames.join(', ')}`);
+        }
       }
       commands.push(testArgs);
     }

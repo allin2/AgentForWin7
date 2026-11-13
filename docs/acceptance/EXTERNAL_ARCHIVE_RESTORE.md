@@ -13,8 +13,10 @@
 |---|---|---|
 | slice1 原始搜索记录加密归档 | `archive-20261026-slice1/` | catalog、原清理记录与恢复入口 |
 | slice4 历史准备、预演与旧候选加密归档 | `archive-20261026-slice4/` | catalog、原清理记录与恢复入口 |
+| 2026-10-30 空间回收批次加密归档 | `archive-20261030-space-r1/` | 批次 `README.md`、catalog、恢复入口 |
 | slice2、slice3 的 catalog/manifest 索引 | 对应批次目录 | 原索引；归档附件仍按原说明从已发布私有 Release 获取 |
-| 当前 WIN7-55 候选、双构建及直接证据 | 本轮不迁出本机 | `.acceptance/evidence/` 的现有保留位置 |
+| 2026-11-08 空间回收批次加密归档 | `archive-20261108-space-r2/` | 本机原件已删除；按下文恢复 |
+| WIN7-55 候选、双构建及直接证据 | 2026-11-08 起在 `archive-20261108-space-r2/` | 本机原件已删除；按下文恢复 |
 | 活跃依赖、测试输入、凭据和归档密钥 | 不复制到外置盘 | 现有受限位置 |
 
 slice4 的 GitHub 草稿不完整，不能用作恢复来源。
@@ -77,6 +79,54 @@ python3 scripts/maintenance/acceptance_archive.py restore \
 其他 slice4 分组为 `slice4-outputs-other`、`slice4-rehearsals`、`slice4-a9-39-acceptance`。
 slice1 使用 `--batch archive-20261026-slice1 --group diagnostic3b-records --candidate address-search-records`。
 slice2、slice3 仍使用 [原归档取回说明](EVIDENCE_ARCHIVE_RETRIEVAL.md) 的下载步骤。
+
+2026-10-30 空间回收批次 `archive-20261030-space-r1` 的分组为 `space-p5-r1r2`、`space-a9-42-work`、
+`space-tmp-sandboxes`、`space-migration-check`、`space-worktree-outputs`，共 82 个候选。
+取回单个候选：
+
+```sh
+python3 scripts/maintenance/acceptance_archive.py restore \
+  --batch archive-20261030-space-r1 \
+  --group space-p5-r1r2 \
+  --candidate prepared-version-r1 \
+  --output outputs/restored/prepared-version-r1-r1
+```
+
+`space-migration-check` 与 `space-tmp-sandboxes` 的 catalog 没有共享对象包，脚本已按无共享对象处理。
+候选的原始位置见各 catalog 的 `original_location` 字段。批次 `README.md` 在盘上，含分组表与格式说明。
+
+### 2026-11-08 批次 `archive-20261108-space-r2`
+
+本批格式不同：每个候选一个加密 tar，`acceptance_archive.py` 不能恢复。
+使用批内 `restore_snapshot.py`，SHA-256 为 `17e8543a…`；批次 `manifest.json` 为 `7c1bb00a…`。
+两项完整哈希登记在 `EXTERNAL_ARCHIVE.json` 的 `index_only_batches`。
+
+| 候选 | 原本机路径 |
+|---|---|
+| `acceptance-evidence-a9-alpha2-integration-r2` | `.acceptance/evidence/a9-alpha2-integration-r2-e596c58-20261026` |
+| `acceptance-a9-39` | `.acceptance/a9-39` |
+| `acceptance-engineering-win10-entry-r1` | `.acceptance/engineering-win10-entry-r1` |
+| `outputs-a9-44-release-preparation-r1` | `outputs/a9-44-release-preparation-r1` |
+| `outputs-old-reports-202609-202610` | `outputs/` 下 23 个 2026-09～10 旧报告，清单见该候选 manifest |
+
+取回单个候选（先用 `status` 查到实际挂载点）：
+
+```sh
+python3 -I <挂载点>/win7-coding-agent-archives/archive-20261108-space-r2/restore_snapshot.py \
+  --batch <挂载点>/win7-coding-agent-archives/archive-20261108-space-r2 \
+  --key <本机归档密钥> \
+  --candidate acceptance-a9-39 \
+  --output .acceptance/restored/a9-39-retrieved-1
+```
+
+`-I` 用于避开宿主 Python 的 sitecustomize 文件写入拦截。输出目录须不存在或为空。
+`RESTORE_RESULT.json` 中每个候选须为 `RESTORE_SHA256_PASS`。
+恢复结果位于 `<输出目录>/<候选>/<原根目录名>/`。
+Win10 历史回放测试的 `engineering-win10-entry-r1/` 在 `<输出目录>/acceptance-engineering-win10-entry-r1/` 下；
+测试所需的 `a9-31-developer/` 不在本批。
+盘上 README 写的文件系统和卷 UUID 有误：实际为 ExFAT，UUID 以本文件开头登记值为准。
+README 受 `METADATA-SHA256SUMS` 绑定，未改写。
+本机原件于 2026-11-08 经负责人批准（方案甲）删除，记录见 STATUS_LOG 同日条目。
 
 ## 插拔、中断和更换磁盘
 

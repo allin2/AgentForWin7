@@ -69,6 +69,22 @@ function Assert-Writer {
   if ($rows.Count -ne 4 -or $rows[1] -cne $D['holder'] -or $rows[3] -cne $D['token']) { throw 'LOCK_NOT_OWNED' }
 }
 function Development-Root-Limit([string]$holder, [DateTime]$at) {
+  # A9-66/67 2026-11-13: owner-approved 25 GB DEV_CHANNEL window, exact holder.
+  $a9667Start = [DateTime]::Parse('2026-11-13T11:00:00.000Z').ToUniversalTime()
+  $a9667End = [DateTime]::Parse('2026-11-13T15:00:00.000Z').ToUniversalTime()
+  if ($holder -ceq 'a946lanrx' -and $at -ge $a9667Start -and $at -lt $a9667End) { return [long]25000000000 }
+  # ENGINEERING_03 section 10.12: owner-approved file sorting probe, this window only.
+  $fileSortStart = [DateTime]::Parse('2026-11-11T03:21:21.650Z').ToUniversalTime()
+  $fileSortEnd = [DateTime]::Parse('2026-11-11T04:21:21.650Z').ToUniversalTime()
+  if ($holder -ceq 'a946lanrx' -and $at -ge $fileSortStart -and $at -lt $fileSortEnd) { return [long]24000000000 }
+  # A9-58 section 7.2: owner-approved 24 GB; exact holder and new window.
+  $a958Start = [DateTime]::Parse('2026-11-11T01:34:31.856Z').ToUniversalTime()
+  $a958End = [DateTime]::Parse('2026-11-11T02:34:31.856Z').ToUniversalTime()
+  if ($holder -ceq 'a946lanrx' -and $at -ge $a958Start -and $at -lt $a958End) { return [long]24000000000 }
+  # A9-57 section 6.4: owner-approved 23 GB; exact holder and window.
+  $a957Start = [DateTime]::Parse('2026-11-10T08:11:28.130Z').ToUniversalTime()
+  $a957End = [DateTime]::Parse('2026-11-10T09:11:28.130Z').ToUniversalTime()
+  if ($holder -ceq 'a946lanrx' -and $at -ge $a957Start -and $at -lt $a957End) { return [long]23000000000 }
   # A9-44 section 9.18 K6: second alpha.4 shortest-chain run, exact holder and window only.
   $a4wSecondStart = [DateTime]::Parse('2026-11-04T04:41:05.000Z').ToUniversalTime()
   $a4wSecondEnd = [DateTime]::Parse('2026-11-04T06:11:05.000Z').ToUniversalTime()
@@ -77,6 +93,14 @@ function Development-Root-Limit([string]$holder, [DateTime]$at) {
   $a4wStart = [DateTime]::Parse('2026-11-04T04:11:39.000Z').ToUniversalTime()
   $a4wEnd = [DateTime]::Parse('2026-11-04T05:41:39.000Z').ToUniversalTime()
   if ($holder -ceq 'a4w-c0c02003' -and $at -ge $a4wStart -and $at -lt $a4wEnd) { return [long]24000000000 }
+  # A9-44 section 9.13: separately approved second window, same holder; no takeover.
+  $a944SecondStart = [DateTime]::Parse('2026-11-01T10:20:42.758211Z').ToUniversalTime()
+  $a944SecondEnd = [DateTime]::Parse('2026-11-01T11:20:42.758211Z').ToUniversalTime()
+  if ($holder -ceq 'a944-0f817a86' -and $at -ge $a944SecondStart -and $at -lt $a944SecondEnd) { return [long]35000000000 }
+  # A9-44 section 9.9: exact holder, original window; no general quota change.
+  $a944Start = [DateTime]::Parse('2026-11-01T09:33:38.965456Z').ToUniversalTime()
+  $a944End = [DateTime]::Parse('2026-11-01T10:24:58.038253Z').ToUniversalTime()
+  if ($holder -ceq 'a944-0f817a86' -and $at -ge $a944Start -and $at -lt $a944End) { return [long]35000000000 }
   # ADR-0310: separately approved fifth window.
   $fifthStart = [DateTime]::Parse('2026-10-31T01:16:21.000Z').ToUniversalTime()
   $fifthEnd = [DateTime]::Parse('2026-10-31T02:46:21.000Z').ToUniversalTime()

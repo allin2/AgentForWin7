@@ -652,6 +652,251 @@ workflow_dispatch 须默认分支含文件；本轮使用 push 已触发，不�
 当前 CI 配置仅在私有工作分支，未宣称主分支 CI 已落地。
 准确回执见本机 `outputs/eng06-theme-ci-r1/`，重点为 `CONTENT_VERDICT.json`、`theme-ci-r1-receive.json`、`CI_RESULT.json`、`CI_DIAGNOSIS.json` 与 `COLLECTION_VERIFICATION.json`。
 
+### 1.14 czl 登录快照 r2：精简工具并预置 Node 与 npm 缓存（2026-11-03 负责人确认）
+
+负责人要求卸载 Antigravity 与 T3 relay cloudflared，并按选项甲执行。
+本节为 APPROVED_FOR_IMPLEMENTATION。授权唤醒 czl 母机、保存新快照、从新快照建一台验证机。
+
+| 项目 | 本轮边界 |
+|---|---|
+| 母机 | 唤醒 `eng06-czl-agy`；卸载 agy 1.4.12 二进制与其用户数据；`t3 connect unlink` 后删除托管 cloudflared |
+| 保留 | Claude Code、Codex、T3 后端服务、GNOME 钥匙串服务及其 drop-in；T3 服务依赖钥匙串，不改服务配置 |
+| 预置 | Node `20.17.0`（官方 tarball，按 prepare-linux.sh 的 SHA-256 校验）；以 `32b16ec` 的九份锁文件运行 `npm ci` 预热 `~/.npm` 缓存，随后删除临时目录 |
+| 不预置 | 项目源码与九处 `node_modules`；`npm ci` 会删除已有 `node_modules`，环境仍由准备脚本与锁文件定义 |
+| 快照 | 新建 `eng06-czl-base-r2-20261103`；旧快照 `sn_agqzcjtc…` 保留为上一版 |
+| 验证机 | 从 r2 建一台，立即停 T3；核对工具、凭据元数据与准备步骤耗时后删除 |
+| 排除 | 模型请求、GitHub 写操作、部署密钥、其他账号、Win10、Win7、提交、推送与发布 |
+| 停止 | 母机身份不符、Codex 登录失效、unlink 失败、SHA 不符、凭据异常变化即停止后续阶段，母机保留 |
+
+本轮证据写入 `outputs/instabox-czl-base-r2/`。
+
+#### 1.14.1 结果：r2 快照 PASS
+
+执行代理完成卸载、预置、保存与验证机核对。证据层级为开发机，锁文件来源提交 `32b16ec7…`。
+新快照为 `sn_agq2insh2yy7icp6jcyzhbyeje`（`eng06-czl-base-r2-20261103`），2026-11-04T01:39:43Z ready。
+后续工作包以 `wp.py open --snapshot sn_agq2insh2yy7icp6jcyzhbyeje` 使用；脚本未写死快照 ID。
+
+| 项目 | 执行代理直接结果 |
+|---|---|
+| 卸载 | agy 二进制、`~/.gemini`、agy 登录目录、T3 的 antigravity-acp 工具（约 1013 MiB）与 provider 数据、托管 cloudflared 均已删除；T3 设置中 antigravity provider 改为 `enabled=false`，重启后未重新下载 |
+| T3 Connect | 本机 `connect unlink` 生效：Exposure disabled、Relay not provisioned；服务端环境记录撤销返回 HTTP 400，需负责人在 T3 Connect 页面注销 |
+| 一并删除 | §1.3 试跑留下的 `~/projects/win7-coding-agent`（1.5 GiB，含源码与依赖）；`~/eng06-base`、`~/eng06-czl-workflow-r1` 保留未动 |
+| Node | 重新下载官方 tarball，SHA-256 PASS；已装 `~/.local/opt/node-v20.17.0-linux-x64` 与 tarball 逐文件相同 |
+| npm 缓存 | 清空旧缓存后以九份锁文件 `npm ci` 预热，冷启动 26.6 秒；`~/.npm` 76 MiB，Electron 缓存 90 MiB |
+| 版本 | Claude Code `2.1.316`、Codex `0.166.0`（均为母机自动更新后版本）；模板 Node `22.23.3` |
+| 验证机 | 从 r2 建出后立即停 T3，cloudflared 不存在；准备脚本 21.1 秒退出 0，输入指纹 `062e3ff5…` 与 Mac 相同；离线 `npm ci` 九处 9/9 PASS |
+| 凭据 | 验证机前后凭据元数据不变；Claude `96bcadf2…`、Codex `2f8930ed…`，与 11-02、11-03 工作包基线相同 |
+| 资源 | 验证机已删除；母机 suspended；快照 r1、r2 均 ready |
+
+母机 Claude 凭据在 T3 重启时被 Claude Code 清空（令牌为空、expiresAt=0），即 §1.8.1 的过期登录。
+Claude 员工按 §1.11 使用钥匙串令牌，不受影响；快照内 Claude 登录不可用。
+模型请求、GitHub 写操作、部署密钥、其他账号、Win10、Win7、提交与推送均未执行。
+
+### 1.15 czl 登录快照 r3：卸载 T3 后端与钥匙串（2026-11-04 负责人确认）
+
+负责人选甲：卸载 T3 后端与 GNOME 钥匙串服务，修改 `STOP_T3`，保存 r3。
+本节为 APPROVED_FOR_IMPLEMENTATION；本节取代 §1.1 对 czl 工作机安装 T3 后端的要求，其他账号不在本轮。
+
+| 项目 | 本轮边界 |
+|---|---|
+| 工具 | `wp.py` 的 `STOP_T3` 在 `t3code.service` 不存在时视为已停止；补一条离线测试；不改其他未提交改动 |
+| 母机 | 唤醒后再试一次 `t3 connect unlink`；停用并删除 T3 用户服务、`~/.t3`、`~/.local/bin/t3`；删除钥匙串 drop-in、解锁文件与钥匙串数据，按 APT 模拟结果卸载 `gnome-keyring` |
+| 保留 | Claude Code、Codex 及其登录文件、Node 20.17.0、npm 与 Electron 缓存 |
+| 快照 | 新建 `eng06-czl-base-r3-20261104`；r1、r2 保留 |
+| 验证机 | 从 r3 建一台；运行新 `STOP_T3`、准备脚本、离线 `npm ci` 与凭据核对后删除 |
+| 排除 | 模型请求、GitHub 写操作、其他账号、Win10、Win7、提交与推送 |
+| 停止 | APT 模拟要连带删除 Claude、Codex、Node、git、curl、python3 或模板浏览器组件时，不卸载该包并报告；身份不符或凭据异常变化即停止 |
+
+本轮证据写入 `outputs/instabox-czl-base-r3/`。
+
+#### 1.15.1 结果：r3 快照 PASS
+
+执行代理完成工具修改、母机卸载、保存与验证机核对。证据层级为开发机，锁文件来源提交 `32b16ec7…`。
+新快照为 `sn_agq2iremdny6xo5jryhjg7wxcq`（`eng06-czl-base-r3-20261104`），2026-11-04T01:55:18Z ready。
+后续工作包改用 `wp.py open --snapshot sn_agq2iremdny6xo5jryhjg7wxcq`；§1.14.1 的 r2 用法由本节取代，r1、r2 保留。
+
+| 项目 | 执行代理直接结果 |
+|---|---|
+| 工具 | `STOP_T3` 先读 `LoadState`，`not-found` 时不执行 stop 并输出 `t3Installed=false`；新增离线测试，`test_wp.py` 55/55 PASS，临时目录无残留；改动未提交 |
+| unlink 重试 | 本机已为 disabled；服务端撤销仍失败，T3 Connect CLI 凭据刷新返回 `invalid_grant` |
+| T3 | 用户服务停用并删除；`~/.t3`（1.1 GiB）、`~/.local/bin/t3`、安装记录目录与 `~/eng06-base` 内 T3 Connect 文件已删除 |
+| 钥匙串 | 服务停止，drop-in、解锁文件与钥匙串数据已删除；`gnome-keyring` 已 purge；autoremove 的 19 个包全部属于其原安装记录 |
+| 保留 | Claude Code 2.1.316、Codex 0.166.0、git、python3、curl、Node 20.17.0、npm 与 Electron 缓存；Linger=yes 未改 |
+| 母机凭据 | 卸载前后元数据不变：Claude `96bcadf2…`、Codex `2f8930ed…` |
+| 验证机 | 新 `STOP_T3` 输出 `t3Installed=false`、stop 退出码 0、after=inactive，`stop_t3` 判定 PASS；无 T3、agy、keyring、cloudflared 进程或文件 |
+| 准备 | 准备脚本 21.6 秒退出 0；输入指纹 `062e3ff5…` 与 Mac 相同；离线 `npm ci` 9/9 PASS；凭据前后不变 |
+| 资源 | 验证机已删除；母机 suspended；快照 r1、r2、r3 均 ready |
+
+`~/.config/chromium`（93 MiB，模板浏览器配置）保留；其加密密钥原存于已删除的钥匙串。
+`~/eng06-base` 只剩 Claude、Codex 登录辅助脚本与进程记录。
+T3 Connect 服务端环境记录仍需负责人在 T3 Connect 页面注销。
+负责人 2026-11-04 截图：Mac 客户端 Environments 仍列出 `instabox-eng06-czl-agy`，状态为 Not added、Relay offline；服务端记录是否已注销为 UNKNOWN。
+负责人随后确认已在 T3 Connect 删除该环境记录；执行代理未独立核对服务端。
+同日执行代理恢复母机只读盘点后重新暂停（`outputs/instabox-czl-base-r3/24-audit-mother.json`）：与 r3 保存前一致，T3、agy、钥匙串、项目目录与工作包目录均不存在，用户服务单元目录为空，`~/.ssh` 为空；凭据元数据未变。
+恢复后运行的是模板桌面（Xvnc、xfce、chromium）与两个 Codex 进程；监听端口为 22、5901 与回环 43055；进程不进入快照。
+模型请求、GitHub 写操作、其他账号、Win10、Win7、提交与推送均未执行。
+
+### 1.16 czl 登录快照 r4、登录测试与旧快照删除（2026-11-04 负责人确认）
+
+负责人选甲并加上执行代理建议的三项，要求从新快照建机测试 Codex 与 Claude 能否登录。
+本节为 APPROVED_FOR_IMPLEMENTATION。
+
+| 项目 | 本轮边界 |
+|---|---|
+| 母机删除 | 先停 chromium，再删 `~/.config/chromium`、`~/.cache/chromium`、`~/eng06-base`、`~/eng06-czl-workflow-r1`、已清空的 `~/.claude/.credentials.json` |
+| 只读检查 | 列出 `~/.codex` 目录与大小、`~/.claude.json` 字段名；不读取字段值，不删除，结果交负责人决定 |
+| 快照 | 新建 `eng06-czl-base-r4-20261104` |
+| 验证机 | 从 r4 建一台；停 T3 检查、准备脚本、离线 `npm ci` |
+| 模型请求 | Codex 一次（快照登录）、Claude Code 一次（§1.11 钥匙串令牌），均为最短只读请求，各限 300 秒；认证失败不重试 |
+| 旧快照 | r4 验证与登录测试均 PASS 后删除 r1 `sn_agqzcjtc…` 与 r2 `sn_agq2insh…`；任一失败则保留 |
+| 排除 | GitHub 写操作、其他账号、Win10、Win7、提交与推送 |
+| 停止 | 身份不符、凭据异常变化、令牌出现在回收文件中，即停止后续阶段 |
+
+本轮证据写入 `outputs/instabox-czl-base-r4/`。
+
+#### 1.16.1 结果：r4 快照与登录测试 PASS
+
+证据层级为开发机，锁文件来源提交 `32b16ec7…`。
+新快照为 `sn_agq2jii7qd46ez2r4afj3gbbku`（`eng06-czl-base-r4-20261104`），2026-11-04T03:36:25Z ready。
+后续工作包改用 `wp.py open --snapshot sn_agq2jii7qd46ez2r4afj3gbbku`；§1.15.1 的 r3 用法由本节取代，r3 保留为上一版。
+
+| 项目 | 执行代理直接结果 |
+|---|---|
+| 母机删除 | chromium、`~/.config/chromium`、`~/.cache/chromium`、`~/eng06-base`、`~/eng06-czl-workflow-r1`、Claude 空凭据文件均已删除；15 秒后 chromium 未被重新拉起 |
+| chromium 来源 | 运行中的 chromium 由 `sensible-browser` 打开 Claude OAuth 授权页启动，即 T3 重启时 Claude 发现登录过期后的自动行为，不是模板自启 |
+| 只读检查 | `~/.codex` 无会话记录文件；含 `logs_2.sqlite` 约 0.9 MiB、`memories_1.sqlite`、`state_5.sqlite` 与 `packages` 943 MiB；`~/.claude.json` 含 `oauthAccount` 账号资料与两个本地 stdio MCP 配置，无令牌字段；`~/.claude/sessions` 有一个旧会话 `.key` 文件；均未删除 |
+| 验证机 | 新 `STOP_T3` PASS；删除项均不存在；准备脚本 21.6 秒退出 0，指纹 `062e3ff5…` 与 Mac 相同；离线 `npm ci` 9/9 PASS |
+| Codex 登录 | 快照内 ChatGPT 登录；一次 `codex exec` 只读请求退出 0，5.6 秒，返回 `OK`；`auth.json` 元数据前后不变 |
+| Claude 登录 | 钥匙串令牌 `czl-claude` 上传 0600 文件，读入环境变量后文件已删除；一次 plan 模式请求退出 0，3.3 秒，返回 `OK`，`is_error=false`；机器上未生成凭据文件 |
+| 令牌检查 | 本轮回收证据文件无令牌命中；验证机删除前 `~/tmp` 与 `~/.wp-secrets` 为空 |
+| 旧快照 | r1 `sn_agqzcjtc…`、r2 `sn_agq2insh…` 已删除；账号剩 r3、r4 两个快照与 suspended 母机 |
+
+r3 仍含 Claude 空凭据文件与 chromium 配置。
+负责人 2026-11-04 按推荐裁决：只读检查发现的 `~/.codex` 日志库与 `packages`、`~/.claude.json` 账号资料、旧会话 `.key` 均保留，不做 r5。
+模型请求共 2 次；GitHub 写操作、其他账号、Win10、Win7、提交与推送均未执行。
+
+### 1.17 按角色准备独立 Snapshot（2026-11-05 负责人后继确认）
+
+负责人要求按前述开发、审核、测试与 CI 建议配置 Snapshot，按需从快照启动；本轮继续该指示。
+本节为 APPROVED_FOR_IMPLEMENTATION。实际分支为 main，起始 HEAD 为 `305c100bf821c932f3bc529a8f08b84efca1aeef`；既有 dirty/untracked 保留。
+交付是账号内可恢复的角色快照与准确启动说明，不配置常驻母机。
+
+| 项目 | 本轮边界 |
+|---|---|
+| czl 开发 | 只读确认既有 r4；不唤醒母机，不复制其中的个人登录、配置或会话到其他账号 |
+| chai2 审核兼测试 | 从同版官方模板新建临时机，准备相同开发工具与依赖缓存；快照不存模型认证。Claude 令牌仅运行时注入，审核仍由工作包只读模式约束 |
+| chai521 测试 | 独立干净工具链与缓存；不配置模型登录或 Git 写入凭据 |
+| cw 机动开发 | 独立准备 Agent 工具与缓存；不复制 czl/Codex 登录，模型认证在任务启动时单独提供 |
+| CI | 沿用现有 Actions 的 instabox-medium 与准备脚本；不进入或修改 ci/monster，不修改 GitHub 配置 |
+| 资源 | 每个新增账号最多一台临时机同时存在；各一台准备机和一台恢复验证机，串行执行。4 vCPU、8192 MiB、20 GiB 持久盘；不扩容、不订阅，机器设有界自动删除期限 |
+| 检查 | 绑定模板摘要、Node、CLI 与当前提交锁文件；真实 Node/SQLite、快照 ready、恢复后离线 npm ci 9/9、无个人登录与临时秘密；chai2 最多一次 Claude 最短只读请求，认证失败不重试 |
+| 收尾 | 保存回执与结果后逐台核对本轮机器 ID/名称并回收，只保留新快照；既有机器与快照不删除 |
+| 停止 | 身份/完整性/秘密边界失败立即停止依赖动作；创建或执行丢回执先只读核对，不盲目重发；同类失败两轮先定位共同原因 |
+
+最短链路为 chai2：官方模板建机 → 固定工具链与缓存 → 保存快照 → 回收准备机 → 从快照恢复 → 离线依赖/SQLite 检查 → 回收验证机。
+先跑通一个新增账号再应用到 chai521、cw。普通本地修复和同范围有界重试继续执行。
+开发机工具沿用 `agent-browser@2026-10-29.18`，摘要 `bd882c53…`。项目 Node `20.17.0` 使用既有官方 tarball SHA-256 锁。
+Agent CLI 对齐 r4 的 Codex `0.166.0` 与 Claude Code `2.1.316`，从官方 npm 注册表安装到本轮用户级目录；准确 SHA-512、许可证与传递闭包分别保留在 `agent-cli-lock.json` 和安装生成的 package-lock 中。
+Claude npm 包要求 Node 22；安装使用模板 `/usr/local/bin/node` `22.23.3`。Agent 的 JS 启动器显式使用该 Node，原生入口直接启动；项目命令继续使用独立 Node `20.17.0`。不改变目标产品运行时，不安装新系统服务。
+角色配置只记录用途和启动约定；审核写权限仍由现有 `wp.py --mode review` 控制，不能把配置字段作为沙箱证明。
+本轮只产生 Linux 开发机环境证据；产品测试、Windows 打包、Win10、Win7、正式门 A/B、提交、推送与发布均为 NOT_PERFORMED。
+证据沿用本机 `outputs/instabox-role-snapshots-20261105/`；结果追加本节，不另建任务台账。
+
+#### 1.17.1 结果：三个新角色快照恢复检查 PASS
+
+执行代理在 Linux 开发机完成三个账号独立准备、保存与恢复，绑定 main `305c100b…` 的准确锁文件。
+输入指纹 `062e3ff5…` 与 Mac 相同。没有修改产品或验收候选。
+
+| 账号与用途 | 新 Snapshot ID | 恢复至 API ready 耗时 | 恢复实例直接检查 |
+|---|---|---|---|
+| chai2 审核兼测试 | `sn_agq27fp7om7swosgvyoh5nukbe` | 20.407 秒 | 离线 npm ci 9/9、SQLite、固定 CLI、工作包 PATH、无持久凭据 PASS；Claude plan 一轮返回 OK，2.405 秒 |
+| chai521 专用测试 | `sn_agq27g2x5ufj5f3bblolnkjrna` | 24.481 秒 | 离线 npm ci 9/9、SQLite、工具链、无凭据与临时目录清理 PASS；无模型调用 |
+| cw 机动开发 | `sn_agq27higwvesnp6fpfy4njkfli` | 32.096 秒 | 离线 npm ci 9/9、SQLite、固定 CLI、无凭据与临时目录清理 PASS；无模型调用 |
+
+三个快照均为 ready。三台准备机和三台恢复验证机均逐台回收，回执为 succeeded；对应账号最终机器为 0。
+chai2 与 cw 安装生成的 Agent package-lock 完全相同，17 个锁条目保留在各自 `*-closure.json`。
+cw Codex 仅完成 CLI 安装，没有登录；新快照的 Claude 凭据均在工作包启动时注入。
+本次 chai2 最短请求使用本机钥匙串 `czl-claude` 引用，未复制 czl 的登录文件；令牌临时文件已删除，未生成持久化模型凭据。
+
+首个 Claude 探针在模型请求前退出 1：`--mcp-config` 吞入了尾部位置参数提示词。
+执行代理改为标准输入提供提示词，并将临时目录核对移至清理钩子之后；原 FAIL 和新结果分别保留。
+修正后仅发出一次有效模型请求，1 轮、0 工具调用，响应及本轮回收文件无令牌命中。
+
+czl r4 本轮仅直接核对 ready 与母机 suspended，恢复与模型能力见原 §1.16.1，不冒充本轮重验。
+ci/monster 保持原 running 身份，未进入或改动。Actions 沿用既有入口，本轮触发为 NOT_PERFORMED。
+角色映射与可复制启动说明在本机 `outputs/instabox-role-snapshots-20261105/ROLE_SNAPSHOTS.md`；映射亦保存到本机无秘密的 `~/.config/win7-coding-agent/instabox/role-snapshots.json`。
+现有包装器继续显式传 account/snapshot；角色映射不会自动改变工作包权限或替其他项目改仓库绑定。
+Windows 打包、产品测试、Win10/Win7、门 A/B、提交、推送与发布均为 NOT_PERFORMED。
+
+### 1.18 monster 完整快照、CI 排队释放与重开（2026-11-06 负责人后继确认）
+
+负责人明确要求：“暂停保存snapshot，并且重新开一个，推进ci”。
+本节为 APPROVED_FOR_IMPLEMENTATION。实际分支为 main，HEAD 为 `ef6a692294fa4e0403b2d1e00ea188b2e79749f8`。
+执行代理保留既有 dirty/untracked。范围是 ci 账号内保存准确旧机、释放名额、推进既有 CI 并恢复一台 monster。
+本节取代 §1.17 对本轮 ci/monster 不操作的限制，不扩大到其他账号、付费、权限或产品修改。
+仅在完整快照 ready 后删除旧机；身份、快照或操作回执未知时停止依赖动作，先只读核对。
+未新建提交、推送、发布或执行 Win10/Win7 与正式门 A/B。
+
+执行代理在开发机通过 HTTPS 管理接口和 Linux 恢复实例完成检查。
+快照绑定旧机 `m_agq2dno6aosetfvfik2uzzdh4a`，包含系统盘及 `/data`，不包含进程内存。
+快照不跨账号分享；登录、服务和旧任务恢复未验证。
+
+| 项目 | 本轮直接结果 |
+|---|---|
+| 原机与快照 | 原机已 suspended、storage.synced=true；暂停状态快照请求被拒绝后，短暂 resume 保存 live snapshot，再 suspend |
+| 完整快照 | `eng06-ci-monster-r1-20261106` / `sn_agq3jh5sngsekutorcmajt27fy`，ready；模板摘要 `80806267…`，系统盘 16 GiB、数据盘 20 GiB |
+| 名额释放 | 快照 ready 后删除准确旧机，操作 succeeded；平台随即分配既有 CI runner |
+| A9-49 CI | staging run `42234498020` / `a1494791…` success；Gateway 20 套、329 项 PASS；Shell 64 套、1448 项 PASS、12 项跳过 |
+| 公开主题 CI | runs `42186628416` / `60dab821…`、`42187193665` / `1d357ea9…`、`42198089954` / `82729c35…` 均 success；各 23 项 PASS |
+| 重开 | 从完整快照恢复 monster / `m_agq3jlb5gr2blsx3gxu4xoxhrm`，running、runtime.ready=true、vault=true；系统盘、数据盘和 HOME 目录检查 PASS |
+| 默认运行限制 | autoSuspendAfterSeconds=1800、maxRunMinutes=120；旧机曾为 480。新机沿用平台默认，不申请管理员覆盖 |
+
+两次重开请求均因显式设置免费机器的 maxRunMinutes=480 被 403 拒绝。
+原先对 Vault 或只读 Key 的归因不成立；省略该权限字段后，同一 Key 建机 succeeded。
+保留原失败文件并在最终报告补正，不覆盖既有回执。
+旧机未采集逐文件哈希，原机与恢复机的逐文件等价为 NOT_VERIFIED。
+免费账号仍只有一台机器名额，paused 也占用；重开的 monster 会占住后续 CI 名额。
+本轮四个既有排队 CI 已 success；未修改 Actions 配置、App 权限或 secrets。
+准确回执、四份 CI 日志与队列收尾见本机 `outputs/instabox-ci-refresh-20261106/FINAL_RESULT.json`。
+
+### 1.19 三台角色机 Codex 独立账号登录（2026-11-07 负责人后继确认）
+
+负责人明确要求在其他角色机登录其另外的 Codex 账号，并确认“恢复并登录 chai2、cw、chai521 三台”。
+本节为 APPROVED_FOR_IMPLEMENTATION。实际分支 main，HEAD 为 `ef6a692294fa4e0403b2d1e00ea188b2e79749f8`；既有 dirty/untracked 保留。
+执行代理从 §1.17 的各账号快照恢复一台 4 vCPU / 8 GiB 实例，逐台启动官方 Codex 授权并核对登录结果。
+负责人在官方授权页选择各自账号；不复制 Mac、czl 或其他实例的 Codex 登录材料。
+本节取代 §1.17 对这三台本轮模型登录的限制；原角色快照保留，本轮不将新登录保存进快照。
+机器保留平台空闲暂停和最长运行限制，不设自动删除期限，以保留本轮账号登录。
+czl 现有实例及登录、ci/monster、产品、GitHub 配置、提交、推送、Windows 与正式门 A/B 不在范围内。
+成功条件为三台实例身份匹配、恢复 ready、Codex 官方登录完成且状态命令成功，凭据仅留目标机的用户私有存储。
+模型生成未执行时记 NOT_PERFORMED，不由登录状态推断调用权限或额度。
+身份或秘密边界失败停止该台；创建或执行丢回执先只读对账，不盲目重发；其余独立操作继续。
+证据沿用 `outputs/instabox-role-snapshots-20261105/codex-login-20261107/`，只保留脱敏结果。
+上次中断发生在首台创建前的身份 GET，未发出创建请求；本轮已直接核对三账号机器为空、快照 ready。
+
+#### 1.19.1 恢复结果与登录进度
+
+开发机直接检查绑定上述 HEAD。三台恢复操作均 succeeded，实例均 running、runtime.ready=true，原快照均 ready。
+
+| 账号 | 本轮实例 | Codex 直接检查 | 官方登录 |
+|---|---|---|---|
+| chai2 | `m_agq3lbefamvlptducfjszc7o5e` / `eng06-chai2-codex-20261107` | `0.166.0`，状态命令退出 0、chatgpt | PASS；官方设备授权，账号匹配 |
+| cw | `m_agq3lbhvcxosaxppo5plbw6riy` / `eng06-cw-codex-20261107` | `0.166.0`，状态命令退出 0、chatgpt | PASS；普通 OAuth，账号匹配 |
+| chai521 | `m_agq3lbksvqwx52rsmxtz3ud2x4` / `eng06-chai521-codex-20261107` | 模板已有 `0.160.0`，状态命令退出 0、chatgpt；未安装或升级 | PASS；官方设备授权，账号匹配 |
+
+三台 deleteAfterSeconds 均为 null，autoSuspendAfterSeconds=1800、maxRunMinutes=120。
+负责人通过安全输入指定账号，并要求使用本机 Chrome。
+chai2 与 chai521 使用负责人指定的同一账号，各自生成独立登录会话；cw 使用另一个指定账号。
+三台 `~/.codex/auth.json` 均为 0600，目录为 0700。逐台核对用户 UID=1000、账号匹配和状态命令退出 0。
+全部本轮登录 supervisor 已退出，系统临时目录已由清理钩子回收；脱敏摘要保留在目标机用户私有缓存。
+账号、令牌、设备码和密码不写入本机证据。恢复回执、CLI 状态及限制见 `RUN.json`、`restore-verification.json` 和各账号前检。
+绑定成功结果的回执为 `chai2-device-r2-verification.json`、`cw-browser-r3-verification.json`、`chai521-device-r2-verification.json`；进程与临时目录见各账号 `*-postflight.json`。
+首台旧设备流程在切换方式时提前终止；随后浏览器 OAuth 因页面等待达到 900 秒期限，回调时监听器已关闭。
+以上未登录结果及回执保留；新设备流程完成后直接核对账号和凭据，不由网页成功提示推断云机成功。
+cw 账号未启用设备码登录；执行代理停止该流程，改用普通 OAuth，将本轮回调转交目标机回环监听器，HTTP 200。
+本轮未修改账号安全设置、复制其他机器凭据或保存新的登录快照。
+模型生成、产品测试及 Windows 验证均 NOT_PERFORMED；不据此确认模型调用权限、额度或重建后的登录恢复。
+
 ## 2. 验证与停止条件
 
 - 开发机直接核对四组凭据的只读接口结果；写权限不以读取成功推断。

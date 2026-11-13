@@ -128,3 +128,13 @@ A9-3440 配置须带 `source_binding_sha256`，绑定文件包含 `schema_versio
 本机 Node16 部署/绑定入口为 `ELECTRON_RUN_AS_NODE=1 <Electron22> scripts/win7-dev/test/a9-43-binding-runtime.cjs --output=<绝对新目录>`。
 
 ADR-0308 另批准第四窗口：准确 holder `a942-751c-7f41ca1c` 从 `2026-10-30T23:45:35.980Z` 至 `2026-10-31T01:15:35.980Z`（截止不含）容量为 30 GB；最低剩余 50 GB，其他时段沿用原规则。
+
+### A9-44 主题增量本地技能
+
+本机 `/run-win7-coding-agent` 的文件位于 `.claude/skills/run-win7-coding-agent/`。
+该目录被 Git 忽略，不随干净克隆提供。
+`driver.mjs` 只生成本地材料并核验回收结果，不连接目标机。
+`SKILL.md` 与 `RUNBOOK.md` 记录候选外驱动、真实输入和正常退出方法。
+准确产品绑定、历史实机结果与本轮离线边界见 [A9-44 §9.14、§9.15](../../docs/tasks/A9_44_WORKBENCH_DARK_THEME.md)。
+新入口实机验证为 NOT_PERFORMED；新运行须有有效范围与窗口。
+旧运行窗口、容量例外与锁接管均不延续。
