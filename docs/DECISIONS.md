@@ -5549,3 +5549,14 @@ Claude P2-1、P2-3 已补测试，P2-4 已修复；P2-2 按裁决保留为 K7。
 - 决定：关闭按六个固定阶段接入ADR-0328日志。30秒仅报告，原清理继续；同次尝试共享一次报告，晚到成功继续原关闭。不同stopManaged策略返回A9_SHUTDOWN_POLICY_CONFLICT，不发起并发清理；无法确认清理时保留工作区锁。原关闭返回字段与含义不变。
 - 边界：不新增IPC通道或请求schema、持久化格式、依赖、原生组件、系统权限；不给工具、用户命令或模型请求增加固定deadline。原生错误框capture与受控清理外设只作开发机证据；30秒/8秒未在Win7校准。
 - 合同与验证：见A9-65任务书。本轮仅本地收口和消费者检查；Win7、打包、正式门A/B、公开推送及发布仍为NOT_PERFORMED。
+
+## ADR-0330 A9-64 异步目录扫描、取消与归属一致性
+
+- 状态：Accepted
+- 日期：2026-11-12
+- 背景：负责人要求推进A9-64/A9-65收口，并返回绑定e7905f53…的独立复审建议合入。登记已批准并复核的接口行为，不扩大实现范围。
+- 决定：list/search接受可选AbortSignal；Core传递当前Turn信号，旧调用不传参仍可用。目录读取异步，扫描按既有25ms时间片让出；原生localeCompare排序不让出，前后检查取消。搜索行循环每256行检查，保留文件间检查。
+- 决定：根目录读取失败用DIRECTORY_READ_FAILED；根路径为文件时明确拒绝。子目录普通读取失败继续扫描。list/search的skipped详情最多50项，skippedTotal记录全部跳过事实；search保留skippedFiles分类并返回matches/files截断原因。容量、忽略、遍历顺序与停止上限不变；路径只进入工具结果，不新增诊断日志载荷。
+- 决定：首次await前绑定canonical目录与dev/ino/birthtime；真实I/O、让出及返回边界复核根和当前目录。身份漂移或无法确认时拒绝，不把身份错误吞成普通跳过。search重新lstat旧Dirent对应文件，新符号链接按stat_failed跳过；稳定外部入口仍允许且标识outsideWorkspace=true。
+- 边界：Full Access仍是可信工作区，不是原子文件系统沙箱。既有同步lstat/readFileSync间隙和跨进程ABA窗口保留；不保证整树快照。单文件同步读取、原生排序与正则回溯限制不变。无新依赖、原生、持久化、系统权限或IPC请求schema。
+- 验证：独立复审绑定e7905f53…；本地合并8069a5ba…直接Workspace500/500、Core924/924、五个Shell消费者文件879/879，双运行时真实Core→Workspace各12/12。Win7、完整GUI、打包、门A/B和公开交付均NOT_PERFORMED。原FAIL保留，详见A9-64任务书末节。

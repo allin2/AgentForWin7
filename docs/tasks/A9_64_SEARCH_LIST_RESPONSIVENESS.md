@@ -5,7 +5,7 @@ Status: APPROVED_FOR_IMPLEMENTATION
 Task Type: PRODUCT_RELIABILITY_HARDENING
 Target Branch: a9-64-search-list-responsive
 Source Baseline: 4dfabf18f41b4f75dd3c910fd0149d1995c5ac93
-Phase-Gate: A9_64_REVIEW_P1_BLOCKED
+Phase-Gate: A9_64_DEVELOPER_VERIFIED
 Win7-Validation: NOT_PERFORMED
 ```
 
@@ -186,3 +186,25 @@ P2 跳过列表：list 两处子目录失败入口统一计数，`skipped` 详�
 原消费者探针仅把文件metadata错误注入位置由statSync改为新消费者的lstatSync，全部原断言保留；来源与SHA见PROBE_PROVENANCE.json。原报告脚本未改，原审查证据未覆盖。本轮性能重新测量，不再把旧服务同字节性能记录继承给新服务。最长停顿是10ms定时器间隔减10ms的估计；开发机数值不构成Win7承诺。
 P2以协调后的完整任务书同步到两条分支；保留第五轮补记、main收口登记、新审查及本轮返修。准确两侧文档提交及只读合并预演写入DOC_COORDINATION.json，不为解决文档冲突合入产品。
 最终准确源码/构建/脚本哈希、保护与清理结果见本目录RESULT_FINAL.json。原独审P1仍待独立复核；main产品、Win7、Win10、完整GUI链路、打包、门A/B、推送与发布均NOT_PERFORMED。
+
+## 2026-11-13 UTC 独立复审与本地整合
+
+结论：A9_64_DEVELOPER_VERIFIED。负责人返回独立复审，绑定完整提交e7905f53ab8304ec7199f2050f4d245f08b8e9cf，建议合入本地main。P1异步目录归属反例在Node20和Electron22/Node16关闭，未发现新增阻断性P0/P1；P2任务书已协调。原923bf875…审核FAIL及本任务历史阻断记录永久保留，不改判。
+
+执行代理按既有收口授权在main原基线13cbc55b5cb86ad23ea7de1a0817ac7d740c7395执行本地整合。合并提交8069a5ba837b9173fa078f0852d5df29b26177ac，包含原main的A9-65及已审A9-64；本轮无产品返修。既有dirty/untracked保持，A9-64/A9-65分支HEAD与原报告不改。接口决定补记ADR-0330。
+
+最短真实链路先构建七模块，再以main当前dist执行真实Core→Workspace→下一脚本Provider步骤、取消和错误消费者；Provider是夹具，不是真实模型。随后执行受影响回归。结果绑定main合并提交及保留的既有dirty，源码和构建SHA见outputs/a9-64-main-closeout-20261113/SOURCE_BUILD_BINDING.json。
+
+| 检查 | 开发机直接结果 | 证据 |
+|---|---|---|
+| 构建与静态门 | 七模块PASS，先完成依赖构建再消费 | build.log、build-execution.json |
+| 真实Core/Workspace消费者 | Node20和Electron22/Node16各12/12 PASS，含取消和失败 | consumer-node20.json、consumer-node16.json |
+| Workspace全集 | 26套件500/500 PASS，含226项A9-64及3项6000文件基线 | workspace.json |
+| Core全集 | 40套件924/924 PASS | core.json |
+| Shell受影响消费者 | 产品合同、batch2、A9-61响应性、A9-65等待、生命周期共5文件879/879 PASS | shell-consumers.json |
+
+INHERITED_EVIDENCE：独立复审的两运行时竞态/身份/补充边界、旧源13项全FAIL与新源226项全PASS、性能和大目录探针。六模块109个源码文件均与复审构建输入同字节，service/Core关键JS同字节；复审输入、参数及原报告可核验。直接验证与继承分列，不将复审探针写成本轮重跑。
+
+独立复审报告：/Users/qlyf/Developer/a9-64-search-list-responsive/outputs/a9-64/p1-review-20261113T030231Z/REVIEW.md。本轮新证据在主仓库outputs/a9-64-main-closeout-20261113，最终保护、文档/差异检查与收尾见RESULT_FINAL.json。
+
+既有同步TOCTOU/ABA、原生排序、单文件同步读取与正则限制保持。Win7目录身份及Reparse Point未验证。本轮Win7、Win10、完整GUI/main/preload/IPC桌面链路、真实模型、打包、双构建、冻结、门A/B、推送和发布均NOT_PERFORMED；不分配候选号，不签正式验收结论。

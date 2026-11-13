@@ -16,7 +16,7 @@
 ## 当前交付、进行中的工作与授权
 
 - [A9-65](tasks/A9_65_VISIBLE_WAITS_AND_DIAGNOSTICS.md)：`A9_65_DEVELOPER_VERIFIED`。产品返修`6ba877d…`已合入本地main，后继仅修Electron夹具的固定等待。main保留既有dirty，直接Shell日常78套件/1710 PASS，12项必需字段慢检查和6000文件基线3项另跑通过；Electron关闭等待、正常退出通过，等待提示首轮FAIL保留，语义等待修正版单场景PASS。文档检查通过，决定见ADR-0329。准确源码/夹具/收尾绑定在outputs/a9-65-closeout-20261113/RESULT_FINAL.json。Win7、打包、门A/B、公开推送及发布NOT_PERFORMED。
-- [A9-64](tasks/A9_64_SEARCH_LIST_RESPONSIVENESS.md)：`A9_64_REVIEW_P1_BLOCKED`。独审对`923bf875…`不建议合入，异步目录替换造成外部结果沿用旧归属。原分支已返修为`382e002…`，文档后继`e7905f5…`；13项旧源红测全部失败，新源226项、Workspace497项、Core924项及双运行时探针通过。任务书两侧记录已协调，原独审P1等待独立复核，产品仍未合入main。Win7、完整GUI与打包NOT_PERFORMED；准确输入和结果在分支outputs/a9-64/p1-revision-20261113。
+- [A9-64](tasks/A9_64_SEARCH_LIST_RESPONSIVENESS.md)：`A9_64_DEVELOPER_VERIFIED`。独立复审建议合入e7905f53…，产品已本地合并为8069a5ba…，决定见ADR-0330。原异步归属P1关闭，P2文档协调完成；旧FAIL保留。组合开发机直接Workspace500/500、Core924/924、Shell五文件879/879，双运行时真实Core→Workspace各12/12 PASS。六模块源码和关键JS与复审同字节；竞态、红绿及性能标INHERITED_EVIDENCE。既有同步TOCTOU/ABA限制保持。Win7、完整GUI、打包、门A/B、推送发布NOT_PERFORMED；准确绑定在outputs/a9-64-main-closeout-20261113/RESULT_FINAL.json。
 
 - [A9-62](tasks/A9_62_DIAGNOSTIC_FLIGHT_RECORDER.md)：`A9_62_DEVELOPER_VERIFIED`。主进程诊断日志落盘与进程级兜底已合入 main，合并提交 `d04629a…`，分支尖端 `afbaa65f…`，决定见 ADR-0328。三轮独立复审后，末次返修由合入会话复核；仅开发机 Node 20 与 Electron 22.3.27 证据。Win7 实机和原生错误框点击为 `NOT_PERFORMED`。
 - [A9-63](tasks/A9_63_FAIL_LOUD_BATCH1.md)：`A9_63_DEVELOPER_VERIFIED`。fail-loud 批次 1 已合入 main，合并提交 `a6a3fd3…`，分支尖端 `e841523b…`；仅开发机证据。清理辅助命令的 10 秒期限待 Win7 校准，诊断字段尚无界面读取方。Win7 实机为 `NOT_PERFORMED`。
