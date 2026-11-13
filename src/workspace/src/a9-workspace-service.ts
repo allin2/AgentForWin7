@@ -149,23 +149,52 @@ function yieldToEventLoop(): Promise<void> {
 }
 
 interface YieldController {
-  checkpoint(force?: boolean): Promise<void>;
+  checkpoint(force?: boolean, afterYield?: () => void): Promise<void>;
 }
 
 function createYieldController(): YieldController {
   let lastYieldAt = Date.now();
   return {
-    async checkpoint(force = false): Promise<void> {
+    async checkpoint(force = false, afterYield?: () => void): Promise<void> {
       if (force || Date.now() - lastYieldAt >= BASELINE_YIELD_SLICE_MS) {
         await yieldToEventLoop();
         // A setImmediate-only loop can run successive promise continuations
         // before the timers phase. Give cancellation timers a real timers
         // phase as well, while retaining the existing 25 ms slice contract.
         await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        afterYield?.();
         lastYieldAt = Date.now();
       }
     },
   };
+}
+
+interface DirectoryScanIdentity {
+  absPath: string;
+  realPath: string;
+  dev: number;
+  ino: number;
+  birthtimeMs: number;
+}
+
+function bindDirectoryScan(absPath: string): DirectoryScanIdentity {
+  const realPath = fs.realpathSync(absPath);
+  const stat = fs.statSync(absPath);
+  // Callers already resolved canonical targets. A new redirect must not reuse
+  // the old outsideWorkspace flag, even if it points to another readable tree.
+  if (path.relative(absPath, realPath) !== '') {
+    throw new WorkspaceError('DIRECTORY_READ_FAILED', '目录身份在扫描期间变化，请重新扫描。');
+  }
+  return { absPath, realPath, dev: stat.dev, ino: stat.ino, birthtimeMs: stat.birthtimeMs };
+}
+
+function verifyDirectoryScan(identity: DirectoryScanIdentity): void {
+  try {
+    const current = bindDirectoryScan(identity.absPath);
+    if (current.realPath === identity.realPath && current.dev === identity.dev &&
+        current.ino === identity.ino && current.birthtimeMs === identity.birthtimeMs) return;
+  } catch (_error) { /* Missing or unresolvable targets cannot retain their old identity. */ }
+  throw new WorkspaceError('DIRECTORY_READ_FAILED', '目录身份已变化或无法确认，拒绝返回扫描结果。');
 }
 
 const MAX_BASELINE_FILE_BYTES = 2 * 1024 * 1024;
@@ -334,13 +363,16 @@ export class A9WorkspaceService {
     const controller = createYieldController();
     checkCanceled();
     let stat: fs.Stats;
+    let rootIdentity: DirectoryScanIdentity;
     try {
+      rootIdentity = bindDirectoryScan(absPath);
       stat = await fs.promises.stat(absPath);
     } catch (error: any) {
       if (error?.code === 'ENOENT') throw new Error(`目录不存在: ${targetPath}`);
       throw new WorkspaceError('DIRECTORY_READ_FAILED', `无法读取目录 ${relPath || '.'}: ${error?.message || 'unknown error'}`);
     }
     if (!stat.isDirectory()) throw new Error(`路径不是目录: ${targetPath}`);
+    verifyDirectoryScan(rootIdentity);
 
     const entries: A9ListResult['entries'] = [];
     const skipped: A9ListResult['skipped'] = [];
@@ -358,14 +390,22 @@ export class A9WorkspaceService {
       checkCanceled();
       throw new WorkspaceError('DIRECTORY_READ_FAILED', `无法读取目录 ${relPath || '.'}: ${error?.message || 'unknown error'}`);
     }
+    verifyDirectoryScan(rootIdentity);
     const visitedDirs = new Set<string>([rootRealPath]);
 
-    const scan = async (currentDir: string, currentRel: string, depth: number, isRoot: boolean): Promise<void> => {
+    const scan = async (currentDir: string, currentRel: string, depth: number, isRoot: boolean,
+      identity: DirectoryScanIdentity): Promise<void> => {
       checkCanceled();
       if (entries.length >= maxEntries) {
         truncated = true;
         return;
       }
+      const verifyCurrentDirectory = () => {
+        checkCanceled();
+        verifyDirectoryScan(rootIdentity);
+        if (identity !== rootIdentity) verifyDirectoryScan(identity);
+      };
+      verifyCurrentDirectory();
 
       let dirents: fs.Dirent[];
       try {
@@ -375,15 +415,17 @@ export class A9WorkspaceService {
         checkCanceled();
       } catch (error: any) {
         if (signal?.aborted) throw new Error('目录读取已取消');
+        verifyCurrentDirectory();
         if (isRoot) {
           throw new WorkspaceError('DIRECTORY_READ_FAILED', `无法读取目录 ${relPath || '.'}: ${error?.message || 'unknown error'}`);
         }
         recordSkipped(currentRel);
         return;
       }
+      verifyCurrentDirectory();
 
       for (const dirent of dirents) {
-        await controller.checkpoint();
+        await controller.checkpoint(false, verifyCurrentDirectory);
         checkCanceled();
         if (entries.length >= maxEntries) {
           truncated = true;
@@ -413,22 +455,30 @@ export class A9WorkspaceService {
 
         if (recursive && dirent.isDirectory() && depth < 10) {
           let realChild: string;
+          let childIdentity: DirectoryScanIdentity;
           try {
+            childIdentity = bindDirectoryScan(itemAbs);
             realChild = await fs.promises.realpath(itemAbs);
-          } catch (_e) {
+          } catch (error) {
             checkCanceled();
+            if (error instanceof WorkspaceError && error.code === 'DIRECTORY_READ_FAILED') throw error;
+            verifyCurrentDirectory();
             recordSkipped(itemRel);
             continue;
           }
+          verifyCurrentDirectory();
+          verifyDirectoryScan(childIdentity);
           if (!visitedDirs.has(realChild)) {
             visitedDirs.add(realChild);
-            await scan(itemAbs, itemRel, depth + 1, false);
+            await scan(itemAbs, itemRel, depth + 1, false, childIdentity);
           }
         }
       }
+      verifyCurrentDirectory();
     };
 
-    await scan(absPath, relPath === '.' ? '' : relPath, 0, true);
+    await scan(absPath, relPath === '.' ? '' : relPath, 0, true, rootIdentity);
+    verifyDirectoryScan(rootIdentity);
 
     return {
       path: relPath || '.',
@@ -640,7 +690,9 @@ export class A9WorkspaceService {
     };
     checkCanceled();
 
+    let rootIdentity: DirectoryScanIdentity;
     try {
+      rootIdentity = bindDirectoryScan(absPath);
       const rootStat = await fs.promises.stat(absPath);
       if (!rootStat.isDirectory()) throw new Error(`搜索路径不是目录: ${options.path || ''}`);
     } catch (error: any) {
@@ -649,6 +701,7 @@ export class A9WorkspaceService {
       if (error?.code === 'ENOENT') throw new Error(`搜索路径不存在: ${options.path || ''}`);
       throw new WorkspaceError('DIRECTORY_READ_FAILED', `无法读取搜索目录: ${error?.message || 'unknown error'}`);
     }
+    verifyDirectoryScan(rootIdentity);
 
     let regex: RegExp;
     try {
@@ -670,15 +723,10 @@ export class A9WorkspaceService {
       if (skipped.length < 50) skipped.push({ path: filePath || '.', reason });
     };
     // 迭代遍历 + canonical path 集合：可取消、无递归环、不整体加载。
-    const queue: Array<{ dir: string; rel: string }> = [{ dir: absPath, rel: '' }];
-    let rootRealPath: string;
-    try {
-      rootRealPath = fs.realpathSync(absPath);
-    } catch (error: any) {
-      checkCanceled();
-      throw new WorkspaceError('DIRECTORY_READ_FAILED', `无法读取搜索目录: ${error?.message || 'unknown error'}`);
-    }
-    const visitedDirs = new Set<string>([rootRealPath]);
+    const queue: Array<{ dir: string; rel: string; identity: DirectoryScanIdentity }> = [
+      { dir: absPath, rel: '', identity: rootIdentity },
+    ];
+    const visitedDirs = new Set<string>([rootIdentity.realPath]);
     let queueIndex = 0;
 
     while (queueIndex < queue.length) {
@@ -690,13 +738,20 @@ export class A9WorkspaceService {
         break;
       }
 
-      const { dir, rel } = queue[queueIndex++];
+      const { dir, rel, identity } = queue[queueIndex++];
+      const verifyCurrentDirectory = () => {
+        checkCanceled();
+        verifyDirectoryScan(rootIdentity);
+        if (identity !== rootIdentity) verifyDirectoryScan(identity);
+      };
+      verifyCurrentDirectory();
       let dirents: fs.Dirent[];
       try {
         dirents = await fs.promises.readdir(dir, { withFileTypes: true });
         checkCanceled();
       } catch (error: any) {
         checkCanceled();
+        verifyCurrentDirectory();
         if (!rel) {
           throw new WorkspaceError('DIRECTORY_READ_FAILED', `无法读取搜索目录: ${error?.message || 'unknown error'}`);
         }
@@ -704,9 +759,10 @@ export class A9WorkspaceService {
         recordSkipped(unreadablePath, 'directory_unreadable', false);
         continue;
       }
+      verifyCurrentDirectory();
 
       for (const dirent of dirents) {
-        await controller.checkpoint();
+        await controller.checkpoint(false, verifyCurrentDirectory);
         checkCanceled();
         if (matches.length >= maxMatches || filesScanned >= MAX_SEARCH_FILES) {
           truncated = true;
@@ -721,16 +777,19 @@ export class A9WorkspaceService {
 
         if (dirent.isDirectory()) {
           let realChild: string;
+          let childIdentity: DirectoryScanIdentity;
           try {
-            realChild = fs.realpathSync(fullPath);
-          } catch (_e) {
+            childIdentity = bindDirectoryScan(fullPath);
+            realChild = childIdentity.realPath;
+          } catch (error) {
             checkCanceled();
+            if (error instanceof WorkspaceError && error.code === 'DIRECTORY_READ_FAILED') throw error;
             recordSkipped(relPath, 'directory_unreadable', false);
             continue;
           }
           if (!visitedDirs.has(realChild)) {
             visitedDirs.add(realChild);
-            queue.push({ dir: fullPath, rel: rel ? `${rel}/${dirent.name}` : dirent.name });
+            queue.push({ dir: fullPath, rel: rel ? `${rel}/${dirent.name}` : dirent.name, identity: childIdentity });
           }
           continue;
         }
@@ -739,8 +798,12 @@ export class A9WorkspaceService {
         filesScanned += 1;
         let stat: fs.Stats;
         try {
-          stat = fs.statSync(fullPath);
+          stat = fs.lstatSync(fullPath);
         } catch (_e) {
+          recordSkipped(relPath, 'stat_failed');
+          continue;
+        }
+        if (!stat.isFile()) {
           recordSkipped(relPath, 'stat_failed');
           continue;
         }
@@ -764,7 +827,7 @@ export class A9WorkspaceService {
           const lines = text.split(/\r?\n/);
           for (let i = 0; i < lines.length; i++) {
             if ((i & 0xff) === 0) {
-              await controller.checkpoint();
+              await controller.checkpoint(false, verifyCurrentDirectory);
               checkCanceled();
             }
             if (regex.test(lines[i])) {
@@ -782,13 +845,16 @@ export class A9WorkspaceService {
               }
             }
           }
-        } catch (_e) {
+        } catch (error) {
           checkCanceled();
+          if (error instanceof WorkspaceError && error.code === 'DIRECTORY_READ_FAILED') throw error;
           recordSkipped(relPath, 'read_failed');
         }
         if (truncated) break;
       }
+      verifyCurrentDirectory();
     }
+    verifyDirectoryScan(rootIdentity);
 
     return {
       pattern,

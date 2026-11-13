@@ -104,6 +104,149 @@ describe('A9-64 responsive list/search', () => {
     expect(result.truncated).toBe(false);
   });
 
+  describe('P1-1 asynchronous directory identity', () => {
+    const methods = ['list', 'search'] as const;
+    const invoke = (service: A9WorkspaceService, method: typeof methods[number]) =>
+      method === 'list' ? service.list('', { recursive: true }) : service.search('needle');
+
+    it.each(methods)('%s rejects root replacement scheduled on the real event loop', async method => {
+      const root = fs.realpathSync(tempDir);
+      const workspace = path.join(root, 'workspace');
+      const outside = path.join(root, 'outside');
+      fs.mkdirSync(workspace); fs.mkdirSync(outside);
+      fs.writeFileSync(path.join(workspace, 'inside.txt'), 'inside needle');
+      fs.writeFileSync(path.join(outside, 'external.txt'), 'external needle');
+      const service = new A9WorkspaceService(workspace);
+      const swapped = new Promise<void>(resolve => setImmediate(() => {
+        fs.renameSync(workspace, workspace + '-saved');
+        fs.symlinkSync(outside, workspace, 'dir');
+        resolve();
+      }));
+      try {
+        await expect(invoke(service, method)).rejects.toMatchObject({ code: 'DIRECTORY_READ_FAILED' });
+      } finally { await swapped; }
+      // Full Access may still explicitly inspect an external target, accurately marked.
+      const fresh = await invoke(service, method);
+      expect(fresh.outsideWorkspace).toBe(true);
+    });
+
+    it.each(methods.flatMap(method => [false, true].flatMap(child =>
+      [false, true].map(symlink => ({ method, child, symlink })))))(
+      '$method rejects readdir replacement (child=$child, symlink=$symlink)', async ({ method, child, symlink }) => {
+          const root = fs.realpathSync(tempDir);
+          const workspace = path.join(root, `workspace-${child}-${symlink}`);
+          const outside = path.join(root, `outside-${child}-${symlink}`);
+          const target = child ? path.join(workspace, 'child') : workspace;
+          fs.mkdirSync(target, { recursive: true }); fs.mkdirSync(outside);
+          fs.writeFileSync(path.join(target, 'inside.txt'), 'inside needle');
+          fs.writeFileSync(path.join(outside, 'external.txt'), 'external needle');
+          const service = new A9WorkspaceService(workspace);
+          const original = fs.promises.readdir;
+          let swapped = false;
+          const readdir = jest.spyOn(fs.promises, 'readdir').mockImplementation(async (directory: any, options?: any) => {
+            if (String(directory) === target && !swapped) {
+              await new Promise<void>(resolve => setImmediate(resolve));
+              fs.renameSync(target, target + '-saved');
+              if (symlink) fs.symlinkSync(outside, target, 'dir');
+              else {
+                fs.mkdirSync(target);
+                fs.writeFileSync(path.join(target, 'external.txt'), 'external needle');
+              }
+              swapped = true;
+            }
+            return original.call(fs.promises, directory, options as any);
+          });
+          try {
+            await expect(invoke(service, method)).rejects.toMatchObject({ code: 'DIRECTORY_READ_FAILED' });
+            expect(swapped).toBe(true);
+          } finally { readdir.mockRestore(); }
+    });
+
+    it('list revalidates the root after awaiting a child realpath', async () => {
+      const root = fs.realpathSync(tempDir);
+      const workspace = path.join(root, 'workspace');
+      const outside = path.join(root, 'outside');
+      fs.mkdirSync(path.join(workspace, 'child'), { recursive: true });
+      fs.mkdirSync(path.join(outside, 'child'), { recursive: true });
+      fs.writeFileSync(path.join(workspace, 'child/inside.txt'), 'inside needle');
+      fs.writeFileSync(path.join(outside, 'child/external.txt'), 'external needle');
+      const service = new A9WorkspaceService(workspace);
+      const original = fs.promises.realpath;
+      let swapped = false;
+      const realpath = jest.spyOn(fs.promises, 'realpath').mockImplementation(async (target: any, options?: any) => {
+        if (String(target) === path.join(workspace, 'child') && !swapped) {
+          await new Promise<void>(resolve => setImmediate(resolve));
+          fs.renameSync(workspace, workspace + '-saved');
+          fs.symlinkSync(outside, workspace, 'dir');
+          swapped = true;
+        }
+        return original.call(fs.promises, target, options);
+      });
+      try {
+        await expect(invoke(service, 'list')).rejects.toMatchObject({ code: 'DIRECTORY_READ_FAILED' });
+        expect(swapped).toBe(true);
+      } finally { realpath.mockRestore(); }
+    });
+
+    it('search does not follow a file changed into an external symlink after readdir', async () => {
+      const root = fs.realpathSync(tempDir);
+      const workspace = path.join(root, 'workspace');
+      const outside = path.join(root, 'external.txt');
+      fs.mkdirSync(workspace);
+      const file = path.join(workspace, 'inside.txt');
+      fs.writeFileSync(file, 'inside needle'); fs.writeFileSync(outside, 'external needle');
+      const service = new A9WorkspaceService(workspace);
+      const original = fs.promises.readdir;
+      let swapped = false;
+      const readdir = jest.spyOn(fs.promises, 'readdir').mockImplementation(async (directory: any, options?: any) => {
+        const entries = await original.call(fs.promises, directory, options as any);
+        if (String(directory) === workspace && !swapped) {
+          fs.renameSync(file, file + '-saved');
+          fs.symlinkSync(outside, file, 'file');
+          swapped = true;
+        }
+        return entries;
+      });
+      try {
+        const result = await service.search('needle');
+        expect(swapped).toBe(true);
+        expect(result.matches).toEqual([]);
+        expect(result.skipped).toContainEqual({ path: 'inside.txt', reason: 'stat_failed' });
+      } finally { readdir.mockRestore(); }
+    });
+
+    it('search revalidates after a line-scan yield without swallowing identity failure', async () => {
+      const root = fs.realpathSync(tempDir);
+      const workspace = path.join(root, 'workspace');
+      const outside = path.join(root, 'outside');
+      fs.mkdirSync(workspace); fs.mkdirSync(outside);
+      const file = path.join(workspace, 'inside.txt');
+      fs.writeFileSync(file, 'inside needle');
+      fs.writeFileSync(path.join(outside, 'external.txt'), 'external needle');
+      const service = new A9WorkspaceService(workspace);
+      const original = fsModule.readFileSync;
+      let scheduled: NodeJS.Immediate | undefined;
+      const read = jest.spyOn(fsModule, 'readFileSync').mockImplementation((target: any, ...args: any[]) => {
+        const value = original(target, ...(args as [any]));
+        if (String(target) === file && !scheduled) {
+          scheduled = setImmediate(() => {
+            fs.renameSync(workspace, workspace + '-saved');
+            fs.symlinkSync(outside, workspace, 'dir');
+          });
+          const start = Date.now();
+          while (Date.now() - start < 30) { /* Force the existing 25ms cooperative boundary. */ }
+        }
+        return value;
+      });
+      try {
+        await expect(service.search('needle')).rejects.toMatchObject({ code: 'DIRECTORY_READ_FAILED' });
+      } finally {
+        read.mockRestore();
+        if (scheduled) clearImmediate(scheduled);
+      }
+    });
+  });
+
   it.each(Array.from({ length: 200 }, (_, index) => index))('matches independent legacy traversal for random tree %i', async (caseIndex) => {
     const count = writeRandomTree(tempDir, caseIndex);
     const service = new A9WorkspaceService(tempDir);
