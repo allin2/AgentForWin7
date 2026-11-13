@@ -1489,9 +1489,177 @@ export class A9PersistenceManager {
     return cappedLimit ? sorted.slice(-cappedLimit) : sorted;
   }
 
+  /**
+   * A9-66 F-007: bounded, cooperative counterpart of listConversationFacts for
+   * provider-context restoration. It reproduces the synchronous method's
+   * merge exactly (request events by ascending id, then checkpoints by
+   * ascending created_at/turn_id; later rows replace earlier facts of the same
+   * task; ties keep first-insertion order; the same localeCompare ordering) but
+   * reads the session in bounded SQL statements (existing-key pages over
+   * a9_events, keyset pages over a9_checkpoints) and yields to the event loop
+   * with setImmediate between statements. No statement returns more than
+   * `batchRows` payload rows. SQLite metadata scans/sorts are not constant work.
+   *
+   * Instead of a fully sorted list it returns what restoration consumes: the
+   * newest `maxRecent` complete rounds of the requested provider generation (in
+   * ascending order) plus the exact complete and visible round counts, so
+   * includedRounds/includedChars/omittedRounds/visibleRounds can be computed
+   * identically to buildPersistedTextContext(listConversationFacts(...)).
+   * The merge retains row references and ordering/completeness metadata per
+   * task, not historical prompt/reply strings. Only the selected recent rows
+   * are materialized. Metadata still scales with retained tasks/requests;
+   * payload memory is one bounded row batch plus the selected recent rounds.
+   */
+  async scanConversationFactsAsync(sessionId: string, options: {
+    providerContextGeneration: number; maxRecent?: number; batchRows?: number;
+    signal?: { readonly aborted: boolean };
+  }): Promise<{
+    visibleRounds: number; completeRounds: number;
+    recent: ReturnType<A9PersistenceManager['listConversationFacts']>;
+  }> {
+    const batchRows = options.batchRows ?? 256;
+    const maxRecent = options.maxRecent ?? 20;
+    if (!Number.isSafeInteger(batchRows) || batchRows < 1 || batchRows > 4096
+        || !Number.isSafeInteger(maxRecent) || maxRecent < 1 || maxRecent > 1000) {
+      throw a9PersistenceError('A9_PAYLOAD_INVALID', 'Invalid conversation scan batch');
+    }
+    const assertOpen = () => {
+      if (options.signal?.aborted) throw a9PersistenceError('A9_CONTEXT_RESTORE_CANCELLED', 'Conversation context scan cancelled');
+      if ((this.db as unknown as { open?: boolean }).open === false) {
+        throw a9PersistenceError('A9_CONTEXT_RESTORE_INTERRUPTED', 'Database closed during conversation context scan');
+      }
+    };
+    const yieldTurn = () => new Promise<void>((resolve) => setImmediate(resolve));
+    assertOpen();
+    const facts = new Map<string, any>();
+    const requestStatement = this.db.prepare(`
+      SELECT id, created_at, CASE WHEN kind = 'model' AND event_type = 'conversation.request'
+        AND json_extract(CASE WHEN json_valid(payload_json) THEN payload_json ELSE '{}' END, '$.interruptedTurnId') IS NULL
+        THEN payload_json END AS payload_json FROM a9_events
+      WHERE session_id = ? AND id > ? AND id <= ?
+      ORDER BY id ASC LIMIT ?
+    `);
+    const bounds = this.db.prepare('SELECT MIN(id) AS lo, MAX(id) AS hi FROM a9_events WHERE session_id = ?').get(sessionId) as any;
+    if (bounds && typeof bounds.lo === 'number' && typeof bounds.hi === 'number') {
+      let low = bounds.lo - 1;
+      while (low < bounds.hi) {
+        assertOpen();
+        const rows = requestStatement.all(sessionId, low, bounds.hi, batchRows) as any[];
+        for (const row of rows) {
+          if (row.payload_json === null) continue;
+          const payload = safeParse(row.payload_json, { buffer: this.diagnosticBuffer, table: 'a9_events', rowId: row.id }) as any;
+          if (!payload.taskId || typeof payload.requestPrompt !== 'string') continue;
+          facts.set(payload.taskId, {
+            taskId: payload.taskId,
+            turnId: null,
+            promptRef: payload.requestPrompt.length ? { eventId: row.id } : undefined,
+            hasFinal: false,
+            createdAt: row.created_at,
+          });
+        }
+        if (rows.length) low = rows[rows.length - 1].id;
+        await yieldTurn();
+        if (rows.length < batchRows) break;
+      }
+    }
+    const checkpointFirst = this.db.prepare(`
+      SELECT c.turn_id, c.created_at, c.payload_json, t.task_id, t.status, t.outcome_json AS turn_payload
+      FROM a9_checkpoints c
+      LEFT JOIN a9_turns t ON t.turn_id = c.turn_id
+      WHERE c.session_id = ?
+      ORDER BY c.created_at ASC, c.turn_id ASC LIMIT ?`);
+    const checkpointNext = this.db.prepare(`
+      SELECT c.turn_id, c.created_at, c.payload_json, t.task_id, t.status, t.outcome_json AS turn_payload
+      FROM a9_checkpoints c
+      LEFT JOIN a9_turns t ON t.turn_id = c.turn_id
+      WHERE c.session_id = ? AND (c.created_at > ? OR (c.created_at = ? AND c.turn_id > ?))
+      ORDER BY c.created_at ASC, c.turn_id ASC LIMIT ?`);
+    let cursor: { createdAt: string; turnId: string } | undefined;
+    for (;;) {
+      assertOpen();
+      const rows = (cursor
+        ? checkpointNext.all(sessionId, cursor.createdAt, cursor.createdAt, cursor.turnId, batchRows)
+        : checkpointFirst.all(sessionId, batchRows)) as any[];
+      for (const row of rows) {
+        const payload = safeParse(row.payload_json, { buffer: this.diagnosticBuffer, table: 'a9_checkpoints', rowId: row.turn_id }) as any;
+        const taskId = row.task_id || `legacy:${row.turn_id}`;
+        const existing = facts.get(taskId);
+        facts.set(taskId, {
+          taskId,
+          turnId: row.turn_id,
+          promptRef: existing?.promptRef || (!this.isContinuationTurn(row.turn_payload, row.turn_id)
+            && typeof payload.requestPrompt === 'string' && payload.requestPrompt.length
+            ? { turnId: row.turn_id } : undefined),
+          hasFinal: typeof payload.finalMessage === 'string' && payload.finalMessage.length > 0,
+          createdAt: existing?.createdAt || row.created_at,
+          ...(Number.isSafeInteger(payload.providerContextGeneration)
+            ? { providerContextGeneration: payload.providerContextGeneration }
+            : {}),
+        });
+      }
+      if (rows.length < batchRows) break;
+      const last = rows[rows.length - 1];
+      cursor = { createdAt: last.created_at, turnId: last.turn_id };
+      await yieldTurn();
+    }
+    // Selection without a whole-history sort: the newest `maxRecent` complete
+    // rounds under the synchronous order (createdAt localeCompare, then first
+    // insertion order, as a stable sort would give).
+    let completeRounds = 0;
+    let recent: Array<{ fact: any; seq: number }> = [];
+    let seq = 0;
+    let processed = 0;
+    const after = (a: { fact: any; seq: number }, b: { fact: any; seq: number }): boolean => {
+      const order = String(a.fact.createdAt).localeCompare(String(b.fact.createdAt));
+      return order !== 0 ? order > 0 : a.seq > b.seq;
+    };
+    for (const fact of facts.values()) {
+      const entry = { fact, seq: seq += 1 };
+      const generation = Number.isSafeInteger(fact.providerContextGeneration) ? fact.providerContextGeneration : 0;
+      if (generation === options.providerContextGeneration
+          && fact.promptRef && fact.hasFinal) {
+        completeRounds += 1;
+        let index = recent.length;
+        while (index > 0 && after(recent[index - 1], entry)) index -= 1;
+        recent.splice(index, 0, entry);
+        if (recent.length > maxRecent) recent.shift();
+      }
+      processed += 1;
+      if (processed % batchRows === 0) { await yieldTurn(); assertOpen(); }
+    }
+    assertOpen();
+    const requestPayload = this.db.prepare('SELECT payload_json FROM a9_events WHERE session_id = ? AND id = ?');
+    const checkpointPayload = this.db.prepare(`
+      SELECT c.payload_json, c.created_at, t.status FROM a9_checkpoints c
+      LEFT JOIN a9_turns t ON t.turn_id = c.turn_id WHERE c.session_id = ? AND c.turn_id = ?`);
+    const selected: ReturnType<A9PersistenceManager['listConversationFacts']> = [];
+    for (const { fact } of recent) {
+      assertOpen();
+      const row = checkpointPayload.get(sessionId, fact.turnId) as any;
+      const promptRow = fact.promptRef.eventId !== undefined
+        ? requestPayload.get(sessionId, fact.promptRef.eventId) as any
+        : checkpointPayload.get(sessionId, fact.promptRef.turnId) as any;
+      if (!row || !promptRow) throw a9PersistenceError('A9_CONTEXT_RESTORE_INTERRUPTED', 'Conversation rows changed during context scan');
+      const payload = safeParse(row.payload_json, { buffer: this.diagnosticBuffer, table: 'a9_checkpoints', rowId: fact.turnId }) as any;
+      const prompt = safeParse(promptRow.payload_json, { buffer: this.diagnosticBuffer,
+        table: fact.promptRef.eventId !== undefined ? 'a9_events' : 'a9_checkpoints',
+        rowId: fact.promptRef.eventId ?? fact.promptRef.turnId }) as any;
+      selected.push({ taskId: fact.taskId, turnId: fact.turnId,
+        requestPrompt: typeof prompt.requestPrompt === 'string' ? prompt.requestPrompt : '',
+        outcome: payload.outcome || row.status || 'completed', verification: payload.verification || 'not_applicable',
+        finalMessage: typeof payload.finalMessage === 'string' ? payload.finalMessage : '',
+        createdAt: fact.createdAt, updatedAt: row.created_at,
+        ...(Number.isSafeInteger(fact.providerContextGeneration) ? { providerContextGeneration: fact.providerContextGeneration } : {}) });
+      if (selected.length % batchRows === 0) await yieldTurn();
+    }
+    assertOpen();
+    return { visibleRounds: facts.size, completeRounds, recent: selected };
+  }
+
   /** A9-17: UI-only keyset paging. Only selected payloads cross into JS;
    * SQL still scans/sorts session metadata, so database work is not constant.
-   * full model-history restoration continues to use listConversationFacts. */
+   * modern Provider restoration uses scanConversationFactsAsync; the full
+   * synchronous listConversationFacts API remains for legacy callers. */
   listConversationFactPage(sessionId: string, options: {
     limit?: number; before?: { createdAt: string; taskId: string };
   } = {}): { facts: ReturnType<A9PersistenceManager['listConversationFacts']>;
@@ -1589,8 +1757,8 @@ export class A9PersistenceManager {
     )`;
   }
 
-  searchRetainedHistory(workspace: string, input: { query: string; limit?: number;
-    before?: { createdAt: string; source: string; id: string } }, project: (payload: string, type: string) => string): any {
+  private validateHistorySearch(workspace: string, input: { query: string; limit?: number;
+    before?: { createdAt: string; source: string; id: string } }): void {
     const limit = input.limit ?? 20, before = input.before;
     if (typeof workspace !== 'string' || !workspace || typeof input.query !== 'string' || !input.query.trim()
       || input.query.length > 256 || /[\u0000-\u001f]/.test(input.query) || !Number.isSafeInteger(limit) || limit < 1 || limit > 50
@@ -1598,6 +1766,13 @@ export class A9PersistenceManager {
         || !['event', 'checkpoint'].includes(before.source) || typeof before.id !== 'string' || !before.id || before.id.length > 256))) {
       throw a9PersistenceError('A9_PAYLOAD_INVALID', 'Invalid history search');
     }
+  }
+
+  /** Legacy synchronous search: one statement over the whole retained history. */
+  searchRetainedHistory(workspace: string, input: { query: string; limit?: number;
+    before?: { createdAt: string; source: string; id: string } }, project: (payload: string, type: string) => string): any {
+    this.validateHistorySearch(workspace, input);
+    const limit = input.limit ?? 20, before = input.before;
     this.historyProjection(project);
     const rows = this.db.prepare(`${this.historyCandidates()}
       SELECT conversationId,title,conversationState,source,id,turnId,taskId,createdAt,kind,
@@ -1608,6 +1783,156 @@ export class A9PersistenceManager {
       ...(before ? [before.createdAt, before.source, before.id] : []), limit + 1) as any[];
     const results = rows.slice(0, limit), last = results[results.length - 1];
     return { results, hasMore: rows.length > limit, nextBefore: rows.length > limit && last
+      ? { createdAt: last.createdAt, source: last.source, id: last.id } : null };
+  }
+
+  /**
+   * A9-66 F-008: same candidates, filter, order and cursor as
+   * searchRetainedHistory, but scanned in bounded primary-key windows with a
+   * real event-loop turn (setImmediate) between SQL statements. Every retained
+   * row within the initial MAX(id)/MAX(turn_id) key bounds is examined;
+   * there is no scan budget, so no matching history is silently skipped.
+   * Only the best limit+1 result payloads are retained; request identifiers
+   * still scale with retained requests and are released when this call ends.
+   */
+  async searchRetainedHistoryAsync(workspace: string, input: { query: string; limit?: number;
+    before?: { createdAt: string; source: string; id: string } }, project: (payload: string, type: string) => string,
+  options: { batchRows?: number; signal?: { readonly aborted: boolean } } = {}): Promise<any> {
+    this.validateHistorySearch(workspace, input);
+    const limit = input.limit ?? 20, before = input.before;
+    const batchRows = options.batchRows ?? 256;
+    if (!Number.isSafeInteger(batchRows) || batchRows < 1 || batchRows > 4096) {
+      throw a9PersistenceError('A9_PAYLOAD_INVALID', 'Invalid history search batch');
+    }
+    const assertOpen = () => {
+      if (options.signal?.aborted) throw a9PersistenceError('A9_HISTORY_SEARCH_CANCELLED', 'History search cancelled');
+      if ((this.db as unknown as { open?: boolean }).open === false) {
+        throw a9PersistenceError('A9_HISTORY_SEARCH_INTERRUPTED', 'History database closed during search');
+      }
+    };
+    assertOpen();
+    this.historyProjection(project);
+    const beforeFilter = before ? 'AND (createdAt,source,id)<(?,?,?)' : '';
+    const beforeArgs = before ? [before.createdAt, before.source, before.id] : [];
+    const select = `SELECT conversationId,title,conversationState,source,id,turnId,taskId,createdAt,kind,
+        substr(text, max(1,instr(text,?)-100), 420) AS snippet`;
+    const eventBatchSql = `${select} FROM (
+      SELECT e.session_id AS conversationId, c.title, c.state AS conversationState,
+        'event' AS source, CAST(e.id AS TEXT) AS id, e.turn_id AS turnId,
+        COALESCE(t.task_id, json_extract(CASE WHEN json_valid(e.payload_json) THEN e.payload_json ELSE '{}' END, '$.taskId')) AS taskId,
+        e.created_at AS createdAt, e.event_type AS kind,
+        a9_history_visible(e.payload_json, e.event_type) AS text
+      FROM a9_events e JOIN a9_sessions c ON c.session_id=e.session_id
+      LEFT JOIN a9_turns t ON t.turn_id=e.turn_id AND t.session_id=e.session_id
+      WHERE c.workspace_path=? AND e.event_type IN ('conversation.request','tool_start','tool_output','tool_end','turn_failed')
+        AND e.id > ? AND e.id <= ?
+    ) WHERE instr(text,?)>0 ${beforeFilter}`;
+    // The legacy statement evaluates a per-row EXISTS over every request event
+    // of the session. Here the same (session, text taskId) facts are collected
+    // once, in bounded windows, and looked up through a token-keyed function so
+    // concurrent searches never share state.
+    const requestedTasks = new Set<string>();
+    const token = `${process.pid}:${Date.now()}:${Math.random().toString(36).slice(2)}`;
+    this.historyRequestSets.set(token, requestedTasks);
+    try {
+      return await this.searchRetainedHistoryWindows(workspace, input, limit, batchRows, assertOpen,
+        select, beforeFilter, beforeArgs, eventBatchSql, token, requestedTasks, project);
+    } finally {
+      this.historyRequestSets.delete(token);
+    }
+  }
+
+  private readonly historyRequestSets = new Map<string, Set<string>>();
+
+  private async searchRetainedHistoryWindows(workspace: string, input: { query: string }, limit: number,
+    batchRows: number, assertOpen: () => void, select: string, beforeFilter: string, beforeArgs: string[],
+    eventBatchSql: string, token: string, requestedTasks: Set<string>,
+    project: (payload: string, type: string) => string): Promise<any> {
+    const db = this.db as SqliteDatabase & { function: (name: string, fn: (...args: any[]) => number) => void };
+    db.function('a9_history_task_requested', (searchToken: string, sessionId: string, taskId: unknown) =>
+      typeof taskId === 'string' && this.historyRequestSets.get(searchToken)?.has(`${sessionId}\u0000${taskId}`) ? 1 : 0);
+    const eventBatch = this.db.prepare(eventBatchSql);
+    const requestBatch = this.db.prepare(`SELECT e.session_id AS sessionId,
+        json_extract(CASE WHEN json_valid(e.payload_json) THEN e.payload_json ELSE '{}' END, '$.taskId') AS taskId
+      FROM a9_events e JOIN a9_sessions c ON c.session_id=e.session_id
+      WHERE c.workspace_path=? AND e.event_type='conversation.request' AND e.id > ? AND e.id <= ?`);
+    const checkpointBatch = this.db.prepare(`${select} FROM (
+      SELECT p.session_id AS conversationId, c.title, c.state AS conversationState, 'checkpoint' AS source,
+        p.turn_id AS id, p.turn_id AS turnId, t.task_id AS taskId,
+        p.created_at AS createdAt, 'reply' AS kind, a9_history_visible(p.payload_json,
+          CASE WHEN a9_history_task_requested('${token}', p.session_id, t.task_id) THEN 'reply' ELSE 'retained_reply' END) AS text
+      FROM a9_checkpoints p JOIN a9_sessions c ON c.session_id=p.session_id
+      LEFT JOIN a9_turns t ON t.turn_id=p.turn_id AND t.session_id=p.session_id
+      WHERE c.workspace_path=? AND (? IS NULL OR p.turn_id > ?) AND p.turn_id <= ?
+    ) WHERE instr(text,?)>0 ${beforeFilter}`);
+    const maxEvent = Number((this.db.prepare('SELECT COALESCE(MAX(id),0) AS m FROM a9_events').get() as any).m);
+    const maxCheckpoint = (this.db.prepare('SELECT MAX(turn_id) AS m FROM a9_checkpoints').get() as any).m as string | null;
+    // SQLite orders TEXT with BINARY collation, i.e. UTF-8 byte order.
+    const key = (row: any) => [row.createdAt, row.source, row.id].map((v) => Buffer.from(String(v), 'utf8'));
+    const compareDesc = (a: any, b: any) => {
+      const ka = key(a), kb = key(b);
+      for (let i = 0; i < 3; i += 1) {
+        const order = Buffer.compare(kb[i], ka[i]);
+        if (order !== 0) return order;
+      }
+      return 0;
+    };
+    let best: any[] = [];
+    const offer = (rows: any[]) => {
+      if (!rows.length) return;
+      best = best.concat(rows).sort(compareDesc).slice(0, limit + 1);
+    };
+    // Advance by existing keys, so retention gaps do not turn a small database
+    // into a scan of its historical numeric identifier space.
+    const eventKeys = this.db.prepare('SELECT id AS key FROM a9_events WHERE id > ? AND id <= ? ORDER BY id LIMIT ?');
+    const checkpointKeys = this.db.prepare('SELECT turn_id AS key FROM a9_checkpoints WHERE (? IS NULL OR turn_id > ?) AND turn_id <= ? ORDER BY turn_id LIMIT ?');
+    const nextUpper = (keys: { all: (...args: any[]) => unknown[] }, low: number, max: number): number | null => {
+      const rows = keys.all(low, max, batchRows) as Array<{ key: number }>;
+      return rows.length ? rows[rows.length - 1].key : null;
+    };
+    const scan = async (statement: { all: (...args: any[]) => unknown[] }, max: number,
+      keys: { all: (...args: any[]) => unknown[] }) => {
+      let low = 0;
+      for (;;) {
+        assertOpen();
+        const upper = nextUpper(keys, low, max);
+        if (upper === null) break;
+        // SQL functions belong to the connection. Restore this call's projector
+        // immediately before each synchronous statement, after every yield.
+        this.historyProjection(project);
+        offer(statement.all(input.query, workspace, low, upper, input.query, ...beforeArgs) as any[]);
+        low = upper;
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+    };
+    let low = 0;
+    for (;;) {
+      assertOpen();
+      const upper = nextUpper(eventKeys, low, maxEvent);
+      if (upper === null) break;
+      for (const row of requestBatch.all(workspace, low, upper) as any[]) {
+        if (typeof row.taskId === 'string') requestedTasks.add(`${row.sessionId}\u0000${row.taskId}`);
+      }
+      low = upper;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    await scan(eventBatch, maxEvent, eventKeys);
+    // turn_id survives INSERT OR REPLACE, whereas SQLite allocates a fresh
+    // rowid. Scan stable logical keys so a not-yet-seen replacement is retained.
+    let checkpointLow: string | null = null;
+    while (maxCheckpoint !== null) {
+      assertOpen();
+      const keys = checkpointKeys.all(checkpointLow, checkpointLow, maxCheckpoint, batchRows) as Array<{ key: string }>;
+      if (!keys.length) break;
+      const upper = keys[keys.length - 1].key;
+      this.historyProjection(project);
+      offer(checkpointBatch.all(input.query, workspace, checkpointLow, checkpointLow, upper, input.query, ...beforeArgs) as any[]);
+      checkpointLow = upper;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    assertOpen();
+    const results = best.slice(0, limit), last = results[results.length - 1];
+    return { results, hasMore: best.length > limit, nextBefore: best.length > limit && last
       ? { createdAt: last.createdAt, source: last.source, id: last.id } : null };
   }
 

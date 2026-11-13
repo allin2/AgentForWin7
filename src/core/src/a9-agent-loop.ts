@@ -139,9 +139,9 @@ export interface A9WorkspacePort {
   search(pattern: string, options?: { path?: string; isRegex?: boolean; maxMatches?: number; signal?: AbortSignal }): Promise<any>;
   write(path: string, content: string, options?: { encoding?: string; turnId?: string }): Promise<any>;
   edit(path: string, oldText: string, newText: string, options?: { turnId?: string }): Promise<any>;
-  copy(src: string, dest: string, options?: { overwrite?: boolean; turnId?: string }): Promise<any>;
-  move(src: string, dest: string, options?: { overwrite?: boolean; turnId?: string }): Promise<any>;
-  delete(path: string, options?: { recursive?: boolean; permanent?: boolean; turnId?: string }): Promise<any>;
+  copy(src: string, dest: string, options?: { overwrite?: boolean; turnId?: string; signal?: AbortSignal }): Promise<any>;
+  move(src: string, dest: string, options?: { overwrite?: boolean; turnId?: string; signal?: AbortSignal }): Promise<any>;
+  delete(path: string, options?: { recursive?: boolean; permanent?: boolean; turnId?: string; signal?: AbortSignal }): Promise<any>;
 }
 
 /** Review 模式写操作进入准备区；实现方必须保证对正式工作区零副作用。 */
@@ -1941,11 +1941,11 @@ export class A9AgentLoop {
       case 'edit':
         return { payload: await ws.edit(args.path, args.oldText, args.newText, { turnId }) };
       case 'copy':
-        return { payload: await ws.copy(args.source, args.destination, { overwrite: args.overwrite, turnId }) };
+        return { payload: await ws.copy(args.source, args.destination, { overwrite: args.overwrite, turnId, ...(signal ? { signal } : {}) }) };
       case 'move':
-        return { payload: await ws.move(args.source, args.destination, { overwrite: args.overwrite, turnId }) };
+        return { payload: await ws.move(args.source, args.destination, { overwrite: args.overwrite, turnId, ...(signal ? { signal } : {}) }) };
       case 'delete':
-        return { payload: await ws.delete(args.path, { recursive: args.recursive, permanent: args.permanent, turnId }) };
+        return { payload: await ws.delete(args.path, { recursive: args.recursive, permanent: args.permanent, turnId, ...(signal ? { signal } : {}) }) };
       case 'start_process': {
         if (!this.config.managedProcesses || !toolCallId) throw new Error('A9_MANAGED_RUNTIME_UNAVAILABLE');
         if (typeof args.command !== 'string' || !args.command.trim()) throw new Error('A9_MANAGED_COMMAND_INVALID');

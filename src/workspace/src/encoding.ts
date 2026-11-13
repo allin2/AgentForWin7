@@ -74,41 +74,88 @@ export function decodeBuffer(buffer: Buffer, encoding: Exclude<Encoding, 'ambigu
 // ---------------------------------------------------------------------------
 
 let gbkTableCache: Map<string, number> | null | undefined;
+let gbkTableBuild: Promise<void> | undefined;
 
-function getGbkEncodeTable(): Map<string, number> | null {
-  if (gbkTableCache !== undefined) return gbkTableCache;
-  let decoder: InstanceType<typeof TextDecoder>;
+function createGbkDecoder(): InstanceType<typeof TextDecoder> | null {
   try {
-    decoder = new TextDecoder('gbk', { fatal: true });
+    return new TextDecoder('gbk', { fatal: true });
   } catch (_err) {
-    gbkTableCache = null;
     return null;
   }
+}
+
+function startGbkTable(decoder: InstanceType<typeof TextDecoder>): Map<string, number> {
   const table = new Map<string, number>();
   // GBK single byte 0x80 is the euro sign.
   try {
     const euro = decoder.decode(Buffer.from([0x80]));
     if (euro && euro !== '\ufffd') table.set(euro, 0x80);
   } catch (_err) { /* not representable in this runtime */ }
+  return table;
+}
+
+/** Adds every two-byte sequence of one lead byte; shared by sync and async builders. */
+function addGbkLead(decoder: InstanceType<typeof TextDecoder>, table: Map<string, number>, lead: number): void {
   const pair = Buffer.alloc(2);
-  for (let lead = 0x81; lead <= 0xfe; lead += 1) {
-    pair[0] = lead;
-    for (let trail = 0x40; trail <= 0xfe; trail += 1) {
-      if (trail === 0x7f) continue;
-      pair[1] = trail;
-      let text: string;
-      try {
-        text = decoder.decode(pair);
-      } catch (_err) {
-        continue;
-      }
-      if (text && text !== '\ufffd' && !table.has(text)) {
-        table.set(text, (lead << 8) | trail);
-      }
+  pair[0] = lead;
+  for (let trail = 0x40; trail <= 0xfe; trail += 1) {
+    if (trail === 0x7f) continue;
+    pair[1] = trail;
+    let text: string;
+    try {
+      text = decoder.decode(pair);
+    } catch (_err) {
+      continue;
+    }
+    if (text && text !== '\ufffd' && !table.has(text)) {
+      table.set(text, (lead << 8) | trail);
     }
   }
+}
+
+function getGbkEncodeTable(): Map<string, number> | null {
+  if (gbkTableCache !== undefined) return gbkTableCache;
+  const decoder = createGbkDecoder();
+  if (!decoder) {
+    gbkTableCache = null;
+    return null;
+  }
+  const table = startGbkTable(decoder);
+  for (let lead = 0x81; lead <= 0xfe; lead += 1) addGbkLead(decoder, table, lead);
   gbkTableCache = table;
   return table;
+}
+
+/**
+ * A9-66 F-025: builds the identical reverse table one lead byte at a time with
+ * a real event-loop turn (setImmediate) between slices. Concurrent callers
+ * share one in-flight build; a synchronous build that finishes first wins and
+ * the async result is discarded (both tables are equal by construction).
+ */
+export function prepareGbkEncodeTableAsync(): Promise<void> {
+  if (gbkTableCache !== undefined) return Promise.resolve();
+  if (!gbkTableBuild) {
+    gbkTableBuild = (async () => {
+      const decoder = createGbkDecoder();
+      if (!decoder) {
+        if (gbkTableCache === undefined) gbkTableCache = null;
+        return;
+      }
+      const table = startGbkTable(decoder);
+      for (let lead = 0x81; lead <= 0xfe; lead += 1) {
+        if (gbkTableCache !== undefined) return;
+        addGbkLead(decoder, table, lead);
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+      if (gbkTableCache === undefined) gbkTableCache = table;
+    })().finally(() => { gbkTableBuild = undefined; });
+  }
+  return gbkTableBuild;
+}
+
+/** Test-only reset so a regression can observe the first-write initialisation. */
+export function resetGbkEncodeTableForTests(): void {
+  gbkTableCache = undefined;
 }
 
 export type WritableEncoding = 'utf-8' | 'gbk' | 'utf-16le';

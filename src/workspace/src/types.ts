@@ -61,7 +61,11 @@ export type WorkspaceErrorCode =
   | 'READ_REQUIRED'
   | 'ENCODING_WRITE_UNSUPPORTED'
   | 'CHECKPOINT_PERSIST_FAILED'
-  | 'DIRECTORY_READ_FAILED';
+  | 'DIRECTORY_READ_FAILED'
+  | 'OPERATION_INCOMPLETE'
+  | 'PATH_TOO_LONG'
+  | 'PATH_IDENTITY_UNKNOWN'
+  | 'DIRECTORY_IDENTITY_CHANGED';
 
 export class WorkspaceError extends Error {
   readonly code: WorkspaceErrorCode;

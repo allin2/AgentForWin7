@@ -369,6 +369,97 @@ function createA9AgentRuntime(options) {
     pendingConversationHistory = restoredContext.messages;
     providerContextRestorePending = false;
   }
+  // A9-66 F-007: the product entries restore Provider context through bounded
+  // asynchronous batches (persistence.scanConversationFactsAsync). The
+  // synchronous restoreProviderContext/ensureProviderContextRestored pair above
+  // stays only as the legacy compatibility path (non-paged getSnapshot for
+  // schemaVersion<7 renderers) and as the independent oracle in tests.
+  // Every result is bound to a scope epoch: a conversation switch, Provider
+  // state/generation change or shutdown invalidates in-flight work, whose late
+  // result is dropped and never promoted into the cache.
+  let providerContextEpoch = 0;
+  // The signal also reads shutdownRequested, so an in-flight scan stops at its next batch on close.
+  const newProviderContextAbort = () => ({ stale: false, get aborted() { return this.stale || shutdownRequested; } });
+  let providerContextAbort = newProviderContextAbort();
+  let providerContextRestoreInFlight = null;
+  function invalidateProviderContextScope() {
+    providerContextEpoch += 1;
+    providerContextAbort.stale = true;
+    providerContextAbort = newProviderContextAbort();
+    providerContextRestoreInFlight = null;
+  }
+  function providerContextGenerationOf(sessionId) {
+    const metadata = persistence.getConversationMetadata(sessionId);
+    return Number.isSafeInteger(metadata.providerContextGeneration)
+      ? metadata.providerContextGeneration
+      : metadata.providerContextBoundaryAt ? 1 : 0;
+  }
+  async function restoreProviderContextAsync(sessionId, signal) {
+    const summary = await persistence.scanConversationFactsAsync(sessionId, {
+      providerContextGeneration: providerContextGenerationOf(sessionId),
+      maxRecent: PROVIDER_CONTEXT_MAX_ROUNDS,
+      signal,
+    });
+    return buildPersistedTextContextFromSummary(summary);
+  }
+  function staleProviderContextScope() {
+    return Object.assign(new Error('A9_SCOPE_STALE'), { code: 'A9_SCOPE_STALE' });
+  }
+  /** Shared, scope-bound initialization promise; failure/cancel leaves the cache untouched so a later call retries. */
+  function ensureProviderContextRestoredAsync() {
+    if (!providerContextRestorePending) return Promise.resolve();
+    const sessionId = a9SessionId;
+    const epoch = providerContextEpoch;
+    const inFlight = providerContextRestoreInFlight;
+    if (inFlight && inFlight.epoch === epoch && inFlight.sessionId === sessionId) return inFlight.promise;
+    const signal = providerContextAbort;
+    const entry = { epoch, sessionId, promise: null };
+    entry.promise = (async () => {
+      let context;
+      try { context = await restoreProviderContextAsync(sessionId, signal); }
+      catch (error) {
+        if (epoch !== providerContextEpoch || sessionId !== a9SessionId) throw staleProviderContextScope();
+        throw error;
+      }
+      if (epoch !== providerContextEpoch || sessionId !== a9SessionId || shutdownRequested) throw staleProviderContextScope();
+      restoredContext = context;
+      pendingConversationHistory = context.messages;
+      providerContextRestorePending = false;
+    })();
+    const clear = () => { if (providerContextRestoreInFlight === entry) providerContextRestoreInFlight = null; };
+    entry.promise.then(clear, clear);
+    providerContextRestoreInFlight = entry;
+    return entry.promise;
+  }
+  /**
+   * Statistics refresh after a Turn runs off the Turn: the Turn result and its
+   * ownership release are not delayed. It is tracked as a state operation so
+   * close waits for it, and it never throws.
+   */
+  function scheduleRestoredContextRefresh() {
+    const operation = refreshRestoredContextAsync();
+    pendingStateOperations.add(operation);
+    operation.then(() => { pendingStateOperations.delete(operation); });
+  }
+  /** Entry-point gate: restores (bounded, async) before the loop is built; the scope must be unchanged afterwards. */
+  async function awaitProviderContextForEntry(sessionId) {
+    if (!providerContextRestorePending) return;
+    await ensureProviderContextRestoredAsync();
+    assertOperationScope(sessionId);
+  }
+  /** Recomputes only the displayed context statistics (after a Turn or a generation change). Never throws. */
+  async function refreshRestoredContextAsync() {
+    const sessionId = a9SessionId;
+    const epoch = providerContextEpoch;
+    try {
+      const context = await restoreProviderContextAsync(sessionId, providerContextAbort);
+      if (epoch === providerContextEpoch && sessionId === a9SessionId) restoredContext = context;
+    } catch (error) {
+      if (epoch !== providerContextEpoch || sessionId !== a9SessionId) return;
+      restoredContext = { messages: [], stats: { deferred: true,
+        note: `历史上下文统计暂未刷新（${error && error.code ? error.code : 'A9_CONTEXT_STATS_REFRESH_FAILED'}）。` } };
+    }
+  }
   // F5：当前 Turn 的 task/turn/run 生命周期句柄。
   let activeLifecycle = null;
   let shutdownPromise = null;
@@ -804,8 +895,8 @@ function createA9AgentRuntime(options) {
       ...(probeMode ? {
         // 探测使用短超时/低重试：不可达服务快速分类，不阻塞保存流程。
         timeoutMs: 5_000,
-        totalTimeoutMs: 15_000,
-        noDataTimeoutMs: 10_000,
+        totalTimeoutMs: 45_000,
+        noDataTimeoutMs: 30_000,
         retryConfig: { maxRetries: 1, initialDelayMs: 200, maxDelayMs: 500, backoffMultiplier: 2 },
       } : {}),
     });
@@ -1412,6 +1503,7 @@ function createA9AgentRuntime(options) {
     providerContextGeneration = Number.isSafeInteger(metadata.providerContextGeneration)
       ? metadata.providerContextGeneration
       : metadata.providerContextBoundaryAt ? 1 : 0;
+    invalidateProviderContextScope();
     providerContextRestorePending = true;
     pendingConversationHistory = null;
     restoredContext = { messages: [], stats: { deferred: true, note: '历史上下文将在首次任务前恢复。' } };
@@ -1539,7 +1631,9 @@ function createA9AgentRuntime(options) {
         err.code = 'A9_SHELL_UNAVAILABLE';
         throw err;
       }
-      ensureProviderContextRestored();
+      // Every modern caller awaits preparation before reaching this factory.
+      // Never turn a missed await into an unbounded synchronous history read.
+      if (providerContextRestorePending) throw Object.assign(new Error('A9_CONTEXT_RESTORE_PENDING'), { code: 'A9_CONTEXT_RESTORE_PENDING' });
       const detectedPlatform = os.platform();
       const detectedRelease = os.release();
       const detectedArch = os.arch();
@@ -1971,7 +2065,22 @@ function createA9AgentRuntime(options) {
     }
     // 同一精确 Base URL 的模型切换保留经过脱敏的上下文；endpoint 路径、
     // origin 或端口任一改变，都必须清空旧上下文和旧凭据绑定。
-    if (!baseUrlChanged) ensureProviderContextRestored();
+    let refreshStatsAfterProviderChange = false;
+    if (!baseUrlChanged && providerContextRestorePending) {
+      try {
+        await ensureProviderContextRestoredAsync();
+      } catch (error) {
+        // A conversation switch during the restore drops the old scope's result;
+        // the new scope restores lazily. Anything else (including shutdown) fails closed.
+        if (!(error && error.code === 'A9_SCOPE_STALE')) throw error;
+      }
+      assertAvailable();
+      if (activeController || currentPendingApproval || currentPendingQuestion || questionReplyInFlightId) {
+        const error = new Error('A9_PROVIDER_RECONFIGURE_BUSY: 当前 Turn、审批或问询尚未结束，不能切换 Provider');
+        error.code = 'A9_PROVIDER_RECONFIGURE_BUSY';
+        throw error;
+      }
+    }
     const previousHistory = loop ? loop.getConversationHistory() : pendingConversationHistory;
     pendingConversationHistory = baseUrlChanged
       ? null
@@ -1990,7 +2099,13 @@ function createA9AgentRuntime(options) {
         });
       }
       providerContextGeneration = persistence.getConversationMetadata(a9SessionId).providerContextGeneration;
-      restoredContext = restoreProviderContext(a9SessionId);
+      // The generation changed: the old scope is invalidated now, in the same
+      // synchronous step as the metadata change. Statistics are recomputed
+      // through the bounded async scan once the new configuration is fully
+      // applied (below), so no await opens a window with a half-switched Provider.
+      invalidateProviderContextScope();
+      restoredContext = { messages: [], stats: { deferred: true, note: '历史上下文统计正在刷新。' } };
+      refreshStatsAfterProviderChange = true;
     }
     if (previousBaseUrl && baseUrlChanged) {
       try { if (apiKeyVault) apiKeyVault.clearApiKey(); } catch (_err) { /* best effort */ }
@@ -2090,6 +2205,10 @@ function createA9AgentRuntime(options) {
     });
 
     // 模型切换：新 loop 在下次 ensureRuntime 时恢复会话历史（不丢已完成工具结果）。
+    if (refreshStatsAfterProviderChange) {
+      await refreshRestoredContextAsync();
+      assertAvailable();
+    }
 
     return {
       ok: true,
@@ -2216,7 +2335,8 @@ function createA9AgentRuntime(options) {
         changes: redactForProjection(result.externalChanges),
       });
     }
-    restoredContext = restoreProviderContext(a9SessionId);
+    // A9-66 F-007: the displayed context statistics are refreshed by the async
+    // callers (refreshRestoredContextAsync) after this synchronous persistence step.
     agentStatus = result.outcome;
     activeConversation = persistence.listConversations(canonicalWorkspace)
       .find((item) => item.sessionId === a9SessionId) || activeConversation;
@@ -2344,6 +2464,9 @@ function createA9AgentRuntime(options) {
     let lifecycle = null;
     try {
       assertOperationScope(sessionId);
+      // Before any duplicate/ownership decision, so the ordering of concurrent
+      // clicks is the same as without a restore (the restore itself is bounded and async).
+      if (providerContextRestorePending) await awaitProviderContextForEntry(sessionId);
       if (!input || Object.keys(input).some((key) => !['conversationId', 'taskId', 'interruptedTurnId', 'recoveryRevision'].includes(key)) || input.conversationId !== a9SessionId ||
           !['taskId', 'interruptedTurnId', 'recoveryRevision'].every((key) => typeof input[key] === 'string' && input[key].length > 0)) {
         throw Object.assign(new Error('继续身份不匹配，请刷新当前中断卡。'), { code: 'A9_CONTINUE_IDENTITY_MISMATCH' });
@@ -2403,6 +2526,7 @@ function createA9AgentRuntime(options) {
       } });
       if (result.auditIncomplete) return { ...presentAuditFailure(result), continuation };
       persistTurnResult(lifecycle, result);
+      scheduleRestoredContextRefresh();
       return { ok: true, continuation, result: presentTurnResult(result) };
     } catch (error) {
       if (lifecycle && /^SQLITE/.test(String(error.code || ''))) {
@@ -2474,6 +2598,7 @@ function createA9AgentRuntime(options) {
       activeConversation = persistence.maybeSetAutomaticTitle(a9SessionId, persistedRequestPrompt);
       if (!options.preserveDraft) saveDraft('');
       activeLifecycle = { taskId: createdTaskId, turnId: null, runId: null, requestPrompt: persistedRequestPrompt };
+      if (providerContextRestorePending) await awaitProviderContextForEntry(sessionId);
       const activeLoop = ensureRuntime();
       if (options.onAccepted) options.onAccepted({ ok: true, accepted: true });
       const result = await activeLoop.runTurn(requestPrompt, { signal: ownedController.signal });
@@ -2492,12 +2617,27 @@ function createA9AgentRuntime(options) {
       };
       activeLifecycle = lifecycle;
       persistTurnResult(lifecycle, result);
+      scheduleRestoredContextRefresh();
       return { ok: true, result: presentTurnResult(result) };
     } catch (error) {
       let failureLifecycle = activeLifecycle || (createdTaskId ? { taskId: createdTaskId, turnId: null, runId: null } : null);
       if (failureLifecycle && !failureLifecycle.turnId) {
         const failureTurnId = `turn-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
         failureLifecycle = { ...failureLifecycle, turnId: failureTurnId, runId: `run-${failureTurnId}` };
+      }
+      if (!shutdownRequested && ownedController && ownedController.signal.aborted && failureLifecycle
+          && providerContextRestorePending && ['A9_CONTEXT_RESTORE_CANCELLED', 'A9_SCOPE_STALE'].includes(error.code)) {
+        // Stop during preparation is a cancelled Turn, just as Stop in Core is.
+        // No loop/model/tool was started and the partial restore stays uncached.
+        const result = { turnId: failureLifecycle.turnId, outcome: 'cancelled', verification: 'not_applicable',
+          finalMessage: 'Turn cancelled by user', totalSteps: 0, toolCallsExecuted: 0, externalChanges: [] };
+        try { persistTurnResult(failureLifecycle, result); }
+        catch (_persistenceError) {
+          return presentAuditFailure({ ...result, outcome: 'failed',
+            auditIncomplete: { code: 'A9_AUDIT_PERSISTENCE_FAILED', failedEvent: 'context_restore_cancelled' } });
+        }
+        scheduleRestoredContextRefresh();
+        return { ok: true, result: presentTurnResult(result) };
       }
       persistUnexpectedFailure(error, failureLifecycle);
       return { ok: false, error: presentError(error) };
@@ -2532,6 +2672,15 @@ function createA9AgentRuntime(options) {
         const err = new Error('A9_APPROVAL_STALE: 审批与当前对话/任务/Turn/目标绑定不匹配');
         err.code = 'A9_APPROVAL_STALE';
         throw err;
+      }
+      if (providerContextRestorePending) {
+        await awaitProviderContextForEntry(sessionId);
+        // The pending approval may have been resolved while the context was restored.
+        if (currentPendingApproval !== original) {
+          const err = new Error('A9_APPROVAL_STALE: 审批与当前对话/任务/Turn/目标绑定不匹配');
+          err.code = 'A9_APPROVAL_STALE';
+          throw err;
+        }
       }
       const activeLoop = ensureRuntime();
       if (activeController) {
@@ -2575,6 +2724,7 @@ function createA9AgentRuntime(options) {
       const lifecycle = activeLifecycle || null;
       if (lifecycle && lifecycle.turnId) {
         persistTurnResult(lifecycle, result);
+        scheduleRestoredContextRefresh();
       } else {
         const err = new Error('A9_LIFECYCLE_MISSING: 挂起审批缺少 task/turn/run 生命周期事实');
         err.code = 'A9_LIFECYCLE_MISSING';
@@ -2681,6 +2831,7 @@ function createA9AgentRuntime(options) {
       let result;
       if (activeLifecycle && activeLifecycle.taskId === original.taskId && activeLifecycle.turnId === original.turnId) {
         lifecycle = activeLifecycle;
+        if (providerContextRestorePending) await awaitProviderContextForEntry(sessionId);
         const activeLoop = ensureRuntime();
         result = await activeLoop.resumeAfterQuestion({
           conversationId: input.conversationId,
@@ -2717,6 +2868,7 @@ function createA9AgentRuntime(options) {
           throw Object.assign(new Error('权限配置已变化，请重新确认工作区模式。'), { code: 'A9_CONTINUE_MODE_DRIFT' });
         }
         loop = null;
+        if (providerContextRestorePending) await awaitProviderContextForEntry(sessionId);
         const recoveredLoop = ensureRuntime();
         recoveredLoop.restoreConversationHistory([]);
         const summary = redactForProjection({
@@ -2773,6 +2925,7 @@ function createA9AgentRuntime(options) {
         };
       }
       persistTurnResult(lifecycle, result);
+      scheduleRestoredContextRefresh();
       return { ok: true, result: presentTurnResult(result) };
     } catch (error) {
       if (producedResult) persistUnexpectedFailure(error, lifecycle);
@@ -2791,6 +2944,7 @@ function createA9AgentRuntime(options) {
     pauseQueue();
     if (activeController) {
       activeController.abort();
+      if (providerContextRestorePending) invalidateProviderContextScope();
       agentStatus = 'cancelling';
       return { ok: true };
     }
@@ -3063,10 +3217,13 @@ function createA9AgentRuntime(options) {
   }
 
   function searchHistory(input) {
+    // Invalid input still throws synchronously, before any SQL work starts.
     validateHistoryInput('search', input);
-    const page = persistence.searchRetainedHistory(canonicalWorkspace, input,
-      (json, type) => visibleHistoryText(json, type, redactHistoryText));
-    return { ok: true, ...redactForProjection(page) };
+    // A9-66 F-008: bounded SQL windows with real event-loop turns between them;
+    // the complete retained history and the exact cursor order are preserved.
+    const project = (json, type) => visibleHistoryText(json, type, redactHistoryText);
+    return persistence.searchRetainedHistoryAsync(canonicalWorkspace, input, project)
+      .then((page) => ({ ok: true, ...redactForProjection(page) }));
   }
 
   function locateHistory(input) {
@@ -3469,6 +3626,7 @@ function createA9AgentRuntime(options) {
       value.knownBasicCredentials.forEach(secret => knownBasicCredentials.add(secret));
       rebuildProvider();
       if (providerConfig) alignConversationProviderBoundary(a9SessionId);
+      invalidateProviderContextScope();
       providerContextRestorePending = true;
     },
     assertAvailable,
@@ -3551,6 +3709,45 @@ function createConversationId() {
   return `a9c-${Date.now()}-${crypto.randomBytes(6).toString('hex')}`;
 }
 
+const PROVIDER_CONTEXT_MAX_ROUNDS = 20;
+const PROVIDER_CONTEXT_MAX_CHARS = 32_000;
+
+/**
+ * A9-66 F-007: same selection/statistics as buildPersistedTextContext, from the
+ * bounded asynchronous scan summary (newest complete rounds in ascending order,
+ * exact complete/visible counts). buildPersistedTextContext stays the
+ * independent synchronous oracle.
+ */
+function buildPersistedTextContextFromSummary(summary) {
+  const recent = summary.recent;
+  const selected = [];
+  let includedChars = 0;
+  for (let index = recent.length - 1; index >= 0 && selected.length < PROVIDER_CONTEXT_MAX_ROUNDS; index -= 1) {
+    const fact = recent[index];
+    const roundChars = fact.requestPrompt.length + fact.finalMessage.length;
+    if (includedChars + roundChars > PROVIDER_CONTEXT_MAX_CHARS) break;
+    selected.push(fact);
+    includedChars += roundChars;
+  }
+  selected.reverse();
+  const omittedRounds = Math.max(0, summary.completeRounds - selected.length);
+  return {
+    messages: selected.flatMap((fact) => [
+      { role: 'user', content: fact.requestPrompt },
+      { role: 'assistant', content: fact.finalMessage },
+    ]),
+    stats: {
+      includedRounds: selected.length,
+      includedChars,
+      omittedRounds,
+      visibleRounds: summary.visibleRounds,
+      maxRounds: PROVIDER_CONTEXT_MAX_ROUNDS,
+      maxChars: PROVIDER_CONTEXT_MAX_CHARS,
+      ...(omittedRounds > 0 ? { note: `更早的 ${omittedRounds} 个完整轮次仅在本地可见，未恢复给 Provider。` } : {}),
+    },
+  };
+}
+
 /**
  * 重启/切换时只恢复完整用户+助手文本轮；工具、审批和副作用不进入模型上下文。
  */
@@ -3620,7 +3817,14 @@ function preflightElectronSqlite(root) {
       openDatabase: (databasePath, opts) => new Database(databasePath, opts && opts.readonly ? { readonly: true } : {}),
     };
   } catch (err) {
-    return { ok: false, reason: `${err && err.message ? err.message : String(err)}` };
+    // A9-67 F-028: a stable probe code precedes the bounded detail so the
+    // diagnostic is classifiable without parsing platform-specific messages.
+    const message = `${err && err.message ? err.message : String(err)}`;
+    const errorCode = err && typeof err.code === 'string' ? err.code : '';
+    const code = errorCode === 'MODULE_NOT_FOUND' ? 'A9_PROBE_SQLITE_MODULE_MISSING'
+      : errorCode === 'ERR_DLOPEN_FAILED' || /NODE_MODULE_VERSION/.test(message) ? 'A9_PROBE_SQLITE_ABI_MISMATCH'
+        : 'A9_PROBE_SQLITE_OPEN_FAILED';
+    return { ok: false, code, reason: `${code}: ${message}` };
   }
 }
 
@@ -3738,4 +3942,4 @@ function createDiagnosticsRuntime(outcome) {
   };
 }
 
-module.exports = { createA9AgentRuntime, openA9RuntimePersistence, normalizeConversationTitle: (...args) => requireModule('state/dist').normalizeConversationTitle(...args), A9_PROTOCOL_VERSION, redactUrlUserinfo };
+module.exports = { createA9AgentRuntime, openA9RuntimePersistence, buildPersistedTextContext, buildPersistedTextContextFromSummary, normalizeConversationTitle: (...args) => requireModule('state/dist').normalizeConversationTitle(...args), A9_PROTOCOL_VERSION, redactUrlUserinfo };

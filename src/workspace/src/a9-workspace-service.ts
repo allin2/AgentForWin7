@@ -20,6 +20,7 @@ import {
   detectEncoding,
   decodeBuffer,
   encodeText,
+  prepareGbkEncodeTableAsync,
   reencodePreservingOriginal,
   bomPrefixFor,
   EncodingWriteError,
@@ -36,6 +37,8 @@ import {
   unavailableEditFeedback,
 } from './a9-edit-feedback';
 import { WorkspaceError } from './types';
+import { copyTreeAsync, removeTreeAsync } from './async-tree';
+import { IoGuard, captureNearestAnchor, identityChanged, samePath } from './directory-identity';
 
 export interface A9ListResult {
   path: string;
@@ -216,6 +219,8 @@ export interface ExternalChangeReport {
 
 export class A9WorkspaceService {
   public readonly workspaceRoot: string;
+  /** A9-67 F-022: set when the workspace root identity could not be resolved. */
+  private readonly rootIdentityError: WorkspaceError | undefined;
   private readonly ignoreFilter: IgnoreFilter;
   private readonly checkpointManager: CheckpointManager;
   private readonly baselines = new Map<string, BaselineFact>();
@@ -252,8 +257,41 @@ export class A9WorkspaceService {
     let canonicalRoot = workspaceRoot;
     try {
       canonicalRoot = fs.realpathSync(workspaceRoot);
-    } catch (_err) {
+    } catch (error) {
       canonicalRoot = path.resolve(workspaceRoot);
+      const code = (error as NodeJS.ErrnoException)?.code;
+      if (code === 'ENOENT' || code === 'ENOTDIR') {
+        // A9-55 default workspace: the directory is created lazily, so a root
+        // that does not exist yet stays valid. Its nearest existing ancestor is
+        // still canonicalized so later paths agree with resolvePath.
+        let probe = canonicalRoot;
+        const suffix: string[] = [];
+        for (;;) {
+          const parent = path.dirname(probe);
+          if (parent === probe) break;
+          suffix.unshift(path.basename(probe));
+          probe = parent;
+          try {
+            canonicalRoot = path.join(fs.realpathSync(probe), ...suffix);
+            break;
+          } catch (ancestorError) {
+            const ancestorCode = (ancestorError as NodeJS.ErrnoException)?.code;
+            if (ancestorCode !== 'ENOENT' && ancestorCode !== 'ENOTDIR') {
+              this.rootIdentityError = ancestorCode === 'ENAMETOOLONG'
+                ? new WorkspaceError('PATH_TOO_LONG', `工作区根路径超过当前系统允许的长度（${ancestorCode}）；请缩短路径后重试。`)
+                : new WorkspaceError('PATH_IDENTITY_UNKNOWN', `无法确认工作区根目录的真实位置（${String(ancestorCode ?? 'UNKNOWN')}）；拒绝按字面路径继续。`);
+              break;
+            }
+          }
+        }
+      } else {
+        // A9-67 F-022: an existing root whose identity cannot be resolved
+        // (EACCES/ELOOP/ENAMETOOLONG/...) is never reported as verified; each
+        // operation fails closed with a stable path-free code.
+        this.rootIdentityError = code === 'ENAMETOOLONG'
+          ? new WorkspaceError('PATH_TOO_LONG', `工作区根路径超过当前系统允许的长度（${code}）；请缩短路径后重试。`)
+          : new WorkspaceError('PATH_IDENTITY_UNKNOWN', `无法确认工作区根目录的真实位置（${String(code ?? 'UNKNOWN')}）；拒绝按字面路径继续。`);
+      }
     }
     this.workspaceRoot = canonicalRoot;
     this.containsSensitiveData = options.containsSensitiveData ?? (() => false);
@@ -274,26 +312,48 @@ export class A9WorkspaceService {
   // -------------------------------------------------------------------------
 
   private resolvePath(targetPath: string): { absPath: string; relPath: string; isOutside: boolean } {
+    if (this.rootIdentityError) throw this.rootIdentityError;
     const absPath = path.isAbsolute(targetPath)
       ? path.resolve(targetPath)
       : path.resolve(this.workspaceRoot, targetPath);
     // Canonical/real path：解析 junction、symlink 与 reparse point 的真实位置。
-    let realPath = absPath;
-    try {
-      // 对不存在的路径解析其最近存在祖先，保留末段。
-      let probe = absPath;
-      const suffixSegments: string[] = [];
-      while (!fs.existsSync(probe)) {
-        suffixSegments.unshift(path.basename(probe));
-        const parent = path.dirname(probe);
-        if (parent === probe) break;
-        probe = parent;
+    // A9-67 F-022: identity failures fail closed with stable, path-free codes.
+    // ENOENT/ENOTDIR mean "not there yet"; anything else (ENAMETOOLONG, which
+    // libuv also reports for Win32 ERROR_FILENAME_EXCED_RANGE 206, EACCES,
+    // ELOOP, ...) means the canonical location is unknown, so a lexical path
+    // must not be reported as a verified workspace-relative identity.
+    const identityError = (error: unknown): WorkspaceError => {
+      const code = String((error as NodeJS.ErrnoException)?.code ?? 'UNKNOWN');
+      return code === 'ENAMETOOLONG'
+        ? new WorkspaceError('PATH_TOO_LONG', `路径超过当前系统允许的长度（${code}）；请缩短路径后重试。`)
+        : new WorkspaceError('PATH_IDENTITY_UNKNOWN', `无法确认路径的真实位置（${code}）；拒绝按字面路径继续。`);
+    };
+    const present = (candidate: string): boolean => {
+      try {
+        fs.statSync(candidate);
+        return true;
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException)?.code;
+        if (code === 'ENOENT' || code === 'ENOTDIR') return false;
+        throw identityError(error);
       }
-      const realProbe = fs.realpathSync(probe);
-      realPath = suffixSegments.length > 0 ? path.join(realProbe, ...suffixSegments) : realProbe;
-    } catch (_err) {
-      realPath = absPath;
+    };
+    // 对不存在的路径解析其最近存在祖先，保留末段。
+    let probe = absPath;
+    const suffixSegments: string[] = [];
+    while (!present(probe)) {
+      suffixSegments.unshift(path.basename(probe));
+      const parent = path.dirname(probe);
+      if (parent === probe) break;
+      probe = parent;
     }
+    let realProbe: string;
+    try {
+      realProbe = fs.realpathSync(probe);
+    } catch (error) {
+      throw identityError(error);
+    }
+    const realPath = suffixSegments.length > 0 ? path.join(realProbe, ...suffixSegments) : realProbe;
     const relPath = path.relative(this.workspaceRoot, realPath).replace(/\\/g, '/');
     const isOutside = relPath.startsWith('..') || path.isAbsolute(relPath);
     return { absPath: realPath, relPath, isOutside };
@@ -884,6 +944,25 @@ export class A9WorkspaceService {
     return { path: relative, bytesWritten: buffer.length, encoding: 'binary', created: true, outsideWorkspace: false };
   }
 
+  /** Bind ownership before GBK preparation; validate in the caller's turn after await. */
+  private bindEncodingMutationPath(
+    targetPath: string,
+    resolved: { absPath: string; relPath: string; isOutside: boolean },
+  ): () => void {
+    const guard = new IoGuard([
+      captureNearestAnchor(this.workspaceRoot),
+      captureNearestAnchor(path.dirname(resolved.absPath)),
+    ]);
+    return () => {
+      guard.assertAnchors();
+      guard.check(resolved.absPath);
+      this.checkpointManager.validateRecoveryIdentity();
+      const current = this.resolvePath(targetPath);
+      if (!samePath(current.absPath, resolved.absPath) || current.relPath !== resolved.relPath ||
+          current.isOutside !== resolved.isOutside) throw identityChanged('GBK mutation path');
+    };
+  }
+
   async write(
     targetPath: string,
     content: string,
@@ -891,6 +970,15 @@ export class A9WorkspaceService {
   ): Promise<A9WriteResult> {
     const { absPath, relPath, isOutside } = this.resolvePath(targetPath);
     const turnId = options.turnId || 'turn-default';
+    // A9-66 F-025: build the GBK reverse table cooperatively before the first
+    // GBK write; done before every baseline check so no new await gap appears
+    // between validation and the atomic write.
+    const boundEncoding = this.baselines.get(relPath)?.encoding;
+    if (options.encoding === 'gbk' || (!options.encoding && fs.existsSync(absPath) && boundEncoding !== 'utf-8' && boundEncoding !== 'utf-16le')) {
+      const validatePath = this.bindEncodingMutationPath(targetPath, { absPath, relPath, isOutside });
+      await prepareGbkEncodeTableAsync();
+      validatePath();
+    }
     const isNew = !fs.existsSync(absPath);
 
     if (!isNew) {
@@ -965,6 +1053,12 @@ export class A9WorkspaceService {
   ): Promise<A9EditResult> {
     const { absPath, relPath, isOutside } = this.resolvePath(targetPath);
     const turnId = options.turnId || 'turn-default';
+    const boundEncoding = this.baselines.get(relPath)?.encoding;
+    if (boundEncoding !== 'utf-8' && boundEncoding !== 'utf-16le') {
+      const validatePath = this.bindEncodingMutationPath(targetPath, { absPath, relPath, isOutside });
+      await prepareGbkEncodeTableAsync();
+      validatePath();
+    }
 
     if (!fs.existsSync(absPath)) {
       throw new Error(`待编辑文件不存在: ${targetPath}`);
@@ -1068,10 +1162,64 @@ export class A9WorkspaceService {
   // copy / move
   // -------------------------------------------------------------------------
 
+  /**
+   * A9-66 F-011: runs one destructive workspace side effect after its
+   * recovery facts exist. Cancellation is honoured until the first filesystem
+   * change; afterwards a failure or cancellation still tries to record the
+   * actual post-state of every touched path before it is reported as incomplete.
+   * The report states exactly which facts were and were not made durable.
+   */
+  private async runRecordedSideEffect(
+    turnId: string,
+    signal: AbortSignal | undefined,
+    guard: IoGuard,
+    effect: (onSideEffect: () => void) => Promise<void>,
+    facts: () => Array<{ relPath: string; absPath: string }>,
+    label: string,
+  ): Promise<void> {
+    if (signal?.aborted) throw new Error(`${label}已取消（未执行任何文件变更）`);
+    let changed = false;
+    try {
+      await effect(() => { changed = true; });
+    } catch (error) {
+      if (!changed) throw error;
+      const recorded: string[] = [];
+      const notRecorded: string[] = [];
+      for (const fact of facts()) {
+        try {
+          await this.checkpointManager.recordPostMutationAsync(turnId, fact.relPath, fs.existsSync(fact.absPath) ? 'modify' : 'delete', { guard });
+          this.baselines.delete(fact.relPath);
+          recorded.push(fact.relPath);
+        } catch (recordError) {
+          notRecorded.push(`${fact.relPath}: ${recordError instanceof Error ? recordError.message : String(recordError)}`);
+        }
+      }
+      const reason = error instanceof Error ? error.message : String(error);
+      throw new WorkspaceError('OPERATION_INCOMPLETE', notRecorded.length === 0
+        ? `${label}未完成，部分文件已变化，变化事实已记入本轮 checkpoint（${reason}）`
+        : `${label}未完成，部分文件已变化；变化事实${recorded.length ? '仅部分' : '未能'}记入本轮 checkpoint（${reason}）；`
+          + `未能记录：${notRecorded.join('; ')}。不要假定撤销能覆盖这些变化。`);
+    }
+  }
+
+  /** Post-effect fact recording; a persist failure is reported as unrecorded, never as recorded. */
+  private async recordPostFacts(label: string, record: () => Promise<void>): Promise<void> {
+    try {
+      await record();
+    } catch (error) {
+      if (error instanceof WorkspaceError && error.code === 'DIRECTORY_IDENTITY_CHANGED') {
+        throw new WorkspaceError('OPERATION_INCOMPLETE',
+          `${label}已执行，但目录身份在记录变化事实前已变化；变化事实未能记入 checkpoint，也未对新位置做任何读写。`);
+      }
+      throw new WorkspaceError('OPERATION_INCOMPLETE',
+        `${label}已执行，但变化事实未能记入 checkpoint（${error instanceof Error ? error.message : String(error)}）。`);
+    }
+  }
+
   async copy(
     sourcePath: string,
     destinationPath: string,
-    options: { overwrite?: boolean; turnId?: string } = {},
+    options: { overwrite?: boolean; turnId?: string; signal?: AbortSignal } = {},
   ): Promise<{ source: string; destination: string; copied: boolean; outsideWorkspace: boolean }> {
     const { absPath: srcAbs, relPath: srcRel, isOutside: srcOutside } = this.resolvePath(sourcePath);
     const { absPath: destAbs, relPath: destRel, isOutside: destOutside } = this.resolvePath(destinationPath);
@@ -1090,12 +1238,18 @@ export class A9WorkspaceService {
       this.ensureWritableBaseline(destAbs, destRel);
     }
 
-    this.checkpointManager.recordPreMutation(turnId, destRel);
+    // Identity of the root, recovery store and both parent directories is bound
+    // before the first await; every later I/O is checked against it.
+    const guard = this.checkpointManager.createIoGuard([srcAbs, destAbs]);
+    await this.checkpointManager.recordPreMutationAsync(turnId, destRel, { signal: options.signal, guard });
 
-    this.ensureParentDir(destAbs);
-    fs.cpSync(srcAbs, destAbs, { recursive: true, force: true });
+    await this.runRecordedSideEffect(turnId, options.signal, guard, async (onSideEffect) => {
+      guard.ensureDirectory(path.dirname(destAbs));
+      await copyTreeAsync(srcAbs, destAbs, { force: true, signal: options.signal, guard, onSideEffect });
+    }, () => [{ relPath: destRel, absPath: destAbs }], '复制');
 
-    this.checkpointManager.recordPostMutation(turnId, destRel, destExisted ? 'modify' : 'create');
+    await this.recordPostFacts('复制', () => this.checkpointManager.recordPostMutationAsync(turnId, destRel, destExisted ? 'modify' : 'create', { guard }));
+    guard.check(destAbs);
     this.recordBaseline(destRel, destAbs);
 
     return {
@@ -1109,7 +1263,7 @@ export class A9WorkspaceService {
   async move(
     sourcePath: string,
     destinationPath: string,
-    options: { overwrite?: boolean; turnId?: string } = {},
+    options: { overwrite?: boolean; turnId?: string; signal?: AbortSignal } = {},
   ): Promise<{ source: string; destination: string; moved: boolean; outsideWorkspace: boolean }> {
     const { absPath: srcAbs, relPath: srcRel, isOutside: srcOutside } = this.resolvePath(sourcePath);
     const { absPath: destAbs, relPath: destRel, isOutside: destOutside } = this.resolvePath(destinationPath);
@@ -1127,16 +1281,24 @@ export class A9WorkspaceService {
       this.ensureWritableBaseline(destAbs, destRel);
     }
 
+    const guard = this.checkpointManager.createIoGuard([srcAbs, destAbs]);
     // 源与目标都要可撤销：源记 delete（保留原始内容），目标记 modify/create。
-    this.checkpointManager.recordPreMutation(turnId, srcRel);
-    this.checkpointManager.recordPreMutation(turnId, destRel);
+    await this.checkpointManager.recordPreMutationAsync(turnId, srcRel, { signal: options.signal, guard });
+    await this.checkpointManager.recordPreMutationAsync(turnId, destRel, { signal: options.signal, guard });
 
-    this.ensureParentDir(destAbs);
+    // rename is one atomic filesystem call; it either happened or it did not.
+    if (options.signal?.aborted) throw new Error('移动已取消（未执行任何文件变更）');
+    guard.ensureDirectory(path.dirname(destAbs));
+    guard.check(srcAbs);
+    guard.check(destAbs);
     fs.renameSync(srcAbs, destAbs);
 
-    this.checkpointManager.recordPostMutation(turnId, srcRel, 'delete');
-    this.checkpointManager.recordPostMutation(turnId, destRel, destExisted ? 'modify' : 'create');
+    await this.recordPostFacts('移动', async () => {
+      await this.checkpointManager.recordPostMutationAsync(turnId, srcRel, 'delete', { guard });
+      await this.checkpointManager.recordPostMutationAsync(turnId, destRel, destExisted ? 'modify' : 'create', { guard });
+    });
     this.baselines.delete(srcRel);
+    guard.check(destAbs);
     this.recordBaseline(destRel, destAbs);
 
     return {
@@ -1158,7 +1320,7 @@ export class A9WorkspaceService {
    */
   async delete(
     targetPath: string,
-    options: { recursive?: boolean; permanent?: boolean; turnId?: string } = {},
+    options: { recursive?: boolean; permanent?: boolean; turnId?: string; signal?: AbortSignal } = {},
   ): Promise<A9DeleteResult> {
     const { absPath, relPath, isOutside } = this.resolvePath(targetPath);
     const turnId = options.turnId || 'turn-default';
@@ -1178,17 +1340,35 @@ export class A9WorkspaceService {
       }
     }
 
+    const guard = this.checkpointManager.createIoGuard([absPath]);
     // 副作用前先落恢复事实：permanent:false 的可恢复性由此保证。
-    const record = this.checkpointManager.recordPreMutation(turnId, relPath);
+    const record = await this.checkpointManager.recordPreMutationAsync(turnId, relPath, { signal: options.signal, guard });
+
+    if (options.permanent !== true) {
+      // permanent:false：内容已随 recordPreMutation 进入恢复区（blob/目录快照），
+      // 此时移除原路径；undo 可整体恢复。
+      if (stat.isDirectory()) {
+        if (!record.originalSnapshotPath && !record.currentStateSnapshotPath) {
+          throw new WorkspaceError('CHECKPOINT_PERSIST_FAILED', `目录 ${relPath} 的恢复快照未能建立，拒绝删除以保持可恢复性。`);
+        }
+      } else if (!record.originalBlobPath && !record.currentStateBlobPath && !record.newBlobPath) {
+        throw new WorkspaceError('CHECKPOINT_PERSIST_FAILED', `文件 ${relPath} 的恢复内容未能建立，拒绝删除以保持可恢复性。`);
+      }
+    }
+
+    await this.runRecordedSideEffect(turnId, options.signal, guard, async (onSideEffect) => {
+      if (stat.isDirectory()) {
+        await removeTreeAsync(absPath, { signal: options.signal, guard, onSideEffect });
+      } else {
+        guard.check(absPath);
+        fs.unlinkSync(absPath);
+        onSideEffect();
+      }
+    }, () => [{ relPath, absPath }], '删除');
+    await this.recordPostFacts('删除', () => this.checkpointManager.recordPostMutationAsync(turnId, relPath, 'delete', { guard }));
+    this.baselines.delete(relPath);
 
     if (options.permanent === true) {
-      if (stat.isDirectory()) {
-        fs.rmSync(absPath, { recursive: true, force: true });
-      } else {
-        fs.unlinkSync(absPath);
-      }
-      this.checkpointManager.recordPostMutation(turnId, relPath, 'delete');
-      this.baselines.delete(relPath);
       return {
         path: relPath,
         deleted: true,
@@ -1196,23 +1376,6 @@ export class A9WorkspaceService {
         outsideWorkspace: isOutside,
       };
     }
-
-    // permanent:false：内容已随 recordPreMutation 进入恢复区（blob/目录快照），
-    // 此时移除原路径；undo 可整体恢复。
-    if (stat.isDirectory()) {
-      if (!record.originalSnapshotPath && !record.currentStateSnapshotPath) {
-        throw new WorkspaceError('CHECKPOINT_PERSIST_FAILED', `目录 ${relPath} 的恢复快照未能建立，拒绝删除以保持可恢复性。`);
-      }
-      fs.rmSync(absPath, { recursive: true, force: true });
-    } else {
-      if (!record.originalBlobPath && !record.currentStateBlobPath && !record.newBlobPath) {
-        throw new WorkspaceError('CHECKPOINT_PERSIST_FAILED', `文件 ${relPath} 的恢复内容未能建立，拒绝删除以保持可恢复性。`);
-      }
-      fs.unlinkSync(absPath);
-    }
-    this.checkpointManager.recordPostMutation(turnId, relPath, 'delete');
-    this.baselines.delete(relPath);
-
     return {
       path: relPath,
       deleted: true,
@@ -1271,6 +1434,9 @@ export class A9WorkspaceService {
           if (real && !visited.has(real)) {
             visited.add(real);
             stack.push(fullPath);
+          } else if (!real) {
+            // A9-67 F-029: an unresolvable directory is not scanned; keep the gap as a fact.
+            skipped.push({ path: rel, reason: 'backup_failed' });
           }
         } else if (dirent.isFile()) {
           let stat: fs.Stats;
@@ -1351,6 +1517,9 @@ export class A9WorkspaceService {
     const currentDirectories = new Set<string>();
     const stack: string[] = [this.workspaceRoot];
     const visited = new Set<string>([this.safeRealPath(this.workspaceRoot)].filter((v): v is string => v !== undefined));
+    // A9-67 F-029: paths whose post-Turn state could not be observed.
+    const unscanned: string[] = [];
+    const unstatable = new Set<string>();
     let sliceStart = Date.now();
     while (stack.length > 0) {
       if (options.signal?.aborted) throw new Error('外部变化收集已被取消');
@@ -1359,6 +1528,9 @@ export class A9WorkspaceService {
       try {
         dirents = fs.readdirSync(dir, { withFileTypes: true });
       } catch (_e) {
+        // A9-67 F-029: an unreadable directory is UNKNOWN, never "everything deleted".
+        if (dir === this.workspaceRoot) throw new Error('无法读取工作区根目录，拒绝把未知状态记为外部变化');
+        unscanned.push(path.relative(this.workspaceRoot, dir).replace(/\\/g, '/'));
         continue;
       }
       for (const dirent of dirents) {
@@ -1380,12 +1552,15 @@ export class A9WorkspaceService {
           if (real && !visited.has(real)) {
             visited.add(real);
             stack.push(fullPath);
+          } else if (!real) {
+            unscanned.push(rel);
           }
         } else if (dirent.isFile()) {
           let stat: fs.Stats;
           try {
             stat = fs.statSync(fullPath);
           } catch (_e) {
+            unstatable.add(rel);
             continue;
           }
           try {
@@ -1400,6 +1575,15 @@ export class A9WorkspaceService {
 
     // F2：skipped = 冻结时已存在但基线未覆盖的文件（携带事实，不含内容）。
     const skippedFacts = new Map(baseline.skipped.map((item) => [item.path, item]));
+    const skippedAncestor = (rel: string) => {
+      for (let parent = path.posix.dirname(rel); parent !== '.' && parent !== '/' && parent !== ''; parent = path.posix.dirname(parent)) {
+        const fact = skippedFacts.get(parent);
+        if (fact) return fact;
+      }
+      return undefined;
+    };
+    const unobserved = (rel: string) => unstatable.has(rel)
+      || unscanned.some((dir) => rel === dir || rel.startsWith(`${dir}/`));
     const createdHashes = new Map<string, string>();
     const isContentHash = (value: string): boolean => /^[a-f0-9]{64}$/.test(value);
     // A9-61: facts are derived in the original order, then made durable in bounded batches.
@@ -1412,7 +1596,9 @@ export class A9WorkspaceService {
       const before = Object.prototype.hasOwnProperty.call(baseline.files, rel)
         ? baseline.files[rel]
         : undefined;
-      const skippedFact = skippedFacts.get(rel);
+      // A9-67 F-029: a file below a directory the baseline could not scan is a
+      // baseline gap, never a recoverable "created" file whose undo deletes it.
+      const skippedFact = skippedFacts.get(rel) ?? (before ? undefined : skippedAncestor(rel));
       if (!before && skippedFact) {
         // skipped 不含内容，只能比较冻结时保存的 stat 事实。事实完整且未变化时
         // 不制造虚假 Diff；事实缺失或 size/mtime 变化时保守标记不可恢复修改。
@@ -1462,6 +1648,14 @@ export class A9WorkspaceService {
     for (const [rel, before] of Object.entries(baseline.files)) {
       await slice.step();
       if (current.has(rel)) continue;
+      if (unobserved(rel)) {
+        // A9-67 F-029: unreadable now is UNKNOWN, not deleted; never authorise a restore over it.
+        operations.push({ kind: 'file', path: rel, action: 'modified', options: { originalBlobPath: before.blobPath, originalHash: before.sha256, unrecoverable: true } });
+        operations.push({ kind: 'unrecoverable', change: { path: rel, kind: 'modified', reason: '轮后无法读取该路径，当前状态未知，不自动恢复' } });
+        report.unrecoverable.push({ path: rel, kind: 'modified', reason: 'collect_unreadable' });
+        report.changes.push({ path: rel, kind: 'modified', recoverable: false });
+        continue;
+      }
       const renamedTo = createdHashes.get(before.sha256);
       if (renamedTo && renamedTo !== rel) {
         operations.push({ kind: 'file', path: rel, action: 'deleted', options: { originalBlobPath: before.blobPath, originalHash: before.sha256 } });
@@ -1481,7 +1675,8 @@ export class A9WorkspaceService {
     }
     for (const [rel, skippedFact] of skippedFacts) {
       await slice.step();
-      if (current.has(rel)) continue;
+      // A skipped scan root is a directory fact, not a missing file.
+      if (current.has(rel) || currentDirectories.has(rel)) continue;
       const sizeMatchPath = skippedFact.size !== undefined ? firstCurrentPathBySize.get(skippedFact.size) : undefined;
       const sizeMatchRename = sizeMatchPath !== undefined ? [sizeMatchPath] as const : undefined;
       const kind = sizeMatchRename ? 'renamed' : 'deleted';
@@ -1504,6 +1699,11 @@ export class A9WorkspaceService {
     for (const [rel, before] of Object.entries(baselineDirectories)) {
       await slice.step();
       if (currentDirectories.has(rel)) continue;
+      if (unobserved(rel)) {
+        operations.push({ kind: 'unrecoverable', change: { path: rel, kind: 'modified', reason: '轮后无法读取上级目录，目录状态未知，不自动恢复' } });
+        report.unrecoverable.push({ path: rel, kind: 'modified', reason: 'collect_unreadable' });
+        continue;
+      }
       if (current.has(rel)) {
         operations.push({ kind: 'directory', path: rel, action: 'replaced_by_file', options: {
           originalSnapshotPath: before.snapshotPath,
@@ -1521,6 +1721,15 @@ export class A9WorkspaceService {
     for (const rel of currentDirectories) {
       await slice.step();
       if (Object.prototype.hasOwnProperty.call(baselineDirectories, rel)) continue;
+      const gap = skippedFacts.get(rel) ?? skippedAncestor(rel);
+      if (gap) {
+        // An unscanned ancestor cannot prove a directory was newly created.
+        // Persist only the existing unrecoverable fact; never grant delete-new.
+        operations.push({ kind: 'unrecoverable', change: { path: rel, kind: 'modified', reason: `Directory baseline was not observed (${gap.reason}); preserve current state` } });
+        report.unrecoverable.push({ path: rel, kind: 'modified', reason: gap.reason });
+        report.changes.push({ path: rel, kind: 'modified', recoverable: false });
+        continue;
+      }
       operations.push({ kind: 'directory', path: rel, action: 'created', options: { emptyTreeHash } });
       report.changes.push({ path: rel, kind: baseline.files[rel] ? 'modified' : 'created', recoverable: true, restoredVia: 'delete-new' });
     }

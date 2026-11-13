@@ -11,6 +11,7 @@ import {
   decode,
 } from '../types';
 import { negotiateVersion, parseSSE } from '../protocol';
+import { MAX_PENDING_LINE_BYTES } from './sse-parser';
 import {
   IConnection,
   MockConnection,
@@ -297,11 +298,22 @@ export class GatewayProvider {
     // 4. Send and collect response
     try {
       let responseBody: string | null = null;
+      let responseBytes = 0;
+      let responseLimitError: GatewayError | null = null;
 
       const offData = conn.onData((responseRequestId: string, data: string) => {
-        if (responseRequestId === request.id) {
-          responseBody = (responseBody ?? '') + data;
+        if (responseRequestId !== request.id || responseLimitError) return;
+        responseBytes += Buffer.byteLength(data, 'utf8');
+        if (responseBytes > PROVIDER_MAX_BODY_BYTES) {
+          responseLimitError = new GatewayError(
+            ErrorCode.INTERNAL_ERROR,
+            `A9_RESPONSE_SIZE_LIMIT: provider response exceeded ${PROVIDER_MAX_BODY_BYTES} bytes; request aborted`,
+          );
+          responseBody = null;
+          conn.cancel(request.id);
+          return;
         }
+        responseBody = (responseBody ?? '') + data;
       });
 
       let sendError: Error | null = null;
@@ -317,6 +329,9 @@ export class GatewayProvider {
           await conn.send(request.id, payload, {
           authorization: `Bearer ${apiKey}`,
           });
+        } catch (error) {
+          if (responseLimitError) throw responseLimitError;
+          throw error;
         } finally {
           removeAbort();
         }
@@ -325,6 +340,10 @@ export class GatewayProvider {
         offError();
       }
 
+      if (responseLimitError) {
+        this._exitCode = ExitCode.FAILED;
+        throw responseLimitError;
+      }
       if (sendError) {
         this._exitCode = ExitCode.FAILED;
         throw sendError;
@@ -442,8 +461,9 @@ export class GatewayProvider {
         }
       };
 
+      let frameLimitError: GatewayError | null = null;
       const offData = conn.onData((responseRequestId: string, data: string) => {
-        if (responseRequestId !== request.id) return;
+        if (responseRequestId !== request.id || frameLimitError) return;
         streamBuffer += data;
         while (true) {
           const boundary = streamBuffer.search(/\r?\n\r?\n/);
@@ -461,6 +481,16 @@ export class GatewayProvider {
             }
           }
         }
+        // The remainder holds no frame boundary by construction.
+        if (streamBuffer.length * 3 > PROVIDER_MAX_PENDING_FRAME_BYTES
+          && Buffer.byteLength(streamBuffer, 'utf8') > PROVIDER_MAX_PENDING_FRAME_BYTES) {
+          frameLimitError = new GatewayError(
+            ErrorCode.INVALID_FRAME,
+            `SSE pending frame exceeds ${PROVIDER_MAX_PENDING_FRAME_BYTES} bytes without a frame boundary; stream rejected`,
+          );
+          streamBuffer = '';
+          conn.cancel(request.id);
+        }
       });
 
       let sendError: Error | null = null;
@@ -477,12 +507,19 @@ export class GatewayProvider {
         await conn.send(request.id, payload, {
           authorization: `Bearer ${apiKey}`,
         });
+      } catch (error) {
+        if (frameLimitError) throw frameLimitError;
+        throw error;
       } finally {
         removeAbort();
         offData();
         offError();
       }
 
+      if (frameLimitError) {
+        this._exitCode = ExitCode.FAILED;
+        throw frameLimitError;
+      }
       if (sendError) {
         this._exitCode = ExitCode.FAILED;
         throw sendError;
@@ -568,6 +605,15 @@ export class GatewayProvider {
     }
   }
 }
+
+/**
+ * A9-67 F-026/F-027: the provider assembles strings on top of the transport.
+ * Its own limits reuse the existing budgets (transport maxResponseSizeBytes
+ * for a complete body, SseParser MAX_PENDING_LINE_BYTES for one unfinished
+ * frame) and cancel the underlying request when exceeded.
+ */
+const PROVIDER_MAX_BODY_BYTES = 10 * 1024 * 1024;
+const PROVIDER_MAX_PENDING_FRAME_BYTES = MAX_PENDING_LINE_BYTES;
 
 function attachRequestAbort(
   signal: AbortSignal | undefined,

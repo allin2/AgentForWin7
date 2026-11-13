@@ -152,17 +152,20 @@ describe('F1: workspaces A and B stay isolated (mode, lock, checkpoints)', () =>
 
   it('mode chosen in A does not leak to B; checkpoints and locks are isolated', async () => {
     const fixture = await startFixtureModel();
+    const runtimes: any[] = [];
     try {
       const runtimeA1 = makeRuntime(wsA);
+      runtimes.push(runtimeA1);
       runtimeA1.setMode('full_access');
       await runtimeA1.configureProvider({ baseUrl: fixture.baseUrl, model: 'fixture', skipProbe: true });
       const turnA = await runtimeA1.submitTurn('write in A');
       expect(turnA.ok).toBe(true);
       expect(turnA.result.externalChanges === undefined || turnA.result.externalChanges.every((c: any) => c.path.startsWith('ws-a') || !c.path.includes('ws-b'))).toBe(true);
-      runtimeA1.shutdown();
+      await runtimeA1.shutdown();
 
       // B 首次打开：needs_selection，看不到 A 的 checkpoint。
       const runtimeB = makeRuntime(wsB);
+      runtimes.push(runtimeB);
       const snapB = runtimeB.getSnapshot();
       expect(snapB.mode).toBe('needs_selection');
       expect(snapB.checkpoints).toEqual([]);
@@ -170,6 +173,7 @@ describe('F1: workspaces A and B stay isolated (mode, lock, checkpoints)', () =>
 
       // A 重启恢复：模式与 checkpoint 保持。
       const runtimeA2 = makeRuntime(wsA);
+      runtimes.push(runtimeA2);
       const snapA = runtimeA2.getSnapshot();
       expect(snapA.mode).toBe('full_access');
       expect(snapA.checkpoints.length).toBeGreaterThanOrEqual(1);
@@ -180,9 +184,10 @@ describe('F1: workspaces A and B stay isolated (mode, lock, checkpoints)', () =>
       expect(runtimeB.getSnapshot().lock.held).toBe(true);
       expect(runtimeA2.getSnapshot().lock.held).toBe(true);
 
-      runtimeA2.shutdown();
-      runtimeB.shutdown();
+      await runtimeA2.shutdown();
+      await runtimeB.shutdown();
     } finally {
+      for (const runtime of runtimes) await runtime.shutdown();
       await fixture.close();
     }
   }, 30_000);

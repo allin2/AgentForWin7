@@ -12,6 +12,9 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import { buildContentDiffPreview } from './diff';
+import { copyTreeAsync, forEachTreeFileAsync, hashDirectoryTreeAsync, removeTreeAsync } from './async-tree';
+import { captureAnchor, captureNearestAnchor, DirectoryAnchor, IoGuard, assertAnchor, identityChanged } from './directory-identity';
+import { WorkspaceError } from './types';
 
 export const CHECKPOINT_SCHEMA_VERSION = 4;
 
@@ -172,23 +175,45 @@ export class CheckpointManager {
   private readonly manifestsRoot: string;
   private readonly containsSensitiveData: (value: string | Buffer) => boolean;
   private recoveryIgnoreChecked = false;
+  private readonly recoveryBaseAnchor: DirectoryAnchor | undefined;
+  private recoveryIdentityError: WorkspaceError | undefined;
+  /** Only directories on the path being used are checked, not the whole store. */
+  private readonly recoveryDirectoryAnchors = new Map<string, DirectoryAnchor>();
   private readonly recoveryDiagnostics: Array<{ code: string; detail: string }> = [];
+  /** A9-67 F-022: an existing root whose identity could not be resolved is never treated as verified. */
+  private readonly rootIdentityError: WorkspaceError | undefined;
 
   constructor(
     workspaceRoot: string,
     recoveryRoot?: string,
     containsSensitiveData: (value: string | Buffer) => boolean = () => false,
   ) {
+    let rootIdentityError: WorkspaceError | undefined;
     try {
       this.workspaceRoot = fs.realpathSync(workspaceRoot);
-    } catch (_error) {
+    } catch (error) {
       this.workspaceRoot = path.resolve(workspaceRoot);
+      const code = (error as NodeJS.ErrnoException)?.code;
+      // A root that does not exist yet (default workspace, lazily created) keeps the lexical path.
+      if (code !== 'ENOENT' && code !== 'ENOTDIR') {
+        rootIdentityError = new WorkspaceError('PATH_IDENTITY_UNKNOWN',
+          `无法确认工作区根目录的真实位置（${String(code ?? 'UNKNOWN')}）；拒绝按字面路径继续。`);
+      }
     }
+    this.rootIdentityError = rootIdentityError;
     this.recoveryRoot = recoveryRoot ? path.resolve(recoveryRoot) : path.join(this.workspaceRoot, '.agent_recovery');
     this.blobsRoot = path.join(this.recoveryRoot, 'blobs');
     this.snapshotsRoot = path.join(this.recoveryRoot, 'snapshots');
     this.manifestsRoot = path.join(this.recoveryRoot, 'checkpoints');
     this.containsSensitiveData = containsSensitiveData;
+    try {
+      this.recoveryBaseAnchor = captureNearestAnchor(this.recoveryRoot, 'Recovery store');
+      for (const dir of [this.recoveryRoot, this.blobsRoot, this.snapshotsRoot, this.manifestsRoot]) {
+        if (fs.existsSync(dir)) this.recoveryDirectoryAnchors.set(dir, captureAnchor(dir, 'Recovery directory'));
+      }
+    } catch (error) {
+      this.recoveryIdentityError = error instanceof WorkspaceError ? error : identityChanged('Recovery store');
+    }
   }
 
   private assertNotSensitive(value: string | Buffer, label: string): void {
@@ -208,6 +233,7 @@ export class CheckpointManager {
   /** Check an existing rule without changing it, or atomically add the default rule. */
   ensureRecoveryIgnore(): void {
     if (this.recoveryIgnoreChecked || !fs.existsSync(this.recoveryRoot)) return;
+    this.recoveryIoGuard(this.recoveryRoot).checkInside(this.recoveryRoot);
     this.recoveryIgnoreChecked = true;
     const target = path.join(this.recoveryRoot, '.gitignore');
     let existing: fs.Stats | undefined;
@@ -249,10 +275,71 @@ export class CheckpointManager {
     }
   }
 
+  /**
+   * Captures, in the current synchronous turn and before the first await of an
+   * operation, the identity of the workspace root, the recovery store and the
+   * nearest existing parent directory of every path the operation touches.
+   * The returned guard is consulted right before each later filesystem call.
+   */
+  createIoGuard(involvedPaths: string[] = []): IoGuard {
+    if (this.rootIdentityError) throw this.rootIdentityError;
+    // The operation records recovery facts, so the store must exist (and be
+    // bound) before any await; creating it is what recordPreMutation does anyway.
+    this.ensureRecoveryDir(this.recoveryRoot);
+    const anchors: DirectoryAnchor[] = [
+      captureAnchor(this.workspaceRoot, '工作区根'),
+      captureAnchor(this.recoveryRoot, '恢复区'),
+    ];
+    for (const involved of involvedPaths) {
+      anchors.push(captureNearestAnchor(path.dirname(path.resolve(involved)), '目标父目录'));
+    }
+    // Resolve namespace anchors at each I/O, including namespaces first created
+    // after this guard. IoGuard checks each anchor once; recursively validating
+    // four overlapping directory chains here would multiply every tree step.
+    return new IoGuard([...anchors, ...[this.blobsRoot, this.snapshotsRoot, this.manifestsRoot]
+      .map((dir) => () => this.recoveryDirectoryAnchors.get(dir))]);
+  }
+
+  private recoveryDirectoryChain(dir: string): string[] {
+    const chain: string[] = [];
+    let probe = path.resolve(dir);
+    if (!this.isWithin(this.recoveryRoot, probe)) throw identityChanged('Recovery directory', 'OUTSIDE_STORE');
+    for (;;) {
+      chain.unshift(probe);
+      if (probe === this.recoveryRoot) return chain;
+      probe = path.dirname(probe);
+    }
+  }
+
+  private recoveryIoGuard(dir: string): IoGuard {
+    if (this.rootIdentityError) throw this.rootIdentityError;
+    if (this.recoveryIdentityError) throw this.recoveryIdentityError;
+    if (!this.recoveryBaseAnchor) throw identityChanged('Recovery store', 'UNBOUND');
+    const anchors = this.recoveryDirectoryChain(dir)
+      .map((entry) => this.recoveryDirectoryAnchors.get(entry)).filter((entry): entry is DirectoryAnchor => Boolean(entry));
+    return new IoGuard([this.recoveryBaseAnchor, ...anchors]);
+  }
+
+  /** Pure validation, including absent directories: no lazy-root creation. */
+  validateRecoveryIdentity(): void {
+    for (const dir of [this.recoveryRoot, this.manifestsRoot, this.snapshotsRoot, this.blobsRoot]) {
+      const guard = this.recoveryIoGuard(dir);
+      guard.assertAnchors();
+      guard.checkInside(dir);
+    }
+  }
+
   private ensureRecoveryDir(dir: string): void {
-    fs.mkdirSync(this.recoveryRoot, { recursive: true });
+    // Validate before mkdir as well as before file writes. A later rejection
+    // must not leave directories or recovery bytes in a redirected store.
+    const guard = this.recoveryIoGuard(dir);
+    guard.ensureDirectory(dir);
+    for (const entry of this.recoveryDirectoryChain(dir)) {
+      const known = this.recoveryDirectoryAnchors.get(entry);
+      if (known) assertAnchor(known, 'Recovery directory');
+      else this.recoveryDirectoryAnchors.set(entry, captureAnchor(entry, 'Recovery directory'));
+    }
     this.ensureRecoveryIgnore();
-    fs.mkdirSync(dir, { recursive: true });
   }
 
   private assertSafeTurnId(turnId: string): void {
@@ -830,6 +917,7 @@ export class CheckpointManager {
 
   /** 加载（含崩溃后恢复）：优先内存，其次磁盘清单。 */
   loadCheckpoint(turnId: string): TurnCheckpoint | undefined {
+    this.validateRecoveryIdentity();
     const memory = this.checkpoints.get(turnId);
     if (memory) return memory;
     const parsed = this.readValidatedCheckpoint(turnId);
@@ -850,6 +938,7 @@ export class CheckpointManager {
 
   /** Cooperative variant of readValidatedCheckpoint: same checks and errors; returns the bytes it validated. */
   private async readValidatedCheckpointCooperatively(turnId: string): Promise<{ raw: string; checkpoint: TurnCheckpoint } | undefined> {
+    this.validateRecoveryIdentity();
     const manifestPath = this.manifestPath(turnId);
     if (!fs.existsSync(manifestPath)) return undefined;
     let raw: string | undefined;
@@ -874,6 +963,7 @@ export class CheckpointManager {
    * callers for one Turn share a single validation.
    */
   loadCheckpointAsync(turnId: string): Promise<TurnCheckpoint | undefined> {
+    try { this.validateRecoveryIdentity(); } catch (error) { return Promise.reject(error); }
     const memory = this.checkpoints.get(turnId);
     if (memory) return Promise.resolve(memory);
     try {
@@ -1132,6 +1222,82 @@ export class CheckpointManager {
     return { path: target, treeHash: sourceTreeHash };
   }
 
+  /**
+   * A9-66 F-012: cooperative counterpart of snapshotDirectory. Secret checks,
+   * copy and both tree hashes yield to the event loop and observe the signal.
+   * The copy is staged under a unique name and only renamed onto the role path
+   * after the integrity check, so a cancelled or failed attempt can never be
+   * mistaken for a reusable original snapshot.
+   */
+  private async snapshotDirectoryAsync(
+    absDir: string,
+    turnId: string,
+    relPath: string,
+    role: 'original' | 'current',
+    options: { signal?: AbortSignal; guard: IoGuard },
+  ): Promise<{ path: string; treeHash: string }> {
+    const { guard } = options;
+    this.assertSafeTurnId(turnId);
+    this.assertNotSensitive(relPath, 'checkpoint directory path');
+    await forEachTreeFileAsync(absDir, relPath, (relative, content) => {
+      if (content === undefined) this.assertNotSensitive(relative, 'checkpoint directory entry path');
+      else this.assertNotSensitive(content, 'checkpoint directory file content');
+    }, options);
+    const target = this.snapshotPath(turnId, relPath, role);
+    guard.check(target);
+    this.ensureRecoveryDir(path.dirname(target));
+    guard.check(target);
+    if (role === 'original' && fs.existsSync(target)) {
+      return { path: target, treeHash: await hashDirectoryTreeAsync(target, options) };
+    }
+    const staging = `${target}.partial-${process.pid}-${crypto.randomBytes(6).toString('hex')}`;
+    try {
+      await copyTreeAsync(absDir, staging, { force: false, ...options });
+      const sourceTreeHash = await hashDirectoryTreeAsync(absDir, options);
+      if (await hashDirectoryTreeAsync(staging, options) !== sourceTreeHash) {
+        throw new Error(`目录快照完整性校验失败: ${relPath}`);
+      }
+      guard.check(target);
+      if (fs.existsSync(target)) {
+        // Only a previous 'current' snapshot may be replaced. An 'original'
+        // appearing during this await came from a concurrent writer.
+        if (role === 'original') throw new Error(`目录快照在建立期间被并发写入: ${relPath}`);
+        await removeTreeAsync(target, { guard });
+      }
+      // Source validation happened before copy/hash awaited. Validate the
+      // actual staging bytes against the current secret set, and repeat if
+      // Provider revalidation revoked trust while this scan yielded. The
+      // successful scan and promotion have no intervening event-loop turn.
+      let secretsValidated = false;
+      for (let attempt = 0; attempt < COOPERATIVE_LOAD_ATTEMPTS; attempt += 1) {
+        const generation = this.cacheGeneration;
+        this.assertNotSensitive(relPath, 'checkpoint directory path');
+        await forEachTreeFileAsync(staging, relPath, (relative, content) => {
+          this.assertNotSensitive(relative, 'checkpoint directory entry path');
+          if (content !== undefined) this.assertNotSensitive(content, 'checkpoint directory file content');
+        }, options);
+        if (generation === this.cacheGeneration) { secretsValidated = true; break; }
+      }
+      if (!secretsValidated) throw new Error('A9_CHECKPOINT_SECRET_VALIDATION_STALE: secret validation changed during snapshot');
+      // Promotion: identity is re-verified in the same turn as the rename.
+      guard.assertAnchors();
+      guard.check(staging);
+      guard.check(target);
+      fs.renameSync(staging, target);
+      return { path: target, treeHash: sourceTreeHash };
+    } catch (error) {
+      try {
+        await removeTreeAsync(staging, { guard });
+      } catch (_cleanupError) {
+        this.recoveryDiagnostics.push({
+          code: 'A9_SNAPSHOT_STAGING_CLEANUP_FAILED',
+          detail: 'A partial directory snapshot could not be removed; it is never used as a recovery artifact.',
+        });
+      }
+      throw error;
+    }
+  }
+
   private isExternalTarget(targetPath: string): boolean {
     const resolved = path.resolve(this.workspaceRoot, targetPath);
     return resolved === path.resolve(this.workspaceRoot) || !this.isWithin(this.workspaceRoot, resolved);
@@ -1238,9 +1404,100 @@ export class CheckpointManager {
   }
 
   /**
+   * A9-66 F-012: asynchronous recordPreMutation for directory targets. Files,
+   * external targets and records that need no new snapshot keep the
+   * synchronous O(1) path. The manifest decision is re-validated after the
+   * snapshot await; any concurrent change fails closed before side effects.
+   */
+  async recordPreMutationAsync(
+    turnId: string,
+    targetPath: string,
+    options: { signal?: AbortSignal; guard?: IoGuard } = {},
+  ): Promise<FileChangeRecord> {
+    this.assertNotSensitive(targetPath, 'checkpoint mutation path');
+    const absPath = path.resolve(this.workspaceRoot, targetPath);
+    const guard = options.guard ?? this.createIoGuard([absPath]);
+    // Same turn as every synchronous read/write below: no await in between.
+    guard.check(absPath);
+    if (this.isExternalTarget(targetPath)) return this.recordPreMutation(turnId, targetPath);
+    const isDirectory = () => fs.existsSync(absPath) && fs.statSync(absPath).isDirectory();
+    if (!isDirectory()) return this.recordPreMutation(turnId, targetPath);
+    const needsSnapshot = (record: FileChangeRecord | undefined): 'original' | 'current' | undefined => {
+      if (!record) return 'original';
+      return record.action !== 'create' && !record.originalSnapshotPath && !record.currentStateSnapshotPath
+        ? 'current' : undefined;
+    };
+    const role = needsSnapshot(this.startTurn(turnId).changes[targetPath]);
+    if (!role) return this.recordPreMutation(turnId, targetPath);
+    const snapshot = await this.snapshotDirectoryAsync(absPath, turnId, targetPath, role, { signal: options.signal, guard });
+    // Promotion of the snapshot into the manifest: identity first, same turn.
+    guard.assertAnchors();
+    guard.check(absPath);
+    const checkpoint = this.startTurn(turnId);
+    const existing = checkpoint.changes[targetPath];
+    if (!isDirectory() || needsSnapshot(existing) !== role) {
+      throw new WorkspaceError('CHECKPOINT_PERSIST_FAILED', `目录 ${targetPath} 的恢复快照建立期间状态变化，拒绝执行副作用。`);
+    }
+    if (existing) {
+      existing.currentStateSnapshotPath = snapshot.path;
+      existing.currentStateTreeHash = snapshot.treeHash;
+      existing.isDirectory = true;
+      this.persist(checkpoint);
+      return existing;
+    }
+    const record: FileChangeRecord = {
+      filePath: targetPath,
+      action: 'modify',
+      isDirectory: true,
+      originalKind: 'directory',
+      newKind: 'directory',
+      originalSnapshotPath: snapshot.path,
+      originalSnapshotRole: 'original',
+      originalTreeHash: snapshot.treeHash,
+      timestamp: new Date().toISOString(),
+    };
+    checkpoint.changes[targetPath] = record;
+    this.persist(checkpoint);
+    return record;
+  }
+
+  /**
+   * A9-66 F-011: records post-state facts. The directory tree hash is computed
+   * cooperatively; it intentionally takes no signal because facts of side
+   * effects that already happened must be recorded even after cancellation.
+   */
+  async recordPostMutationAsync(
+    turnId: string,
+    targetPath: string,
+    action: 'create' | 'modify' | 'delete',
+    options: { guard?: IoGuard } = {},
+  ): Promise<void> {
+    const absPath = path.resolve(this.workspaceRoot, targetPath);
+    const guard = options.guard ?? this.createIoGuard([absPath]);
+    // Never observe or record facts through a redirected root/parent.
+    guard.check(absPath);
+    if (action !== 'delete' && !this.isExternalTarget(targetPath)) {
+      if (fs.existsSync(absPath) && fs.statSync(absPath).isDirectory()) {
+        const directoryTreeHash = await hashDirectoryTreeAsync(absPath, { guard });
+        guard.assertAnchors();
+        guard.check(absPath);
+        this.recordPostMutation(turnId, targetPath, action, { directoryTreeHash });
+        return;
+      }
+    }
+    guard.assertAnchors();
+    this.recordPostMutation(turnId, targetPath, action);
+  }
+
+  /**
    * 记录已完成的文件变更后状态
    */
-  recordPostMutation(turnId: string, targetPath: string, action: 'create' | 'modify' | 'delete'): void {
+  recordPostMutation(
+    turnId: string,
+    targetPath: string,
+    action: 'create' | 'modify' | 'delete',
+    precomputed: { directoryTreeHash?: string } = {},
+  ): void {
     this.assertNotSensitive(targetPath, 'checkpoint mutation path');
     const checkpoint = this.startTurn(turnId);
     if (this.isExternalTarget(targetPath)) {
@@ -1282,7 +1539,7 @@ export class CheckpointManager {
     } else if (fs.existsSync(absPath) && fs.statSync(absPath).isDirectory()) {
       existing.newHash = undefined;
       existing.newBlobPath = undefined;
-      existing.newTreeHash = this.hashDirectoryTree(absPath);
+      existing.newTreeHash = precomputed.directoryTreeHash ?? this.hashDirectoryTree(absPath);
       existing.isDirectory = true;
       existing.newKind = 'directory';
     } else {

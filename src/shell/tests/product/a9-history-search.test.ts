@@ -5,7 +5,7 @@ import * as path from 'path';
 import * as vm from 'vm';
 import Database from 'better-sqlite3';
 
-const { createA9AgentRuntime } = require('../../product/a9-agent-runtime');
+const { createA9AgentRuntime, buildPersistedTextContext } = require('../../product/a9-agent-runtime');
 const { createA9WorkspaceRegistry } = require('../../product/a9-workspace-registry');
 const { createA9ProductRequestHandler } = require('../../product/a9-product-ipc');
 const PREFIX = 'win7-a958-runtime-';
@@ -235,6 +235,17 @@ it.each(['running', 'approval', 'question'])('SURROGATE in-process model: curren
       finish({ id: kind, content: '', finishReason: 'tool_calls', toolCalls: [{ id: `${kind}-call`, name: kind === 'approval' ? 'delete' : 'ask_user',
         arguments: JSON.stringify(kind === 'approval' ? { path: 'note.txt', permanent: true } : { prompt: 'Choose?', options: ['one', 'two'] }) }] });
       await pending;
+      // The completed/waiting Turn refreshes context statistics asynchronously.
+      // Establish readiness before measuring the search's zero-change contract.
+      const session = f.scope().conversationId;
+      const metadata = f.persistence.getConversationMetadata(session);
+      const expected = buildPersistedTextContext(f.persistence.listConversationFacts(session),
+        metadata.providerContextGeneration ?? 0).stats;
+      await until(() => {
+        const actual = f.runtime.getSnapshot({ conversationPage: true }).contextWindow;
+        return ['includedRounds', 'includedChars', 'omittedRounds', 'visibleRounds']
+          .every(key => actual[key] === expected[key]);
+      });
     }
     const before = state(f), count = requests.length;
     expect((await search(f, `execution ${kind}`)).results).toHaveLength(1);

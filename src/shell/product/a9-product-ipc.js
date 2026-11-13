@@ -386,7 +386,8 @@ function createA9ProductRequestHandler(options) {
           } else if (payload.answer !== undefined) {
             throw Object.assign(new Error('A9_PAYLOAD_INVALID: cancelled replies must not contain an answer'), { code: 'A9_PAYLOAD_INVALID' });
           }
-          if (payload.conversationId !== runtime.getSnapshot().activeConversationId) {
+          // A9-66 F-007: identity check only; never project the full history here.
+          if (payload.conversationId !== runtime.getSnapshot({ conversationPage: true }).activeConversationId) {
             throw Object.assign(new Error('A9_PAYLOAD_INVALID: conversation mismatch'), { code: 'A9_PAYLOAD_INVALID' });
           }
           return await runtime.answerQuestion(payload);

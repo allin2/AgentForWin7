@@ -660,6 +660,14 @@ export class MockConnection implements IConnection {
       const controller = new AbortController();
       this._abortControllers.set(requestId, controller);
       let streamed = false;
+      // A9-67 F-009: the per-request timeout is an idle timer that data
+      // refreshes. The totalTimeout contract is wall-clock: a timer that data
+      // never refreshes aborts the attempt at the overall deadline.
+      let totalDeadlineReached = false;
+      const totalTimer = setTimeout(() => {
+        totalDeadlineReached = true;
+        controller.abort();
+      }, Math.max(1, this._config.totalTimeoutMs - (Date.now() - startedAt)));
 
       try {
         const response = await this._network.request(this._config.url, {
@@ -694,9 +702,18 @@ export class MockConnection implements IConnection {
         return;
       } catch (e) {
         this._tracker.markFailed(requestId);
-        const gwError = e instanceof GatewayError
-          ? e
-          : new GatewayError(ErrorCode.GATEWAY_UNREACHABLE, String(e));
+        const gwError = totalDeadlineReached
+          ? new GatewayError(
+            ErrorCode.CONNECTION_TIMEOUT,
+            `Gateway total timeout of ${this._config.totalTimeoutMs}ms exhausted; request aborted`,
+          )
+          : e instanceof GatewayError
+            ? e
+            : new GatewayError(ErrorCode.GATEWAY_UNREACHABLE, String(e));
+        if (totalDeadlineReached) {
+          this._notifyError(requestId, gwError);
+          throw gwError;
+        }
 
         const elapsed = Date.now() - startedAt;
         if (
@@ -748,6 +765,7 @@ export class MockConnection implements IConnection {
         }
         this._fsm.transition(ConnectionState.CONNECTED, 'retry transport ready');
       } finally {
+        clearTimeout(totalTimer);
         this._abortControllers.delete(requestId);
       }
     }

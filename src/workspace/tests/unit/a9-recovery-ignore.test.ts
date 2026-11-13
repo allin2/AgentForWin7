@@ -115,7 +115,8 @@ describe('A9-26 recovery ignore', () => {
     const source = fs.readFileSync(path.join(__dirname, '../../src/checkpoint-manager.ts'), 'utf8');
     const uses = source.match(/fs\.mkdirSync\([^\n]+/g) || [];
     expect(uses.filter((line) => /recoveryRoot|blobsRoot|snapshotsRoot|manifestsRoot|swapRoot|path\.dirname\((target|backup|stage|blobPath)\)/.test(line)))
-      .toEqual(['fs.mkdirSync(this.recoveryRoot, { recursive: true });']);
+      .toEqual([]);
+    expect(source).toContain('guard.ensureDirectory(dir);');
     expect(source).toContain('this.ensureRecoveryIgnore();');
   });
 });

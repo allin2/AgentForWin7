@@ -21,7 +21,7 @@ export type IPCErrorCallback = (event: IPCChannelErrorEvent) => void;
 export interface SendResult {
   success: boolean;
   error?: string;
-  code?: 'HANDLER_NOT_FOUND' | 'HANDLER_FAILED' | 'ASYNC_HANDLER_REQUIRES_ASYNC_API';
+  code?: 'HANDLER_NOT_FOUND' | 'HANDLER_FAILED' | 'ASYNC_HANDLER_REQUIRES_ASYNC_API' | 'ASYNC_HANDLER_STARTED_WITHOUT_RESULT';
   recommendedAction?: string;
 }
 
@@ -64,22 +64,30 @@ export class IPCChannel {
     if (!handler) {
       return this.missingHandler(message);
     }
+    // A9-67 F-023: a native async handler is rejected BEFORE it runs, so no
+    // side effect starts and the caller may safely switch to sendAsync.
+    if (isNativeAsyncFunction(handler)) {
+      this.recordError('sync_async_mismatch', message, '同步 send 拒绝了异步 handler（未执行）');
+      return {
+        success: false,
+        code: 'ASYNC_HANDLER_REQUIRES_ASYNC_API',
+        error: '该消息处理器是异步的，不能通过同步 send 调用；处理器未执行',
+        recommendedAction: '改用 sendAsync，并等待返回结果后再更新界面状态。',
+      };
+    }
 
     try {
       const handlerResult = handler(message);
       if (isPromiseLike(handlerResult)) {
+        // An ordinary function returning a Promise cannot be recognised before
+        // the call. Its work has started; report that instead of a retryable failure.
         void handlerResult.catch((error) => this.recordError('handler', message, error));
         this.recordError(
           'sync_async_mismatch',
           message,
-          '同步 send/receive 调用了异步 handler',
+          '同步 send 调用的 handler 返回了 Promise，操作已开始',
         );
-        return {
-          success: false,
-          code: 'ASYNC_HANDLER_REQUIRES_ASYNC_API',
-          error: '该消息处理器是异步的，不能通过同步 send 调用',
-          recommendedAction: '改用 sendAsync，并等待返回结果后再更新界面状态。',
-        };
+        return startedWithoutResult('sendAsync');
       }
       return { success: true };
     } catch (err) {
@@ -180,18 +188,22 @@ export class IPCChannel {
     if (!handler) {
       return this.missingHandler(message);
     }
+    if (isNativeAsyncFunction(handler)) {
+      this.recordError('sync_async_mismatch', message, '同步 receive 拒绝了异步 handler（未执行）');
+      return {
+        success: false,
+        code: 'ASYNC_HANDLER_REQUIRES_ASYNC_API',
+        error: '该消息处理器是异步的，不能通过同步 receive 调用；处理器未执行',
+        recommendedAction: '改用 receiveAsync，并等待返回结果。',
+      };
+    }
 
     try {
       const handlerResult = handler(message);
       if (isPromiseLike(handlerResult)) {
         void handlerResult.catch((error) => this.recordError('handler', message, error));
-        this.recordError('sync_async_mismatch', message, '同步 receive 调用了异步 handler');
-        return {
-          success: false,
-          code: 'ASYNC_HANDLER_REQUIRES_ASYNC_API',
-          error: '该消息处理器是异步的，不能通过同步 receive 调用',
-          recommendedAction: '改用 receiveAsync，并等待返回结果。',
-        };
+        this.recordError('sync_async_mismatch', message, '同步 receive 调用的 handler 返回了 Promise，操作已开始');
+        return startedWithoutResult('receiveAsync');
       }
       return { success: true };
     } catch (err) {
@@ -274,6 +286,24 @@ export class IPCChannel {
       recommendedAction: '操作未确认完成，请保持当前页面并查看诊断详情后重试。',
     };
   }
+}
+
+/**
+ * Detects functions declared with `async`. Ordinary functions that return a
+ * Promise (including bound or transpiled async functions) are NOT detectable
+ * before invocation; those are handled by startedWithoutResult().
+ */
+function isNativeAsyncFunction(handler: IPCHandler): boolean {
+  return Object.prototype.toString.call(handler) === '[object AsyncFunction]';
+}
+
+function startedWithoutResult(asyncApi: 'sendAsync' | 'receiveAsync'): SendResult {
+  return {
+    success: false,
+    code: 'ASYNC_HANDLER_STARTED_WITHOUT_RESULT',
+    error: '处理器返回了 Promise：操作已经开始，同步调用无法得到结果',
+    recommendedAction: `不要重试同一请求；刷新状态确认结果，之后改用 ${asyncApi}。`,
+  };
 }
 
 function isPromiseLike(value: void | Promise<void>): value is Promise<void> {
