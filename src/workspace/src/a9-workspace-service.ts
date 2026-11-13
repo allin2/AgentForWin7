@@ -42,6 +42,8 @@ export interface A9ListResult {
   totalEntries: number;
   truncated: boolean;
   outsideWorkspace: boolean;
+  skipped: Array<{ path: string; reason: 'directory_unreadable' }>;
+  skippedTotal: number;
   entries: Array<{
     name: string;
     path: string;
@@ -72,6 +74,9 @@ export interface A9SearchResult {
   outsideWorkspace: boolean;
   filesScanned: number;
   skippedFiles: number;
+  skipped: Array<{ path: string; reason: SearchSkippedReason }>;
+  skippedTotal: number;
+  truncationReasons: Array<'matches' | 'files'>;
   matches: Array<{
     filePath: string;
     lineNumber: number;
@@ -80,6 +85,13 @@ export interface A9SearchResult {
     contextAfter?: string[];
   }>;
 }
+
+export type SearchSkippedReason =
+  | 'directory_unreadable'
+  | 'stat_failed'
+  | 'too_large'
+  | 'binary_or_ambiguous'
+  | 'read_failed';
 
 export interface A9WriteResult {
   path: string;
@@ -135,6 +147,56 @@ const BASELINE_YIELD_SLICE_MS = 25;
 function yieldToEventLoop(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
 }
+
+interface YieldController {
+  checkpoint(force?: boolean, afterYield?: () => void): Promise<void>;
+}
+
+function createYieldController(): YieldController {
+  let lastYieldAt = Date.now();
+  return {
+    async checkpoint(force = false, afterYield?: () => void): Promise<void> {
+      if (force || Date.now() - lastYieldAt >= BASELINE_YIELD_SLICE_MS) {
+        await yieldToEventLoop();
+        // A setImmediate-only loop can run successive promise continuations
+        // before the timers phase. Give cancellation timers a real timers
+        // phase as well, while retaining the existing 25 ms slice contract.
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        afterYield?.();
+        lastYieldAt = Date.now();
+      }
+    },
+  };
+}
+
+interface DirectoryScanIdentity {
+  absPath: string;
+  realPath: string;
+  dev: number;
+  ino: number;
+  birthtimeMs: number;
+}
+
+function bindDirectoryScan(absPath: string): DirectoryScanIdentity {
+  const realPath = fs.realpathSync(absPath);
+  const stat = fs.statSync(absPath);
+  // Callers already resolved canonical targets. A new redirect must not reuse
+  // the old outsideWorkspace flag, even if it points to another readable tree.
+  if (path.relative(absPath, realPath) !== '') {
+    throw new WorkspaceError('DIRECTORY_READ_FAILED', '目录身份在扫描期间变化，请重新扫描。');
+  }
+  return { absPath, realPath, dev: stat.dev, ino: stat.ino, birthtimeMs: stat.birthtimeMs };
+}
+
+function verifyDirectoryScan(identity: DirectoryScanIdentity): void {
+  try {
+    const current = bindDirectoryScan(identity.absPath);
+    if (current.realPath === identity.realPath && current.dev === identity.dev &&
+        current.ino === identity.ino && current.birthtimeMs === identity.birthtimeMs) return;
+  } catch (_error) { /* Missing or unresolvable targets cannot retain their old identity. */ }
+  throw new WorkspaceError('DIRECTORY_READ_FAILED', '目录身份已变化或无法确认，拒绝返回扫描结果。');
+}
+
 const MAX_BASELINE_FILE_BYTES = 2 * 1024 * 1024;
 const MAX_BASELINE_TOTAL_BYTES = 40 * 1024 * 1024;
 
@@ -287,41 +349,84 @@ export class A9WorkspaceService {
   // list
   // -------------------------------------------------------------------------
 
-  async list(targetPath: string = '', options: { recursive?: boolean; maxEntries?: number } = {}): Promise<A9ListResult> {
+  async list(
+    targetPath: string = '',
+    options: { recursive?: boolean; maxEntries?: number; signal?: AbortSignal } = {},
+  ): Promise<A9ListResult> {
     const { absPath, relPath, isOutside } = this.resolvePath(targetPath);
     const maxEntries = options.maxEntries || 500;
     const recursive = options.recursive || false;
-
-    if (!fs.existsSync(absPath)) {
-      throw new Error(`目录不存在: ${targetPath}`);
+    const signal = options.signal;
+    const checkCanceled = () => {
+      if (signal?.aborted) throw new Error('目录读取已取消');
+    };
+    const controller = createYieldController();
+    checkCanceled();
+    let stat: fs.Stats;
+    let rootIdentity: DirectoryScanIdentity;
+    try {
+      rootIdentity = bindDirectoryScan(absPath);
+      stat = await fs.promises.stat(absPath);
+    } catch (error: any) {
+      if (error?.code === 'ENOENT') throw new Error(`目录不存在: ${targetPath}`);
+      throw new WorkspaceError('DIRECTORY_READ_FAILED', `无法读取目录 ${relPath || '.'}: ${error?.message || 'unknown error'}`);
     }
-
-    const stat = fs.statSync(absPath);
-    if (!stat.isDirectory()) {
-      throw new Error(`路径不是目录: ${targetPath}`);
-    }
+    if (!stat.isDirectory()) throw new Error(`路径不是目录: ${targetPath}`);
+    verifyDirectoryScan(rootIdentity);
 
     const entries: A9ListResult['entries'] = [];
+    const skipped: A9ListResult['skipped'] = [];
+    let skippedTotal = 0;
+    const recordSkipped = (directoryPath: string): void => {
+      skippedTotal += 1;
+      if (skipped.length < 50) skipped.push({ path: directoryPath || '.', reason: 'directory_unreadable' });
+    };
     let truncated = false;
     // canonical path 集合防止 junction/symlink 递归环。
-    const visitedDirs = new Set<string>([fs.realpathSync(absPath)]);
+    let rootRealPath: string;
+    try {
+      rootRealPath = await fs.promises.realpath(absPath);
+    } catch (error: any) {
+      checkCanceled();
+      throw new WorkspaceError('DIRECTORY_READ_FAILED', `无法读取目录 ${relPath || '.'}: ${error?.message || 'unknown error'}`);
+    }
+    verifyDirectoryScan(rootIdentity);
+    const visitedDirs = new Set<string>([rootRealPath]);
 
-    const scan = (currentDir: string, currentRel: string, depth: number) => {
+    const scan = async (currentDir: string, currentRel: string, depth: number, isRoot: boolean,
+      identity: DirectoryScanIdentity): Promise<void> => {
+      checkCanceled();
       if (entries.length >= maxEntries) {
         truncated = true;
         return;
       }
+      const verifyCurrentDirectory = () => {
+        checkCanceled();
+        verifyDirectoryScan(rootIdentity);
+        if (identity !== rootIdentity) verifyDirectoryScan(identity);
+      };
+      verifyCurrentDirectory();
 
       let dirents: fs.Dirent[];
       try {
-        dirents = fs.readdirSync(currentDir, { withFileTypes: true });
-      } catch (_e) {
+        dirents = await fs.promises.readdir(currentDir, { withFileTypes: true });
+        checkCanceled();
+        dirents.sort((a, b) => a.name.localeCompare(b.name));
+        checkCanceled();
+      } catch (error: any) {
+        if (signal?.aborted) throw new Error('目录读取已取消');
+        verifyCurrentDirectory();
+        if (isRoot) {
+          throw new WorkspaceError('DIRECTORY_READ_FAILED', `无法读取目录 ${relPath || '.'}: ${error?.message || 'unknown error'}`);
+        }
+        recordSkipped(currentRel);
         return;
       }
-
-      dirents.sort((a, b) => a.name.localeCompare(b.name));
+      verifyCurrentDirectory();
 
       for (const dirent of dirents) {
+        await controller.checkpoint(false, verifyCurrentDirectory);
+        checkCanceled();
         if (entries.length >= maxEntries) {
           truncated = true;
           break;
@@ -350,26 +455,38 @@ export class A9WorkspaceService {
 
         if (recursive && dirent.isDirectory() && depth < 10) {
           let realChild: string;
+          let childIdentity: DirectoryScanIdentity;
           try {
-            realChild = fs.realpathSync(itemAbs);
-          } catch (_e) {
+            childIdentity = bindDirectoryScan(itemAbs);
+            realChild = await fs.promises.realpath(itemAbs);
+          } catch (error) {
+            checkCanceled();
+            if (error instanceof WorkspaceError && error.code === 'DIRECTORY_READ_FAILED') throw error;
+            verifyCurrentDirectory();
+            recordSkipped(itemRel);
             continue;
           }
+          verifyCurrentDirectory();
+          verifyDirectoryScan(childIdentity);
           if (!visitedDirs.has(realChild)) {
             visitedDirs.add(realChild);
-            scan(itemAbs, itemRel, depth + 1);
+            await scan(itemAbs, itemRel, depth + 1, false, childIdentity);
           }
         }
       }
+      verifyCurrentDirectory();
     };
 
-    scan(absPath, relPath === '.' ? '' : relPath, 0);
+    await scan(absPath, relPath === '.' ? '' : relPath, 0, true, rootIdentity);
+    verifyDirectoryScan(rootIdentity);
 
     return {
       path: relPath || '.',
       totalEntries: entries.length,
       truncated,
       outsideWorkspace: isOutside,
+      skipped,
+      skippedTotal,
       entries,
     };
   }
@@ -567,10 +684,24 @@ export class A9WorkspaceService {
     const { absPath, isOutside } = this.resolvePath(options.path || '');
     const maxMatches = options.maxMatches || 200;
     const isRegex = options.isRegex || false;
+    const controller = createYieldController();
+    const checkCanceled = () => {
+      if (options.signal?.aborted) throw new Error('搜索已被用户取消');
+    };
+    checkCanceled();
 
-    if (!fs.existsSync(absPath)) {
-      throw new Error(`搜索路径不存在: ${options.path || ''}`);
+    let rootIdentity: DirectoryScanIdentity;
+    try {
+      rootIdentity = bindDirectoryScan(absPath);
+      const rootStat = await fs.promises.stat(absPath);
+      if (!rootStat.isDirectory()) throw new Error(`搜索路径不是目录: ${options.path || ''}`);
+    } catch (error: any) {
+      checkCanceled();
+      if (error?.message?.startsWith('搜索路径不是目录:')) throw error;
+      if (error?.code === 'ENOENT') throw new Error(`搜索路径不存在: ${options.path || ''}`);
+      throw new WorkspaceError('DIRECTORY_READ_FAILED', `无法读取搜索目录: ${error?.message || 'unknown error'}`);
     }
+    verifyDirectoryScan(rootIdentity);
 
     let regex: RegExp;
     try {
@@ -581,35 +712,62 @@ export class A9WorkspaceService {
 
     const matches: A9SearchResult['matches'] = [];
     let truncated = false;
+    const truncationReasons = new Set<'matches' | 'files'>();
     let filesScanned = 0;
     let skippedFiles = 0;
+    const skipped: A9SearchResult['skipped'] = [];
+    let skippedTotal = 0;
+    const recordSkipped = (filePath: string, reason: SearchSkippedReason, countAsFile = true): void => {
+      skippedTotal += 1;
+      if (countAsFile) skippedFiles += 1;
+      if (skipped.length < 50) skipped.push({ path: filePath || '.', reason });
+    };
     // 迭代遍历 + canonical path 集合：可取消、无递归环、不整体加载。
-    const queue: Array<{ dir: string; rel: string }> = [{ dir: absPath, rel: '' }];
-    const visitedDirs = new Set<string>([fs.realpathSync(absPath)]);
+    const queue: Array<{ dir: string; rel: string; identity: DirectoryScanIdentity }> = [
+      { dir: absPath, rel: '', identity: rootIdentity },
+    ];
+    const visitedDirs = new Set<string>([rootIdentity.realPath]);
+    let queueIndex = 0;
 
-    while (queue.length > 0) {
-      if (options.signal?.aborted) {
-        throw new Error('搜索已被用户取消');
-      }
+    while (queueIndex < queue.length) {
+      checkCanceled();
       if (matches.length >= maxMatches || filesScanned >= MAX_SEARCH_FILES) {
         truncated = true;
+        if (matches.length >= maxMatches) truncationReasons.add('matches');
+        if (filesScanned >= MAX_SEARCH_FILES) truncationReasons.add('files');
         break;
       }
 
-      const { dir, rel } = queue.shift()!;
+      const { dir, rel, identity } = queue[queueIndex++];
+      const verifyCurrentDirectory = () => {
+        checkCanceled();
+        verifyDirectoryScan(rootIdentity);
+        if (identity !== rootIdentity) verifyDirectoryScan(identity);
+      };
+      verifyCurrentDirectory();
       let dirents: fs.Dirent[];
       try {
-        dirents = fs.readdirSync(dir, { withFileTypes: true });
-      } catch (_e) {
+        dirents = await fs.promises.readdir(dir, { withFileTypes: true });
+        checkCanceled();
+      } catch (error: any) {
+        checkCanceled();
+        verifyCurrentDirectory();
+        if (!rel) {
+          throw new WorkspaceError('DIRECTORY_READ_FAILED', `无法读取搜索目录: ${error?.message || 'unknown error'}`);
+        }
+        const unreadablePath = path.relative(this.workspaceRoot, dir).replace(/\\/g, '/') || '.';
+        recordSkipped(unreadablePath, 'directory_unreadable', false);
         continue;
       }
+      verifyCurrentDirectory();
 
       for (const dirent of dirents) {
-        if (options.signal?.aborted) {
-          throw new Error('搜索已被用户取消');
-        }
+        await controller.checkpoint(false, verifyCurrentDirectory);
+        checkCanceled();
         if (matches.length >= maxMatches || filesScanned >= MAX_SEARCH_FILES) {
           truncated = true;
+          if (matches.length >= maxMatches) truncationReasons.add('matches');
+          if (filesScanned >= MAX_SEARCH_FILES) truncationReasons.add('files');
           break;
         }
 
@@ -619,14 +777,19 @@ export class A9WorkspaceService {
 
         if (dirent.isDirectory()) {
           let realChild: string;
+          let childIdentity: DirectoryScanIdentity;
           try {
-            realChild = fs.realpathSync(fullPath);
-          } catch (_e) {
+            childIdentity = bindDirectoryScan(fullPath);
+            realChild = childIdentity.realPath;
+          } catch (error) {
+            checkCanceled();
+            if (error instanceof WorkspaceError && error.code === 'DIRECTORY_READ_FAILED') throw error;
+            recordSkipped(relPath, 'directory_unreadable', false);
             continue;
           }
           if (!visitedDirs.has(realChild)) {
             visitedDirs.add(realChild);
-            queue.push({ dir: fullPath, rel: rel ? `${rel}/${dirent.name}` : dirent.name });
+            queue.push({ dir: fullPath, rel: rel ? `${rel}/${dirent.name}` : dirent.name, identity: childIdentity });
           }
           continue;
         }
@@ -635,24 +798,38 @@ export class A9WorkspaceService {
         filesScanned += 1;
         let stat: fs.Stats;
         try {
-          stat = fs.statSync(fullPath);
+          stat = fs.lstatSync(fullPath);
         } catch (_e) {
-          skippedFiles += 1;
+          recordSkipped(relPath, 'stat_failed');
+          continue;
+        }
+        if (!stat.isFile()) {
+          recordSkipped(relPath, 'stat_failed');
           continue;
         }
         if (stat.size > MAX_SEARCH_FILE_BYTES) {
-          skippedFiles += 1;
+          recordSkipped(relPath, 'too_large');
           continue;
         }
         try {
           const buf = fs.readFileSync(fullPath);
           const detection = detectEncoding(buf);
-          if (detection.encoding === 'ambiguous') continue;
+          if (detection.encoding === 'ambiguous') {
+            recordSkipped(relPath, 'binary_or_ambiguous', false);
+            continue;
+          }
           const text = decodeBuffer(buf, detection.encoding as WritableEncoding);
-          if (text === undefined) continue;
+          if (text === undefined) {
+            recordSkipped(relPath, 'binary_or_ambiguous', false);
+            continue;
+          }
 
           const lines = text.split(/\r?\n/);
           for (let i = 0; i < lines.length; i++) {
+            if ((i & 0xff) === 0) {
+              await controller.checkpoint(false, verifyCurrentDirectory);
+              checkCanceled();
+            }
             if (regex.test(lines[i])) {
               matches.push({
                 filePath: relPath,
@@ -663,15 +840,21 @@ export class A9WorkspaceService {
               });
               if (matches.length >= maxMatches) {
                 truncated = true;
+                truncationReasons.add('matches');
                 break;
               }
             }
           }
-        } catch (_e) {
-          skippedFiles += 1;
+        } catch (error) {
+          checkCanceled();
+          if (error instanceof WorkspaceError && error.code === 'DIRECTORY_READ_FAILED') throw error;
+          recordSkipped(relPath, 'read_failed');
         }
+        if (truncated) break;
       }
+      verifyCurrentDirectory();
     }
+    verifyDirectoryScan(rootIdentity);
 
     return {
       pattern,
@@ -680,6 +863,9 @@ export class A9WorkspaceService {
       outsideWorkspace: isOutside,
       filesScanned,
       skippedFiles,
+      skipped,
+      skippedTotal,
+      truncationReasons: Array.from(truncationReasons),
       matches,
     };
   }

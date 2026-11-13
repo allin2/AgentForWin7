@@ -83,6 +83,22 @@ describe('A9-01 regression: Read Only mode', () => {
     expect(workspace.search).toHaveBeenCalled();
   });
 
+  it('forwards the turn signal to list and search', async () => {
+    const model = modelReturningScript([
+      { toolCalls: [{ id: 'l1', name: 'list', arguments: '{}' }] },
+      { toolCalls: [{ id: 's1', name: 'search', arguments: JSON.stringify({ pattern: 'needle' }) }] },
+      { content: 'done' },
+    ]);
+    const controller = new AbortController();
+    const loop = new A9AgentLoop({
+      workspaceRoot: '/ws', provider: model, workspaceService: workspace, runner,
+      permissionMode: PermissionMode.READ_ONLY,
+    });
+    await loop.runTurn('scan', { signal: controller.signal });
+    expect(workspace.list).toHaveBeenCalledWith('', expect.objectContaining({ signal: controller.signal }));
+    expect(workspace.search).toHaveBeenCalledWith('needle', expect.objectContaining({ signal: controller.signal }));
+  });
+
   it('does not expose write/delete/shell and denies them with structured feedback', async () => {
     const loop = new A9AgentLoop({
       workspaceRoot: '/ws',

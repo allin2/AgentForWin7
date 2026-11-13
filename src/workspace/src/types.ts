@@ -60,7 +60,8 @@ export type WorkspaceErrorCode =
   | 'BASELINE_DRIFT'
   | 'READ_REQUIRED'
   | 'ENCODING_WRITE_UNSUPPORTED'
-  | 'CHECKPOINT_PERSIST_FAILED';
+  | 'CHECKPOINT_PERSIST_FAILED'
+  | 'DIRECTORY_READ_FAILED';
 
 export class WorkspaceError extends Error {
   readonly code: WorkspaceErrorCode;
