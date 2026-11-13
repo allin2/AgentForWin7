@@ -5,7 +5,7 @@ Status: APPROVED_FOR_IMPLEMENTATION
 Task Type: PRODUCT_RELIABILITY_HARDENING
 Target Branch: a9-64-search-list-responsive
 Source Baseline: 4dfabf18f41b4f75dd3c910fd0149d1995c5ac93
-Phase-Gate: A9_64_DEVELOPER_VERIFIED
+Phase-Gate: A9_64_REVIEW_P1_BLOCKED
 Win7-Validation: NOT_PERFORMED
 ```
 
@@ -153,3 +153,36 @@ P2 跳过列表：list 两处子目录失败入口统一计数，`skipped` 详�
 
 负责人要求推进A9-64/A9-65收口并索取A9-64独立审查提示词。本轮只将任务书登记到主线，产品修复仍固定在独立分支923bf875…，最终独立审查待回执；不能将执行代理复测当成独立审查签发。提示词在主仓库outputs/a9-64-dev-r3/FINAL_INDEPENDENT_REVIEW_PROMPT_20261113.md。
 主线的文档登记不代表产品合入或Win7通过。原排序审核FAIL、同步原生排序及单文件读取限制保持。
+
+## 2026-11-13 独立审查阻断
+
+负责人返回独立报告：a9-64-search-list-responsive工作树outputs/a9-64/review-20261113T015456Z-9b89e3b2/REVIEW.md，准确源923bf875…，开发机结论不建议合入。P1-1为异步扫描期间目录替换导致外部文件沿用outsideWorkspace=false；P2-1为任务书add/add冲突。原审核FAIL保留，产品继续阻断合入。
+执行代理在既有收口范围内于原分支实施最小修复和红绿验证；原分支补记与main收口登记全部保留。主线不加载该产品补丁，不将分支自查提升为独立复审或Win7证据。后继修复和准确输入见分支任务书及outputs/a9-64/p1-revision-20261113。
+
+## 2026-11-13 独立审查阻断与范围内返修
+
+独立报告为outputs/a9-64/review-20261113T015456Z-9b89e3b2/REVIEW.md，绑定923bf875…，结论不建议合入main。P1-1为异步扫描期间根或子目录被替换，旧outsideWorkspace标记仍用于外部目标；P2-1为任务书add/add集成冲突。原排序P0修复的通过证据及新P1阻断并存，不互相抵销。报告和原FAIL不改判。
+负责人在既有“推进64、65收口”任务中返回本报告；本轮在原批准范围内修复已复现竞态，并协调保留任务书两侧记录。实际分支a9-64-search-list-responsive，开始HEAD923bf875…；main为641a0a3…，产品不合入main。仅修改Workspace service、直接回归和本任务书；主线只补真实状态和任务记录，不改变权限、公开schema、持久化、依赖、原生、系统配置、排序或容量上限，不连接目标机、不打包、不推送。
+原分支未提交的第五轮补记已逐字节保存到p1-revision-20261113/TASK_BEFORE.md。main任务书完整包含该补记，因此先以完整main文本协调分支任务书，再追加本节；原FAIL、第五轮核验及main收口登记全部保留。此为文档协调，不代表已经执行产品合并。
+返修前同一新增13项回归全部FAIL，原213项仍PASS。反例覆盖原生事件循环根替换、readdir边界根/子目录替换、同名新目录、外部符号链接、子realpath等待、行扫描让出以及文件替换为外部链接。返修后226/226通过。首轮回归补强记录保留，准确证据集中在outputs/a9-64/p1-revision-20261113。
+实现先在首次await前绑定canonical目标、dev/ino与birthtime，在真实I/O前后、实际让出后及返回前复核根与当前目录。漂移或身份无法确认返回既有DIRECTORY_READ_FAILED；不返回沿用旧归属的扫描结果，不将身份错误吞为普通read_failed。搜索对旧Dirent指向的文件重新lstat，只读取仍为普通文件的目标；新链接按stat_failed明确跳过。新调用对已有外部目标仍允许并正确标为outsideWorkspace=true。
+上述检查用于异步边界的一致性，不能声明为对抗任意跨进程ABA替换的原子文件系统沙箱。Win7的目录身份字段及实际Reparse Point行为仍NOT_PERFORMED。当前开发机修复完成不解除独立复审阻断；后继最终记录及准确输入在本目录追加。
+
+### 开发机返修结果与复审输入
+
+产品及直接回归已本地提交为382e002…，父提交923bf875…。后继任务书提交不改产品字节。当前状态仍为A9_64_REVIEW_P1_BLOCKED：执行代理确认反例关闭，不代替独立复审签发。
+
+| 检查 | 本轮直接结果 | 证据 |
+|---|---|---|
+| 相同回归红绿 | 旧源13 FAIL、213 PASS；新源226/226 PASS | red-final.log、green.log |
+| Workspace/Core实际消费者 | 25套件497 PASS；40套件924 PASS，六模块当前输出构建通过 | daily-workspace-core.log |
+| 6000文件基线 | 3/3 PASS | baseline-6000.log |
+| 原报告根替换反例 | Node20、Electron22/Node16各4种场景均DIRECTORY_READ_FAILED，不返回结果 | race-node20.json、race-node16.json |
+| 根/子目录、原生新目录及符号链接 | 两运行时各8/8 PASS | directory-identities-node20.json、directory-identities-node16.json |
+| 原消费者探针 | 两运行时各12/12 PASS，含真实Core→Workspace及取消 | consumer-node20.json、consumer-node16.json |
+| 同口径性能 | 三轮轮换，中位耗时为基线1.10倍；10万项取消总58.36ms，实际abort后0.24ms | performance.json |
+| 大目录响应性 | 10万目录项最长停顿估计15.05ms；2万文件搜索2.05ms，精确文件边界未截断 | large-probe.json |
+
+原消费者探针仅把文件metadata错误注入位置由statSync改为新消费者的lstatSync，全部原断言保留；来源与SHA见PROBE_PROVENANCE.json。原报告脚本未改，原审查证据未覆盖。本轮性能重新测量，不再把旧服务同字节性能记录继承给新服务。最长停顿是10ms定时器间隔减10ms的估计；开发机数值不构成Win7承诺。
+P2以协调后的完整任务书同步到两条分支；保留第五轮补记、main收口登记、新审查及本轮返修。准确两侧文档提交及只读合并预演写入DOC_COORDINATION.json，不为解决文档冲突合入产品。
+最终准确源码/构建/脚本哈希、保护与清理结果见本目录RESULT_FINAL.json。原独审P1仍待独立复核；main产品、Win7、Win10、完整GUI链路、打包、门A/B、推送与发布均NOT_PERFORMED。
