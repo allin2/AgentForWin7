@@ -1,6 +1,6 @@
 # 当前项目状态
 
-更新：2026-11-10 America/Los_Angeles。当前开发工作区 main；A9-34 基线 `f374e3783eb6e863a84c97b0a28c94f52a2169c9`，A9-40 联合验证的源码身份与本地保存记录见任务书 §4.5、§5.1。
+更新：2026-11-13 America/Los_Angeles。当前开发工作区 main；A9-34 基线 `f374e3783eb6e863a84c97b0a28c94f52a2169c9`，A9-40 联合验证的源码身份与本地保存记录见任务书 §4.5、§5.1。
 
 ## 产品与可试用结果
 
@@ -15,7 +15,7 @@
 
 ## 当前交付、进行中的工作与授权
 
-- [A9-66：批次3](tasks/A9_66_LARGE_INPUT_RESPONSIVENESS.md) / [A9-67：批次5](tasks/A9_67_NETWORK_AND_BOUNDARY_HARDENING.md)：开发机交付完成。云端私有提交 aa3f68ac…经 Claude Code 独审，未发现新增 P0/P1。G0/G1 通过，33 文件已整合到本地 main 工作区，未提交；HEAD 仍为 44ddaf90…，原有修改和 Runtime 45s/30s 保留。Linux Core 924、State 435、Gateway 332、新 Shell 1744/1744；Mac Workspace 593/593、当前 Runtime 20 项及 Electron22/Node16 当前编译产物/受控 Provider 链路通过。首轮 Office 2 项超时 FAIL 保留，根因 UNKNOWN；未改期限，新窄测和完整 Shell 通过。非阻断 P2 保留：删除恢复区后需重新打开工作区。基线已有单文件同步后态约 829ms 等限制保留。F-023 为产品不可达、库层加固。临时机已回收，短命密钥已撤销。Win7/Win10、完整 GUI、打包、门 A/B、公开推送及发布 NOT_PERFORMED。证据入口 outputs/a9-66-67-instabox/FINAL_RESULT.json；边界见 ADR-0331。
+- [A9-66：批次3](tasks/A9_66_LARGE_INPUT_RESPONSIVENESS.md) / [A9-67：批次5](tasks/A9_67_NETWORK_AND_BOUNDARY_HARDENING.md)：**COMPLETE，WIN7-61 限定接受**，`A9_66_A9_67_WIN7_61_PASS_WITH_KNOWN_LIMITS`。源码 `c7f51ea…` / ZIP `0cebc0b0…` / manifest `7279f6ea…`（双干净构建逐字节一致）。Win7 实机库层断言 run `a96667-controller`（DEV_CHANNEL）24/24 PASS：F-011/012/025/008/007/009/027，identity/Medium/session 1 核验，closure 3265 文件，sqlite 3.43.1。负责人按 ADR-0332 限定接受（按 ADR-0320 路径），不产生 FORMAL PASS。已知限制：非阻断 P2（删除恢复区后需重新打开工作区）、验证为库层非 UI 路径、深历史每页同步全量扫描（基线）、200MiB 单文件同步后态约 829ms（基线）。开发机独审/G0/G1 证据保留在 outputs/a9-66-67-instabox/；Win7 证据在 outputs/a9-66-67-win7-dev-r1/。正式门 A/B、完整 GUI 旅程、公开推送及发布 NOT_PERFORMED。
 - [A9-65](tasks/A9_65_VISIBLE_WAITS_AND_DIAGNOSTICS.md)：`A9_65_DEVELOPER_VERIFIED`。产品返修`6ba877d…`已合入本地main，后继仅修Electron夹具的固定等待。main保留既有dirty，直接Shell日常78套件/1710 PASS，12项必需字段慢检查和6000文件基线3项另跑通过；Electron关闭等待、正常退出通过，等待提示首轮FAIL保留，语义等待修正版单场景PASS。文档检查通过，决定见ADR-0329。准确源码/夹具/收尾绑定在outputs/a9-65-closeout-20261113/RESULT_FINAL.json。Win7、打包、门A/B、公开推送及发布NOT_PERFORMED。
 - [A9-64](tasks/A9_64_SEARCH_LIST_RESPONSIVENESS.md)：`A9_64_DEVELOPER_VERIFIED`。独立复审建议合入e7905f53…，产品已本地合并为8069a5ba…，决定见ADR-0330。原异步归属P1关闭，P2文档协调完成；旧FAIL保留。组合开发机直接Workspace500/500、Core924/924、Shell五文件879/879，双运行时真实Core→Workspace各12/12 PASS。六模块源码和关键JS与复审同字节；竞态、红绿及性能标INHERITED_EVIDENCE。既有同步TOCTOU/ABA限制保持。Win7、完整GUI、打包、门A/B、推送发布NOT_PERFORMED；准确绑定在outputs/a9-64-main-closeout-20261113/RESULT_FINAL.json。
 

@@ -1,12 +1,13 @@
 # A9-66 — 批次3：大输入响应性
 
 ```text
-Status: APPROVED_FOR_IMPLEMENTATION
+Status: COMPLETE
 Task Type: PRODUCT_RELIABILITY_HARDENING
 Target Branch: main
 Source Baseline: 44ddaf90dab7931adda138d73bb6b400e360382a
-Phase-Gate: A9_66_DEVELOPER_VERIFIED
-Win7-Validation: NOT_PERFORMED
+Phase-Gate: A9_66_A9_67_WIN7_61_PASS_WITH_KNOWN_LIMITS
+Candidate: WIN7-61
+Win7-Validation: DEV_CHANNEL
 ```
 
 ## 当前交付（2026-11-13，开发机）
@@ -14,6 +15,20 @@ Win7-Validation: NOT_PERFORMED
 本批已整合到本地 main 工作区并定点提交为 `c7f51ea…`（37 文件：33 源码 + 2 任务书 + ADR-0331 两文档）。私有交付绑定 aa3f68ac3b322d489d6fa30f4e3cb17b0979678f；33 源码文件与审核版 SHA 逐字节一致。原 dirty/untracked 保留，Runtime 原有 45s/30s 配置保留。接口与边界登记为 [ADR-0331](../DECISIONS.md)。
 
 开发包已构建：复用 A9-32 开发 Profile（`a9-32-input-lock.json`），source `c7f51ea…`，ZIP SHA-256 `0cebc0b0…`，3266 文件，`source_dirty=false`、`external_acceptance_eligible=false`。包内 workspace/dist/async-tree.js、directory-identity.js 等新文件已核对含 A9-66/67 特性标记。构建产物在 `outputs/a9-66-67-dev-package/package/`。
+
+## Win7 限定接受（2026-11-13，WIN7-61）
+
+候选人 WIN7-61：源码 `c7f51ea…` / ZIP `0cebc0b0…`（双干净构建逐字节一致）/ manifest `7279f6ea…`（3265 文件）。负责人按 [ADR-0332](../DECISIONS.md) 限定接受（按 ADR-0320 路径），结论 `A9_66_A9_67_WIN7_61_PASS_WITH_KNOWN_LIMITS`，不产生 FORMAL PASS。
+
+Win7 实机库层断言 run `a96667-controller`（DEV_CHANNEL）24/24 PASS：F-011×6、F-012×3、F-025×3、F-008×2、F-007×2、F-009×2、F-027×1。identity 核验：dccs-chaizl-PC / 6.1.7601 / agent SID / Medium / session 1 / image runtime\electron.exe。closure verified_files 3265，sqlite 3.43.1。
+
+验证过程关键事实（供审阅）：
+- agent 会话里 electron 仅 fallback 入口（appdir 无 package.json → resources/app 入口）能执行 JS（run03 成功）；独立 driver-app 入口与 runtime 根入口等同，挂起（AGENT_WAIT_OR_STOP）。
+- fallback 路径覆盖 resources/app/package.json 原版（e5d268a5…），closure 逐字节校验失败；经负责人批准，controller 跳过该入口文件字节校验、单独记录 entry_package_json。
+- config execution_files 须同步 controller SHA（run08 含不一致）。
+- 证据在 outputs/a9-66-67-win7-dev-r1/（controller.json、wrapper-error-run07/08.json、da-state.txt 等）。
+
+正式门 A/B、完整 GUI 旅程、公开推送及发布 NOT_PERFORMED。
 
 开发员工使用 Box Codex。新独审按负责人要求使用 Claude Code，响应模型为 claude-opus-5-5，effort UNKNOWN。独审未发现新增 P0/P1，建议补验和 G0 通过后整合。原件为 outputs/a9-66-67-instabox/CLAUDE_RECHECK_AA3F.md。原 7751df50、9de03c57 审核失败均保留。
 

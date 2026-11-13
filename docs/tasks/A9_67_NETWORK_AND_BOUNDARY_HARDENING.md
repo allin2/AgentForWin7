@@ -1,17 +1,22 @@
 # A9-67 — 批次5：网络与边界可靠性
 
 ```text
-Status: APPROVED_FOR_IMPLEMENTATION
+Status: COMPLETE
 Task Type: PRODUCT_RELIABILITY_HARDENING
 Target Branch: main
 Source Baseline: 44ddaf90dab7931adda138d73bb6b400e360382a
-Phase-Gate: A9_67_DEVELOPER_VERIFIED
-Win7-Validation: NOT_PERFORMED
+Phase-Gate: A9_66_A9_67_WIN7_61_PASS_WITH_KNOWN_LIMITS
+Candidate: WIN7-61
+Win7-Validation: DEV_CHANNEL
 ```
 
 ## 当前交付（2026-11-13，开发机）
 
 本批与 A9-66 组合完成云端开发、Claude Code 新机独审、G0 及 Mac G1。私有交付绑定 aa3f68ac3b322d489d6fa30f4e3cb17b0979678f，33 文件已整合到本地 main 工作区，未提交。实际 HEAD 仍为 44ddaf90…；既有修改及 Runtime 45s/30s 配置保留。具体结果、首轮 G0 超时和非阻断 P2 见 [A9-66 当前交付](A9_66_LARGE_INPUT_RESPONSIVENESS.md)。接口与边界见 [ADR-0331](../DECISIONS.md)。
+
+## Win7 限定接受（2026-11-13，WIN7-61）
+
+候选 WIN7-61：源码 `c7f51ea…` / ZIP `0cebc0b0…` / manifest `7279f6ea…`。负责人按 [ADR-0332](../DECISIONS.md) 限定接受，结论 `A9_66_A9_67_WIN7_61_PASS_WITH_KNOWN_LIMITS`，不产生 FORMAL PASS。Win7 实机库层断言 run `a96667-controller`（DEV_CHANNEL）24/24 PASS：F-011/012/025/008/007/009/027，identity/Medium/session 1 核验，closure 3265 文件，sqlite 3.43.1。详细验证过程与证据见 [A9-66 §Win7 限定接受](A9_66_LARGE_INPUT_RESPONSIVENESS.md#win7-限定接受2026-11-13win7-61)。正式门 A/B、完整 GUI 旅程、公开推送及发布 NOT_PERFORMED。
 
 | Finding | 最终处置 |
 |---|---|
