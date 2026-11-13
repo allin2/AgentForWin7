@@ -1138,10 +1138,11 @@ async function executeA9ShutdownChoice(intent = 'window') {
   // One application-wide attempt, shared by window close and before-quit.
   // In particular, reporting does not clear it or restart registry shutdown.
   if (!a9ShutdownAttempt) {
-    const attempt = { reported: false, intent, policy: selectA9ShutdownPolicy(), promise: null };
+    const attempt = { reported: false, intent, policy: selectA9ShutdownPolicy(), promise: null, waitPromise: null, startedAt: null };
     a9ShutdownAttempt = attempt;
     attempt.promise = attempt.policy.then(async stopManaged => {
       if (stopManaged === null) return false;
+      attempt.startedAt = Date.now();
       const result = stopManaged ? await a9Workspaces.shutdown() : await a9Workspaces.shutdown({ stopManaged: false });
       const unresolved = result && Array.isArray(result.unresolved) ? result.unresolved : [];
       const leftToSystem = result && result.leftToSystem;
@@ -1168,24 +1169,31 @@ async function executeA9ShutdownChoice(intent = 'window') {
     if (a9ShutdownAttempt === attempt) a9ShutdownAttempt = null;
     return false;
   }
-  let timer;
-  try {
-    const reported = Symbol('reported');
-    const result = await Promise.race([attempt.promise, new Promise(resolve => {
-      timer = setTimeout(() => resolve(reported), 30000);
-    })]);
-    if (result !== reported) return result;
-    attempt.reported = true;
-    const stages = [...new Set(a9Workspaces.directory().filter(item => item.opened).map(item => {
-      const runtime = a9Workspaces.getById(item.workspaceId).runtime;
-      return typeof runtime.getShutdownStage === 'function' ? runtime.getShutdownStage() : null;
-    }).filter(Boolean))];
-    for (const stage of stages) void diagnosticsLog.record('shutdown-wait-reported', { stage, durationMs: 30000 });
-    if (!stages.length) void diagnosticsLog.record('shutdown-wait-reported', { durationMs: 30000 });
-    flightRecorder.withoutStall('error-dialog', () => dialog.showErrorBox('无法确认安全退出',
-      `关闭等待已超过 30 秒，本次退出已取消。窗口与工作区锁保持可用，原清理继续进行。\n当前阶段：${stages.join('、') || '等待关闭结果'}\n诊断日志：${diagnosticsLog.snapshot().directory}`));
-    return false;
-  } finally { clearTimeout(timer); }
+  if (attempt.reported) return false;
+  // All current and later callers share the same report boundary. Once it has
+  // reported, only the attempt's completion handler may finish or report failure.
+  if (!attempt.waitPromise) attempt.waitPromise = (async () => {
+    let timer;
+    try {
+      const reported = Symbol('reported');
+      const result = await Promise.race([attempt.promise, new Promise(resolve => {
+        timer = setTimeout(() => resolve(reported), 30000);
+      })]);
+      if (result !== reported) return result;
+      attempt.reported = true;
+      const stages = [...new Set(a9Workspaces.directory().filter(item => item.opened).map(item => {
+        const runtime = a9Workspaces.getById(item.workspaceId).runtime;
+        return typeof runtime.getShutdownStage === 'function' ? runtime.getShutdownStage() : null;
+      }).filter(Boolean))];
+      const durationMs = Math.max(0, Date.now() - attempt.startedAt);
+      for (const stage of stages) void diagnosticsLog.record('shutdown-wait-reported', { stage, durationMs });
+      if (!stages.length) void diagnosticsLog.record('shutdown-wait-reported', { durationMs });
+      flightRecorder.withoutStall('error-dialog', () => dialog.showErrorBox('无法确认安全退出',
+        `关闭等待已超过 30 秒，清理仍在继续，窗口将在完成后自动关闭。清理结果确认前保留工作区锁。\n当前阶段：${stages.join('、') || '等待关闭结果'}\n诊断日志：${diagnosticsLog.snapshot().directory}`));
+      return false;
+    } finally { clearTimeout(timer); }
+  })();
+  return attempt.waitPromise;
 }
 
 function beginA9ShutdownBeforeQuit(event) {

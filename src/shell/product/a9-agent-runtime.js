@@ -3337,6 +3337,7 @@ function createA9AgentRuntime(options) {
   }
 
   let shutdownStage = null;
+  let shutdownStopManaged = null;
   function beginShutdownStage(stage) {
     shutdownStage = stage;
     const operation = config.shutdownStageRecorder && config.shutdownStageRecorder(stage);
@@ -3352,7 +3353,14 @@ function createA9AgentRuntime(options) {
   }
 
   function shutdown(options = {}) {
-    if (shutdownPromise) return shutdownPromise;
+    const stopManaged = options.stopManaged !== false;
+    if (shutdownPromise) {
+      if (shutdownStopManaged !== stopManaged) return Promise.reject(Object.assign(
+        new Error('工作区正在按先前的后台进程处置选择关闭，请等待清理结束后重试。'),
+        { code: 'A9_SHUTDOWN_POLICY_CONFLICT' }));
+      return shutdownPromise;
+    }
+    shutdownStopManaged = stopManaged;
     shutdownRequested = true;
     queueClosed = true;
     pauseQueue();
@@ -3368,9 +3376,6 @@ function createA9AgentRuntime(options) {
       && !activeController && !(options.cancelPending && (currentPendingApproval || currentPendingQuestion)) && manager.getActiveCount() === 0) {
       // 保留既有无负载关闭语义：无需等待时同步释放锁，紧接着切换/重开
       // 同一工作区不会短暂误报 A9_WORKSPACE_LOCKED。
-      for (const stage of ['checkpoint_recovery', 'active_task_cancel', 'office_close', 'state_operations', 'managed_process_stop', 'background_manager_dispose']) {
-        const end = beginShutdownStage(stage); end();
-      }
       releaseWorkspaceLock();
       shutdownPromise = Promise.resolve({ stopped: [], leftToSystem: [], unresolved: [] });
       return shutdownPromise;
@@ -3419,7 +3424,6 @@ function createA9AgentRuntime(options) {
       await shutdownWait('state_operations', () => !activeController ? Promise.allSettled(Array.from(pendingStateOperations)) : undefined);
       await shutdownWait('managed_process_stop', () => managedStopPromise);
       const before = manager.list();
-      const stopManaged = options.stopManaged !== false;
       const result = await shutdownWait('background_manager_dispose', () => manager.dispose({ stopManaged }));
       for (const handle of before) {
         // Terminal/released state was already audited by the manager. Do not overwrite it with a pre-release snapshot.

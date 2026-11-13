@@ -146,3 +146,51 @@ U 使用真实 DOM 显示与抽屉点击，主进程处理器被挂起，未伪�
 关闭继续时不恢复新任务准入；仍遵守 registry closingAll 和 Runtime shutdownRequested。
 超时之后晚到成功会继续原关闭；窗口关闭升级为应用退出时采用已明确请求的应用退出。
 开发机验证不签 Win7 结论。Win7、打包、正式门 A/B、推送和发布为 NOT_PERFORMED。
+
+## 审核问题修复（2026-11-12）
+
+负责人本轮要求修复审核表中的五项问题。实际基线为本工作树分支 `a9-65-visible-waits`，
+HEAD `ea6dc13e14adb1cebf05c8121bd043ee9541a8c1`。开始时生产文件无修改，
+仅有既存 `src/shell/office-lite/node_modules` 未跟踪链接，保持原样。main 工作区只读。
+本轮只修改关闭等待、策略缓存与对应测试；无原生、依赖、IPC schema、系统权限或打包变化。
+README、DECISIONS、STATUS 仍由负责人保留，不改既有审核 FAIL。
+
+交付行为：等待报告说明清理仍在继续，成功后自动关闭；同次尝试只报告一次，
+已有并发等待者共享该报告，报告后的调用立即返回 false。日志记录实际累计清理等待时间。
+Runtime 对缓存结果绑定规范化的 stopManaged；不同策略返回 A9_SHUTDOWN_POLICY_CONFLICT，
+不复用不同策略结果、不启动并发清理。原尝试仍继续，未确认清理时不释放锁。
+无负载关闭同步释放锁，不写六对空阶段记录。
+
+最短链路：定向红绿测试 → 当前依赖编译与 Shell 日常回归 → Electron 22 关闭卡住与正常退出。
+定向测试新增真实 Registry.close → Runtime.shutdown → Registry.shutdown 冲突检查，
+使用真实 SQLite 锁和受控 manager.dispose 等待。它补足旧测试未覆盖的跨入口策略冲突。
+Electron 关闭场景检查真实错误框参数、重复关闭只有一条报告、晚到完成自动关闭。
+原生日志夹具按产品启动流程初始化日志，不再依赖无负载关闭顺带创建日志。
+直接验证为开发机；Win7、Win10、打包、门 A/B、提交、推送与发布均 NOT_PERFORMED。
+如出现实现范围外缺陷或安全/完整性失败，停止依赖动作并保留首失败。
+
+本轮结果绑定上述 HEAD 加本轮未提交修改；生产文件 SHA-256 见
+`outputs/a9-65/review-fix/FINAL.json`。验证日志均在同一目录，未覆盖前轮证据。
+
+| 检查 | 本轮结果 | 证据 |
+|---|---|---|
+| 定向红绿 | 旧实现首次 6 FAIL / 34 PASS；修复后含真实 Registry 双向场景 41 PASS | red-bounded.log、green-r2.log |
+| 反向验证 | 仅换回被审 main：3 FAIL / 38 PASS；仅换回 runtime：5 FAIL / 36 PASS；两者换回：8 FAIL / 33 PASS | old-main.log、old-runtime.log、old-both.log、reversal.json |
+| 依赖编译与 Shell 日常集合 | 78 套件、1708 PASS、12 跳过、0 FAIL；Node 20.17.0 | daily.log |
+| 实际 Electron 22.3.27 / Node 16.17.1 | shutdown-stall、renderer-wait、normal-exit 三场景均 PASS，退出码 0 | electron/RESULT.json |
+| 文档检查 | FAIL；仅既有 task-index、task-lifecycle 两项，负责人保留的索引未登记 A9-65 | docs.log |
+| 差异及清理 | git diff --check PASS；定向、反转及 Electron 沙箱残留 0 | FINAL.json |
+
+首次红色运行的策略冲突等待触及 Jest 期限，已改为测试自身的有界等待并在 finally 释放外设；
+red-bounded.log 保留正确症状。首次绿色运行的三项夹具 FAIL 为无负载关闭不再创建日志目录，
+green.log 保留原事实；夹具改为真实启动事件初始化日志，秘密扫描断言未减少。
+反转只在系统临时目录替换两个文件，共享只读依赖；finally 删除沙箱。
+反转前后生产文件 SHA-256 一致，未在生产树就地回退。
+既存未跟踪链接保持；原 main 工作区无本轮写入。Win7 实机仍为 NOT_PERFORMED。
+
+## 2026-11-12 收口授权与独立证据绑定
+
+负责人要求“推进64，65收口”，批准本轮同范围本地收口、提交和整合；A9-64由负责人转交独立审查，产品修复不随本轮A9-65合入。公开推送、Win7新窗口、打包、正式门A/B及发布不在本轮范围。
+本轮开始时main为4dfabf18…；本工作树HEAD为ea6dc13e…，四份产品/测试文件及本任务书未提交。主工作区38项既有修改与未跟踪文件已在候选外核SHA并备份，所有无关内容保留。
+独立复核报告为outputs/a9-65/review-fix/independent-verification-20261112/RESULT.json。当前四份产品/测试文件SHA与该报告逐项相同；本任务书追加本段前的SHA也相同。41项定向、1708项Shell日常及3项Electron场景仅按准确字节记INHERITED_EVIDENCE，不宣称本轮重跑。旧实现3/5/8条反向失败及原索引检查FAIL保持。
+本轮无新产品、原生、依赖或夹具变化。先完成本地提交与干净树整合，再以实际合并源码执行最短Electron消费者和受影响回归；README登记及ADR补记在集成端完成。最终绑定、直接验证和保护核对统一保存在主仓库outputs/a9-65-closeout-20261113。

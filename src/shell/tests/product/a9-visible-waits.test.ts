@@ -7,7 +7,7 @@ import Database from 'better-sqlite3';
 
 const product = process.env.A9_65_PRODUCT || path.resolve(__dirname, '../../product');
 const read = (file: string) => fs.readFileSync(path.join(product, file), 'utf8');
-const deferred = () => { let resolve!: (value?: any) => void; const promise = new Promise<any>(r => { resolve = r; }); return { promise, resolve }; };
+const deferred = () => { let resolve!: (value?: any) => void; let reject!: (error: Error) => void; const promise = new Promise<any>((r, j) => { resolve = r; reject = j; }); return { promise, resolve, reject }; };
 const tick = () => new Promise(r => setTimeout(r, 0));
 async function bounded(promise: Promise<any>) { let timer: any; try { return await Promise.race([promise, new Promise((_r, reject) => { timer = setTimeout(() => reject(new Error('missing report terminal state')), 150); })]); } finally { clearTimeout(timer); } }
 const stages = ['checkpoint_recovery', 'active_task_cancel', 'office_close', 'state_operations', 'managed_process_stop', 'background_manager_dispose'];
@@ -64,7 +64,8 @@ describe('A9-65 visible shutdown waits', () => {
       const retry = m.context.execute(); await tick();
       expect(start).toHaveBeenCalledTimes(1); expect(h.office).toHaveBeenCalledTimes(1);
       expect(h.context.shutdown({ stopManaged })).toBe(h.context.shutdown({ stopManaged }));
-      h.gate.resolve(); expect(await retry).toBe(true); await tick();
+      expect(await bounded(retry)).toBe(false);
+      h.gate.resolve(); await h.context.shutdown({ stopManaged }); await tick();
       expect(h.release).toHaveBeenCalledTimes(1); expect(h.manager.dispose).toHaveBeenCalledTimes(1); expect(m.close).toHaveBeenCalledTimes(1);
     } finally { h.gate.resolve(); }
   });
@@ -73,8 +74,9 @@ describe('A9-65 visible shutdown waits', () => {
     try {
       expect(await bounded(m.context.execute('window'))).toBe(false);
       const quit = m.context.execute('quit'); await tick(); expect(start).toHaveBeenCalledTimes(1);
+      expect(await bounded(quit)).toBe(false);
       gate.resolve({ unresolved: [], leftToSystem: [], stopped: [] });
-      expect(await quit).toBe(true); await tick(); expect(m.quit).toHaveBeenCalledTimes(1); expect(m.close).not.toHaveBeenCalled();
+      await tick(); expect(m.quit).toHaveBeenCalledTimes(1); expect(m.close).not.toHaveBeenCalled();
     } finally { gate.resolve({ unresolved: [], leftToSystem: [], stopped: [] }); }
   });
   test('normal cleanup keeps the baseline result and releases only after disposal', async () => {
@@ -88,6 +90,53 @@ describe('A9-65 visible shutdown waits', () => {
     const h = shutdownHarness(); h.context.officeService = null;
     const promise = h.context.shutdown(); expect(h.release).toHaveBeenCalledTimes(1);
     expect(await promise).toEqual({ stopped: [], leftToSystem: [], unresolved: [] });
+    expect(h.events).toEqual([]);
+  });
+  test('report describes late automatic close without claiming exit was cancelled', async () => {
+    const gate = deferred(); const m = mainHarness(() => gate.promise);
+    try {
+      expect(await bounded(m.context.execute())).toBe(false);
+      expect(m.dialogs[0]).toContain('清理仍在继续');
+      expect(m.dialogs[0]).toContain('窗口将在完成后自动关闭');
+      expect(m.dialogs[0]).not.toContain('退出已取消');
+      gate.resolve({ unresolved: [] }); await tick(); expect(m.close).toHaveBeenCalledTimes(1);
+    } finally { gate.resolve({ unresolved: [] }); }
+  });
+  test('concurrent and repeated waiters share one report; late failure is reported once', async () => {
+    const gate = deferred(); const start = jest.fn(() => gate.promise); const m = mainHarness(start);
+    const timer = jest.fn(m.context.setTimeout); m.context.setTimeout = timer;
+    try {
+      const window = m.context.execute('window'); const quit = m.context.execute('quit');
+      expect(await bounded(Promise.all([window, quit]))).toEqual([false, false]);
+      expect(m.dialogs).toHaveLength(1); expect(m.records).toHaveLength(1);
+      const timers = timer.mock.calls.length;
+      expect(await bounded(m.context.execute())).toBe(false);
+      expect(timer).toHaveBeenCalledTimes(timers); expect(start).toHaveBeenCalledTimes(1);
+      expect(m.dialogs).toHaveLength(1);
+      gate.reject(new Error('late cleanup failure')); await tick();
+      expect(m.dialogs).toHaveLength(2); expect(m.close).not.toHaveBeenCalled(); expect(m.quit).not.toHaveBeenCalled();
+    } finally { gate.resolve({ unresolved: [] }); }
+  });
+  test('report measures actual elapsed cleanup time when its callback is delayed', async () => {
+    const gate = deferred(); const m = mainHarness(() => gate.promise); let now = 1000;
+    m.context.Date = { now: () => now };
+    try {
+      const waiting = m.context.execute(); await tick(); now = 61000;
+      expect(await bounded(waiting)).toBe(false);
+      expect(m.records).toEqual([expect.objectContaining({ durationMs: 60000 })]);
+    } finally { gate.resolve({ unresolved: [] }); await tick(); }
+  });
+  test.each([false, true])('in-flight stopManaged=%s refuses an opposite policy and preserves the original cleanup', async stopManaged => {
+    const h = shutdownHarness('office_close'); const first = h.context.shutdown({ stopManaged });
+    try {
+      await tick();
+      await expect(bounded(h.context.shutdown({ stopManaged: !stopManaged }))).rejects.toMatchObject({ code: 'A9_SHUTDOWN_POLICY_CONFLICT' });
+      expect(h.context.shutdown({ stopManaged })).toBe(first);
+      expect(h.release).not.toHaveBeenCalled(); expect(h.office).toHaveBeenCalledTimes(1);
+      h.gate.resolve(); await first;
+      expect(h.manager.dispose).toHaveBeenCalledTimes(1);
+      expect(h.manager.dispose).toHaveBeenCalledWith({ stopManaged });
+    } finally { h.gate.resolve(); await first; }
   });
 });
 
@@ -133,24 +182,27 @@ describe('A9-65 diagnostic projections', () => {
   });
 });
 
-async function realRuntime(extra: any, run: (runtime: any, log: any, root: string) => Promise<void>) {
+async function realRuntime(extra: any, run: (runtime: any, log: any, root: string) => Promise<void>, shutdownOptions = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-65-real-')); const dbs: any[] = []; let runtime: any;
   const { createDiagnosticsLog, createFlightRecorder } = require('../../product/a9-diagnostics-log');
   const log = createDiagnosticsLog({ userDataPath: root }); const recorder = createFlightRecorder(log);
   try {
+    // Production initializes this log at process startup. Idle shutdown no
+    // longer creates it incidentally through empty stage records.
+    await log.record('process-start', {});
     const mod = require(path.join(product, 'a9-agent-runtime.js'));
     runtime = mod.createA9AgentRuntime({ workspaceRoot: root, dataRoot: path.join(root, 'data'),
       openDatabase: (f: string, o: any) => { const db = new Database(f, o); dbs.push(db); return db; },
       shutdownStageRecorder: (stage: string) => recorder.begin('shutdown-stage', { stage }), ...extra });
     await runtime.whenReady(); await run(runtime, log, root);
   } finally {
-    try { await runtime?.shutdown(); await log.flush(); } finally {
+    try { await runtime?.shutdown(shutdownOptions); await log.flush(); } finally {
       recorder.stop(); for (const db of dbs) if (db.open) db.close(); fs.rmSync(root, { recursive: true, force: true });
     }
   }
 }
 
-test('real Runtime and SQLite keep the writer lock and stage log until held disposal finishes', async () => {
+test.each([true, false])('real registry close(stopManaged=%s) refuses a conflicting application shutdown and retains the SQLite lock', async stopManaged => {
   const gate = deferred(); const runner = require('../../../runner/dist');
   let manager: any; let disposals = 0;
   const modules: any = Object.fromEntries(['core', 'gateway', 'state', 'workspace', 'runner'].map(name => [name, require(`../../../${name}/dist`)]));
@@ -164,9 +216,16 @@ test('real Runtime and SQLite keep the writer lock and stage log until held disp
   } };
   try {
     await realRuntime({ modules }, async (runtime, log, root) => {
-      const first = runtime.shutdown();
+      const { createA9WorkspaceRegistry } = require(path.join(product, 'a9-workspace-registry.js'));
+      const registry = createA9WorkspaceRegistry({ createRuntime: () => runtime });
+      const entry = registry.open(root);
+      const first = registry.close(entry.workspaceId, { stopManaged });
+      const runtimeShutdown = runtime.shutdown({ stopManaged });
       try {
         const m = mainHarness(() => first, 'background_manager_dispose'); expect(await bounded(m.context.execute())).toBe(false);
+        const conflict = await bounded(registry.shutdown({ stopManaged: !stopManaged }));
+        expect(conflict.unresolved).toHaveLength(1);
+        expect(conflict.stopped).toEqual([]); expect(conflict.leftToSystem).toEqual([]);
         expect(runtime.getShutdownStage()).toBe('background_manager_dispose'); expect(runtime.getSnapshot().lock.held).toBe(true);
         const db = new Database(path.join(root, 'data/a9-state.db'));
         try { expect((db.prepare('SELECT count(*) n FROM a9_workspace_locks').get() as any).n).toBe(1); } finally { db.close(); }
@@ -174,10 +233,10 @@ test('real Runtime and SQLite keep the writer lock and stage log until held disp
         const rows = lines.trim().split('\n').map(line => JSON.parse(line));
         expect(rows).toContainEqual(expect.objectContaining({ event: 'shutdown-stage-begin', stage: 'background_manager_dispose' }));
         expect(rows).not.toContainEqual(expect.objectContaining({ event: 'shutdown-stage-end', stage: 'background_manager_dispose' }));
-        expect(runtime.shutdown()).toBe(first); expect(disposals).toBe(1);
+        expect(runtime.shutdown({ stopManaged })).toBe(runtimeShutdown); expect(disposals).toBe(1);
       } finally { gate.resolve(); await first; }
       expect(runtime.getSnapshot().lock.held).toBe(false);
-    });
+    }, { stopManaged });
   } finally { gate.resolve(); }
 });
 

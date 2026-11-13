@@ -204,6 +204,8 @@ if (mode.startsWith('baseline-')) {
           const dialogResult = JSON.parse(fs.readFileSync(path.join(runRoot, 'dialog.json'), 'utf8'));
           assert(dialogResult.content.includes('office_close'));
           assert(dialogResult.content.includes(observedDiagnostics.snapshot().directory));
+          assert(dialogResult.content.includes('清理仍在继续，窗口将在完成后自动关闭'));
+          assert(!dialogResult.content.includes('退出已取消'));
           await observedDiagnostics.flush();
           const directory = observedDiagnostics.snapshot().directory;
           const rows = fs.readdirSync(directory).filter(name => name.endsWith('.jsonl'))
@@ -212,8 +214,13 @@ if (mode.startsWith('baseline-')) {
           assert(!rows.some(row => row.event === 'shutdown-stage-end' && row.stage === 'office_close'));
           // The same window remains interactive; a second close reuses cleanup.
           const title = await window.webContents.executeJavaScript('document.title'); assert(title);
-          window.close(); await new Promise(resolve => setTimeout(resolve, 15));
+          window.close(); await new Promise(resolve => setTimeout(resolve, 90));
           assert.equal(shutdownCalls, 1); assert(shutdownLockHeld);
+          await observedDiagnostics.flush();
+          const reports = fs.readdirSync(directory).filter(name => name.endsWith('.jsonl'))
+            .flatMap(name => fs.readFileSync(path.join(directory, name), 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line)))
+            .filter(row => row.event === 'shutdown-wait-reported');
+          assert.equal(reports.length, 1);
           write('shutdown-stall.json', { stage: 'office_close', shutdownCalls, lockHeldAtReport: shutdownLockHeld,
             windowAliveAtReport: !window.isDestroyed(), beganWithoutEnd: true, rendererResponsive: true,
             peripheral: 'controlled runtime cleanup; main/registry/preload/renderer and diagnostic log are real' });
