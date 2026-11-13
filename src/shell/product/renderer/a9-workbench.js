@@ -4386,13 +4386,8 @@
     try {
       const response = await a9.probeProvider();
       text('a9-provider-probe-state', response && response.ok === true
-        ? (response.probe.ok && response.probe.hasToolCalling ? 'tool_calling'
-          : response.probe.ok ? 'chat_only' : 'unavailable')
+        ? (response.probe.hasToolCalling ? 'tool_calling' : 'chat_only')
         : 'unavailable');
-      const probe = response && response.ok === true ? response.probe : null;
-      setFieldError('a9-provider-diagnostics', probe && probe.error
-        ? `A9_PROVIDER_PROBE_FAILED: ${probe.error}`
-        : '');
       await refreshSnapshot();
     } finally {
       button.disabled = false;

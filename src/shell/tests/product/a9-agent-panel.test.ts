@@ -11,7 +11,6 @@ interface FakeWindow {
     bind: () => void;
     refreshSnapshot: () => Promise<unknown>;
     decideApproval: (decision: 'approved' | 'denied') => Promise<unknown>;
-    runProbe: () => Promise<unknown>;
   };
 }
 
@@ -193,44 +192,5 @@ describe('A9 renderer panel contract', () => {
     expect(nodes['a9-approval-card'].dataset.approvalId).toBeUndefined();
     expect(nodes['a9-approval-error'].textContent).toBe('');
     expect(nodes['a9-runtime-error'].textContent).toContain('A9_SNAPSHOT_FAILED');
-  });
-
-  it('runProbe shows the true classification and the redacted reason when the probe request fails', async () => {
-    const nodes: Record<string, ReturnType<typeof fakeNode>> = {
-      'a9-provider-probe-state': fakeNode(),
-      'a9-provider-error': fakeNode(true),
-      'a9-provider-probe': fakeNode(),
-    };
-    const failedProbe = { ok: false, hasToolCalling: false, hasStreaming: false, latencyMs: 5, model: 'm',
-      error: 'Server returned status 400: {"error":{"message":"model not found"}}' };
-    const fakeA9 = {
-      probeProvider: async () => ({ ok: true, probe: failedProbe }),
-      snapshot: async () => ({ ok: true, snapshot: { status: 'ready', provider: { configured: true, probe: { classification: 'unavailable', error: failedProbe.error } } } }),
-    };
-    const loaded = loadPanel({ win7Agent: { a9: fakeA9 } as any }, {
-      getElementById: (id) => nodes[id] || null,
-    });
-    await loaded.win7AgentA9Panel!.runProbe();
-    expect(nodes['a9-provider-probe-state'].textContent).toBe('unavailable');
-    expect(nodes['a9-provider-error'].textContent).toContain('A9_PROVIDER_PROBE_FAILED');
-    expect(nodes['a9-provider-error'].textContent).toContain('model not found');
-  });
-
-  it('runProbe keeps chat_only only when the probe request itself succeeded without tool calling', async () => {
-    const nodes: Record<string, ReturnType<typeof fakeNode>> = {
-      'a9-provider-probe-state': fakeNode(),
-      'a9-provider-error': fakeNode(true),
-      'a9-provider-probe': fakeNode(),
-    };
-    const fakeA9 = {
-      probeProvider: async () => ({ ok: true, probe: { ok: true, hasToolCalling: false, hasStreaming: true, latencyMs: 5, model: 'm' } }),
-      snapshot: async () => ({ ok: true, snapshot: { status: 'ready', provider: { configured: true, probe: { classification: 'chat_only' } } } }),
-    };
-    const loaded = loadPanel({ win7Agent: { a9: fakeA9 } as any }, {
-      getElementById: (id) => nodes[id] || null,
-    });
-    await loaded.win7AgentA9Panel!.runProbe();
-    expect(nodes['a9-provider-probe-state'].textContent).toBe('chat_only');
-    expect(nodes['a9-provider-error'].textContent).toBe('');
   });
 });

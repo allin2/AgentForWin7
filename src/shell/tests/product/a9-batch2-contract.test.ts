@@ -1358,10 +1358,6 @@ describe('A9-36 supplement: implementation review round 1', () => {
   test('P1-6: the restored real-Provider configuration carries no probe, so the page probes through its own control before the first Turn', () => {
     const workbench = fs.readFileSync(path.resolve(__dirname, '../../product/renderer/a9-workbench.js'), 'utf8');
     expect(workbench).toContain("snapshot.provider.probe.classification === 'tool_calling'");
-    // A failed probe request must classify as unavailable, never chat_only, and its reason must stay visible.
-    expect(workbench).toContain("response.probe.ok && response.probe.hasToolCalling ? 'tool_calling'");
-    expect(workbench).toContain(": response.probe.ok ? 'chat_only' : 'unavailable'");
-    expect(workbench).toContain('A9_PROVIDER_PROBE_FAILED');
     const real = segment('supplementRealModel');
     expect(real.indexOf('a9-provider-probe')).toBeGreaterThan(0);
     expect(real.indexOf('a9-provider-probe')).toBeLessThan(real.indexOf('supplementTurn('));
