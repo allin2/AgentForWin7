@@ -41,7 +41,7 @@ import {
 } from './a9-question';
 import { assembleWithinBudget } from './a9-context-budget';
 
-const DEFAULT_CONTEXT_BUDGET_CHARS = 96_000;
+const DEFAULT_CONTEXT_BUDGET_CHARS = 400_000;
 function isContextOverflowError(error: any): boolean {
   return (error?.statusCode === 400 || error?.statusCode === 413)
     && /context_length_exceeded|maximum context length|too many tokens|prompt is too long/i.test(String(error?.message || ''));

@@ -35,7 +35,7 @@ describe('A9-26 persisted request budget', () => {
     const env = makeRuntimeWithBudget(budget);
     try {
       const snapshot = env.runtime.getSnapshot();
-      expect(snapshot.contextWindow.budgetChars).toBe(96_000);
+      expect(snapshot.contextWindow.budgetChars).toBe(400_000);
       expect(snapshot.contextBudgetDiagnostics.code).toBe('A9_CONTEXT_BUDGET_INVALID');
     } finally { env.runtime.shutdown(); fs.rmSync(env.root, { recursive: true, force: true }); }
   });

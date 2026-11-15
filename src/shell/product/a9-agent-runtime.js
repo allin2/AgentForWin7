@@ -600,7 +600,7 @@ function createA9AgentRuntime(options) {
 
   // ----- Provider（R4：非秘密配置版本化持久化；秘密仅 DPAPI；未配置即拒绝执行） -----
   const PROVIDER_CONFIG_SCHEMA_VERSION = 1;
-  const DEFAULT_CONTEXT_BUDGET_CHARS = 96_000;
+  const DEFAULT_CONTEXT_BUDGET_CHARS = 400_000;
   const providerConfigPath = path.join(dataRoot, 'a9-provider-config.v1.json');
 
   // DPAPI 不可用时降级为仅内存（vault 构造抛错 → 捕获），不另造明文凭据文件。
@@ -830,7 +830,7 @@ function createA9AgentRuntime(options) {
       }
       if (doc.contextBudgetChars !== undefined && (!Number.isSafeInteger(doc.contextBudgetChars)
         || doc.contextBudgetChars < 16_000 || doc.contextBudgetChars > 1_000_000)) {
-        contextBudgetDiagnostics = { code: 'A9_CONTEXT_BUDGET_INVALID', detail: '已保存的上下文预算无效，使用默认 96000 字符' };
+        contextBudgetDiagnostics = { code: 'A9_CONTEXT_BUDGET_INVALID', detail: `已保存的上下文预算无效，使用默认 ${DEFAULT_CONTEXT_BUDGET_CHARS} 字符` };
         doc.contextBudgetChars = DEFAULT_CONTEXT_BUDGET_CHARS;
       }
       return doc;
@@ -2031,6 +2031,18 @@ function createA9AgentRuntime(options) {
       }
     }
 
+    // 上下文预算：保留旧值或默认，除非显式提供新值。
+    let contextBudgetChars = providerConfig?.contextBudgetChars ?? DEFAULT_CONTEXT_BUDGET_CHARS;
+    if (hasInput('contextBudgetChars')) {
+      const budgetValue = values.contextBudgetChars;
+      if (!Number.isSafeInteger(budgetValue) || budgetValue < 16_000 || budgetValue > 1_000_000) {
+        const error = new Error('A9_PROVIDER_CONFIG_INVALID: contextBudgetChars 必须是 16000～1000000 的整数');
+        error.code = 'A9_PROVIDER_CONFIG_INVALID';
+        throw error;
+      }
+      contextBudgetChars = budgetValue;
+    }
+
     // Register newly supplied secrets before checking the fields documented as
     // non-secret. Reject the config instead of persisting a redacted-but-invalid
     // endpoint or model identity.
@@ -2112,7 +2124,7 @@ function createA9AgentRuntime(options) {
       try { if (secretsVault) secretsVault.clearApiKey(); } catch (_err) { /* best effort */ }
     }
 
-    const retainedContextBudgetChars = providerConfig?.contextBudgetChars ?? DEFAULT_CONTEXT_BUDGET_CHARS;
+    const retainedContextBudgetChars = contextBudgetChars;
     providerConfig = {
       baseUrl: validatedBaseUrl,
       model: values.model.trim(),
