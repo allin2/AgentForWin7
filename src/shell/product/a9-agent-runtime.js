@@ -833,6 +833,10 @@ function createA9AgentRuntime(options) {
         contextBudgetDiagnostics = { code: 'A9_CONTEXT_BUDGET_INVALID', detail: `已保存的上下文预算无效，使用默认 ${DEFAULT_CONTEXT_BUDGET_CHARS} 字符` };
         doc.contextBudgetChars = DEFAULT_CONTEXT_BUDGET_CHARS;
       }
+      if (doc.composerMaxChars !== undefined && (!Number.isSafeInteger(doc.composerMaxChars)
+        || doc.composerMaxChars < 1_000 || doc.composerMaxChars > 1_000_000)) doc.composerMaxChars = 128_000;
+      if (doc.thinkingEnabled !== undefined && typeof doc.thinkingEnabled !== 'boolean') throw Object.assign(new Error('A9_PROVIDER_CONFIG_INVALID: thinkingEnabled'), { code: 'A9_PROVIDER_CONFIG_INVALID' });
+      if (doc.reasoningEffort !== undefined && !['low', 'medium', 'high'].includes(doc.reasoningEffort)) throw Object.assign(new Error('A9_PROVIDER_CONFIG_INVALID: reasoningEffort'), { code: 'A9_PROVIDER_CONFIG_INVALID' });
       return doc;
     } catch (err) {
       providerDiagnostics = {
@@ -891,6 +895,8 @@ function createA9AgentRuntime(options) {
       ...(memoryApiKey ? { apiKey: memoryApiKey } : {}),
       ...(Object.keys(headers).length > 0 ? { customHeaders: headers } : {}),
       ...(providerConfig.caBundle ? { tlsConfig: { caBundle: providerConfig.caBundle, verifyCertificate: true } } : {}),
+      ...(providerConfig.thinkingEnabled !== undefined ? { thinkingEnabled: providerConfig.thinkingEnabled } : {}),
+      ...(providerConfig.reasoningEffort ? { reasoningEffort: providerConfig.reasoningEffort } : {}),
       ...(proxy ? { proxyConfig: proxy } : {}),
       ...(probeMode ? {
         // 探测使用短超时/低重试：不可达服务快速分类，不阻塞保存流程。
@@ -919,6 +925,9 @@ function createA9AgentRuntime(options) {
       imageInputEnabled: doc.imageInputEnabled === true,
       customHeaderNames: doc.customHeaderNames || [],
       contextBudgetChars: doc.contextBudgetChars ?? DEFAULT_CONTEXT_BUDGET_CHARS,
+      composerMaxChars: doc.composerMaxChars ?? 128_000,
+      ...(doc.thinkingEnabled !== undefined ? { thinkingEnabled: doc.thinkingEnabled } : {}),
+      ...(doc.reasoningEffort ? { reasoningEffort: doc.reasoningEffort } : {}),
       ...(doc.caBundle ? { caBundle: doc.caBundle } : {}),
       ...(doc.proxy ? { proxy: doc.proxy } : {}),
       keyRemembered: doc.keyRemembered === true,
@@ -1699,6 +1708,8 @@ function createA9AgentRuntime(options) {
         }),
         externalChangePort: workspaceService,
         contextBudgetChars: providerConfig?.contextBudgetChars ?? DEFAULT_CONTEXT_BUDGET_CHARS,
+        thinkingEnabled: providerConfig?.thinkingEnabled,
+        reasoningEffort: providerConfig?.reasoningEffort,
         redactText: redactSecrets,
         loadProjectInstructions: () => modules.core.loadProjectInstructions(workspaceRoot, {
           containsSensitiveData: containsSensitiveProjectInstructionData,
@@ -2042,6 +2053,22 @@ function createA9AgentRuntime(options) {
       }
       contextBudgetChars = budgetValue;
     }
+    let composerMaxChars = providerConfig?.composerMaxChars ?? 128_000;
+    if (hasInput('composerMaxChars')) {
+      const value = values.composerMaxChars;
+      if (!Number.isSafeInteger(value) || value < 1_000 || value > 1_000_000) throw Object.assign(new Error('A9_PROVIDER_CONFIG_INVALID: composerMaxChars 必须是 1000～1000000 的整数'), { code: 'A9_PROVIDER_CONFIG_INVALID' });
+      composerMaxChars = value;
+    }
+    let thinkingEnabled = providerConfig?.thinkingEnabled;
+    if (hasInput('thinkingEnabled')) {
+      if (typeof values.thinkingEnabled !== 'boolean') throw Object.assign(new Error('A9_PROVIDER_CONFIG_INVALID: thinkingEnabled 必须是 boolean'), { code: 'A9_PROVIDER_CONFIG_INVALID' });
+      thinkingEnabled = values.thinkingEnabled;
+    }
+    let reasoningEffort = providerConfig?.reasoningEffort;
+    if (hasInput('reasoningEffort')) {
+      if (!['low', 'medium', 'high'].includes(values.reasoningEffort)) throw Object.assign(new Error('A9_PROVIDER_CONFIG_INVALID: reasoningEffort 必须是 low/medium/high'), { code: 'A9_PROVIDER_CONFIG_INVALID' });
+      reasoningEffort = values.reasoningEffort;
+    }
 
     // Register newly supplied secrets before checking the fields documented as
     // non-secret. Reject the config instead of persisting a redacted-but-invalid
@@ -2131,6 +2158,9 @@ function createA9AgentRuntime(options) {
       imageInputEnabled,
       customHeaderNames,
       contextBudgetChars: retainedContextBudgetChars,
+      composerMaxChars,
+      ...(thinkingEnabled !== undefined ? { thinkingEnabled } : {}),
+      ...(reasoningEffort ? { reasoningEffort } : {}),
       ...(caBundle ? { caBundle } : {}),
       ...(proxyConfig ? { proxy: proxyConfig } : {}),
     };
@@ -2201,6 +2231,9 @@ function createA9AgentRuntime(options) {
       customHeaderNames,
       imageInputEnabled: providerConfig.imageInputEnabled,
       contextBudgetChars: providerConfig.contextBudgetChars,
+      composerMaxChars: providerConfig.composerMaxChars,
+      ...(providerConfig.thinkingEnabled !== undefined ? { thinkingEnabled: providerConfig.thinkingEnabled } : {}),
+      ...(providerConfig.reasoningEffort ? { reasoningEffort: providerConfig.reasoningEffort } : {}),
       ...(providerConfig.caBundle ? { caBundle: providerConfig.caBundle } : {}),
       ...(providerConfig.proxy ? { proxy: providerConfig.proxy } : {}),
       // F4：keyRemembered=true 仅表示秘密（API Key 或 Header/代理密码）已成功经 DPAPI
@@ -3072,6 +3105,10 @@ function createA9AgentRuntime(options) {
           configured: true,
           baseUrl: providerConfig.baseUrl,
           model: providerConfig.model,
+          contextBudgetChars: providerConfig.contextBudgetChars,
+          composerMaxChars: providerConfig.composerMaxChars,
+          ...(providerConfig.thinkingEnabled !== undefined ? { thinkingEnabled: providerConfig.thinkingEnabled } : {}),
+          ...(providerConfig.reasoningEffort ? { reasoningEffort: providerConfig.reasoningEffort } : {}),
           imageInputEnabled: providerConfig.imageInputEnabled === true,
           imageInputAvailable: providerConfig.imageInputEnabled === true && Boolean(config.nativeImage),
           imageInputEvidence: 'user_declared_not_probed',

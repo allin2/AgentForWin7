@@ -112,6 +112,8 @@ export interface A9ModelPort {
       tools?: Array<{ name: string; description: string; parameters: Record<string, unknown> }>;
       toolChoice?: 'auto' | 'none';
       temperature?: number;
+      thinkingEnabled?: boolean;
+      reasoningEffort?: 'low' | 'medium' | 'high';
     },
     onChunk: (chunk: { content: string; index: number }) => void,
     options?: { signal?: AbortSignal },
@@ -324,6 +326,8 @@ export interface A9AgentLoopConfig {
   loadProjectInstructions?: () => ProjectInstructionResult;
   loadSkillCatalog?: () => SkillCatalog;
   contextBudgetChars?: number;
+  thinkingEnabled?: boolean;
+  reasoningEffort?: 'low' | 'medium' | 'high';
   environmentFacts?: string | (() => string);
   readImage?: (target: string, turnId: string, signal?: AbortSignal) => Promise<{
     metadata: Record<string, unknown>; image: { mimeType: 'image/png'; data: string };
@@ -1000,6 +1004,8 @@ export class A9AgentLoop {
               }] : assembled.messages,
               tools: openAITools,
               toolChoice: 'auto',
+              ...(this.config.thinkingEnabled !== undefined ? { thinkingEnabled: this.config.thinkingEnabled } : {}),
+              ...(this.config.reasoningEffort ? { reasoningEffort: this.config.reasoningEffort } : {}),
             },
             (chunk) => {
               // C-1：经 onChunk 到达的内容字节（增量，每字节只计一次）。

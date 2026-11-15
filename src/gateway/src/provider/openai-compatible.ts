@@ -104,6 +104,8 @@ export interface OpenAIModelRequest {
   maxTokens?: number;
   temperature?: number;
   stream?: boolean;
+  thinkingEnabled?: boolean;
+  reasoningEffort?: 'low' | 'medium' | 'high';
 }
 
 export interface OpenAIProviderConfig {
@@ -124,6 +126,8 @@ export interface OpenAIProviderConfig {
   totalTimeoutMs?: number;
   /** 无数据超时：持续收不到 SSE 字节即取消请求。 */
   noDataTimeoutMs?: number;
+  thinkingEnabled?: boolean;
+  reasoningEffort?: 'low' | 'medium' | 'high';
 }
 
 export interface OpenAIRequestOptions {
@@ -394,6 +398,8 @@ export class OpenAICompatibleProvider {
         tool_choice: request.toolChoice || 'auto',
       } : {}),
       stream: true,
+      ...((request.thinkingEnabled !== undefined || this.config.thinkingEnabled !== undefined) ? { thinking: { type: (request.thinkingEnabled ?? this.config.thinkingEnabled) ? 'enabled' : 'disabled' } } : {}),
+      ...((request.reasoningEffort || this.config.reasoningEffort) ? { reasoning_effort: request.reasoningEffort || this.config.reasoningEffort } : {}),
       ...(request.temperature !== undefined ? { temperature: request.temperature } : {}),
       ...(request.maxTokens !== undefined ? { max_tokens: request.maxTokens } : {}),
     });

@@ -7,6 +7,8 @@
 历史合同保留原状态与未关闭义务；不构成当前实施授权，也不改判原候选。
 任务书路径保持稳定，不通过移动文件表达生命周期。
 
+本轮 A9 Settings 设置项（负责人任务书，基线 0153b394）：`APPROVED_FOR_IMPLEMENTATION`，实际分支 `box/a9-settings`。交付上下文预算、输入框上限、thinking 模式与思考强度设置及其 Provider/Core/Gateway 配置链路；保持 schemaVersion、不改专用 DeepSeek Provider、不新增依赖。必要验证与停止条件见 `A9_SETTINGS_CONTEXT_COMPOSER_THINKING.md`，证据目录为 `outputs/wp-a9-settings/a9-settings/`。
+
 本轮测试临时目录修复（负责人回复“再次进行检查，没有问题的话按照推荐进行修改”）：
 `APPROVED_FOR_IMPLEMENTATION`，实际分支 `main`，基线 `7b820785…` 加既有工作区修改，记录见
 [ENGINEERING_05](ENGINEERING_05_ALPHA_DELIVERY.md#2026-11-08-测试临时目录生命周期修复)。
@@ -43,6 +45,7 @@ A9-64 只固定 `923bf875…` 的独立审查输入并登记任务；审查由�
 
 | 任务书 | 类型 | 状态 | Phase-Gate | Win7 验证 |
 |---|---|---|---|---|
+| [A9 Settings：上下文预算、输入框上限与 thinking 设置](A9_SETTINGS_CONTEXT_COMPOSER_THINKING.md) | PRODUCT_EXPERIENCE | APPROVED_FOR_IMPLEMENTATION | A9_SETTINGS_IMPLEMENTATION | NOT_PERFORMED |
 | [A9-65（已合入本地main；开发机收口完成，Win7未执行）](A9_65_VISIBLE_WAITS_AND_DIAGNOSTICS.md) | PRODUCT_RELIABILITY_HARDENING | APPROVED_FOR_IMPLEMENTATION | A9_65_DEVELOPER_VERIFIED | NOT_PERFORMED |
 | [A9-64（已合入本地main；开发机收口完成，Win7未执行）](A9_64_SEARCH_LIST_RESPONSIVENESS.md) | PRODUCT_RELIABILITY_HARDENING | APPROVED_FOR_IMPLEMENTATION | A9_64_DEVELOPER_VERIFIED | NOT_PERFORMED |
 | [A9-63（fail-loud 批次 1：清理期限与持久化、Git 投影诊断；开发机交付完成）](A9_63_FAIL_LOUD_BATCH1.md) | Reliability Hardening | APPROVED_FOR_IMPLEMENTATION | A9_63_DEVELOPER_VERIFIED | NOT_PERFORMED |

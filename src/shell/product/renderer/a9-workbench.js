@@ -2885,6 +2885,8 @@
       el('a9-shell-version').value = '';
     }
     const provider = snapshot.provider || {};
+    const promptInput = el('task-prompt');
+    if (promptInput) promptInput.maxLength = Number.isSafeInteger(provider.composerMaxChars) ? provider.composerMaxChars : 128000;
     text('a9-provider-value', provider.configured ? `${provider.model} @ ${provider.baseUrl}` : '未配置');
     // A9-19 L02：Provider 分类属于诊断信息；探测通过时头部不再显示，异常时显示可操作的中文提示。
     const providerHealthy = provider.configured && provider.probe && provider.probe.classification === 'tool_calling';
@@ -2903,6 +2905,10 @@
       configured: provider.configured === true,
       baseUrl: provider.baseUrl || '',
       model: provider.model || '',
+      contextBudgetChars: provider.contextBudgetChars || snapshot.contextWindow && snapshot.contextWindow.budgetChars || 400000,
+      composerMaxChars: provider.composerMaxChars || 128000,
+      thinkingEnabled: provider.thinkingEnabled,
+      reasoningEffort: provider.reasoningEffort || 'medium',
       imageInputEnabled: provider.imageInputEnabled === true,
       remembered: Boolean(provider.apiKey && provider.apiKey.remembered),
       caBundle: provider.caBundle || '',
@@ -2913,6 +2919,13 @@
     if (state.providerHydratedSignature !== providerHydratedSignature) {
       el('a9-provider-url').value = provider.baseUrl || '';
       el('a9-provider-model').value = provider.model || '';
+      el('a9-provider-budget').value = String(provider.contextBudgetChars || snapshot.contextWindow && snapshot.contextWindow.budgetChars || 400000);
+      el('a9-provider-composer-max').value = String(provider.composerMaxChars || 128000);
+      const modelUsesThinkingByDefault = String(provider.model || '').toLowerCase().includes('deepseek');
+      const thinkingMatchesAuto = provider.thinkingEnabled === undefined
+        || provider.thinkingEnabled === modelUsesThinkingByDefault;
+      el('a9-provider-thinking').value = thinkingMatchesAuto ? 'auto' : provider.thinkingEnabled ? 'enabled' : 'disabled';
+      el('a9-provider-effort').value = provider.reasoningEffort || 'auto';
       el('a9-provider-images').checked = provider.imageInputEnabled === true;
       el('a9-provider-remember').checked = Boolean(provider.apiKey && provider.apiKey.remembered);
       el('a9-provider-ca').value = provider.caBundle || '';
@@ -4308,6 +4321,16 @@
       rememberApiKey: el('a9-provider-remember').checked,
       imageInputEnabled: el('a9-provider-images').checked,
     };
+    const budgetText = el('a9-provider-budget').value;
+    const budget = Number(budgetText);
+    if (budgetText.trim() && Number.isSafeInteger(budget) && budget >= 16000 && budget <= 1000000) values.contextBudgetChars = budget;
+    const composerText = el('a9-provider-composer-max').value;
+    const composerMaxChars = Number(composerText);
+    if (composerText.trim() && Number.isSafeInteger(composerMaxChars) && composerMaxChars >= 1000 && composerMaxChars <= 1000000) values.composerMaxChars = composerMaxChars;
+    const thinkingMode = el('a9-provider-thinking').value;
+    if (thinkingMode !== 'auto') values.thinkingEnabled = thinkingMode === 'enabled';
+    const effortMode = el('a9-provider-effort').value;
+    if (effortMode !== 'auto') values.reasoningEffort = effortMode;
     const apiKey = el('a9-provider-key').value;
     if (apiKey) values.apiKey = apiKey;
     const caBundle = el('a9-provider-ca').value.trim();

@@ -297,4 +297,68 @@ describe('A9-04: OpenAICompatibleProvider', () => {
       ),
     ).rejects.toThrow(/status 401/);
   });
+
+  it('does not emit thinking or reasoning_effort when unconfigured (backward compat)', async () => {
+    const provider = new OpenAICompatibleProvider({
+      baseUrl,
+      model: 'test-model',
+    });
+
+    await provider.sendStreamRequest(
+      {
+        id: 'req-backward-compat',
+        model: 'test-model',
+        messages: [{ role: 'user', content: 'hello' }],
+      },
+      () => {},
+    );
+
+    const last = requestBodies[requestBodies.length - 1];
+    expect(last.model).toBe('test-model');
+    expect(last.thinking).toBeUndefined();
+    expect(last.reasoning_effort).toBeUndefined();
+  });
+
+  it('emits thinking and reasoning_effort when explicitly configured', async () => {
+    const provider = new OpenAICompatibleProvider({
+      baseUrl,
+      model: 'test-model',
+    });
+
+    await provider.sendStreamRequest(
+      {
+        id: 'req-thinking',
+        model: 'test-model',
+        messages: [{ role: 'user', content: 'hello' }],
+        thinkingEnabled: true,
+        reasoningEffort: 'high',
+      },
+      () => {},
+    );
+
+    const last = requestBodies[requestBodies.length - 1];
+    expect(last.thinking).toEqual({ type: 'enabled' });
+    expect(last.reasoning_effort).toBe('high');
+  });
+
+  it('emits thinking disabled when explicitly disabled', async () => {
+    const provider = new OpenAICompatibleProvider({
+      baseUrl,
+      model: 'test-model',
+    });
+
+    await provider.sendStreamRequest(
+      {
+        id: 'req-thinking-disabled',
+        model: 'test-model',
+        messages: [{ role: 'user', content: 'hello' }],
+        thinkingEnabled: false,
+      },
+      () => {},
+    );
+
+    const last = requestBodies[requestBodies.length - 1];
+    expect(last.thinking).toEqual({ type: 'disabled' });
+    expect(last.reasoning_effort).toBeUndefined();
+  });
 });
