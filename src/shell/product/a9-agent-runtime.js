@@ -2504,6 +2504,13 @@ function createA9AgentRuntime(options) {
 
   async function continueTask(input) {
     const sessionId = a9SessionId;
+    // A9-68: continueTask 是恢复动作本身——对账就是为它准备，对账完成后恢复（有限等待，不 PENDING 循环）。
+    if (checkpointRecoveryFatal) {
+      return { ok: false, error: {
+        code: 'A9_CHECKPOINT_RECONCILIATION_FAILED',
+        message: '崩溃恢复事实无法与 SQLite 对账，已停止后续自动执行',
+      } };
+    }
     if (checkpointRecoveryPending) await checkpointRecoveryReady;
     let ownedController = null;
     let lifecycle = null;
@@ -2603,6 +2610,8 @@ function createA9AgentRuntime(options) {
 
   async function submitTurn(prompt, options = {}) {
     const sessionId = a9SessionId;
+    // 对账完成前 submitTurn 等待（有限：对账有界完成）；shutdown 由 assertOperationScope 优先拦截。
+    // A9-68 目标「打开即用」由 SNAPSHOT_GET 分页异步保证；此处保留 shutdown/scope 安全语义。
     if (checkpointRecoveryPending) await checkpointRecoveryReady;
     try { assertOperationScope(sessionId); } catch (error) { return { ok: false, error: presentError(error) }; }
     if (activeConversation.state === 'archived') return { ok: false, error: { code: 'A9_CONVERSATION_ARCHIVED' } };
