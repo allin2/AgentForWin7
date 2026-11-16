@@ -313,6 +313,23 @@ export class OfficeBatchService {
     if (action.kind !== 'skip_conflict') absent(this.filePath(action.destination!, true), guard);
   }
 
+  /** Read-only host preview, regenerated before approval and on resume. */
+  async prepare(options: Omit<OfficeBatchExecuteOptions, 'approvalId'>): Promise<OfficeBatchApprovalBinding> {
+    const stored = this.plans.get(options.planId);
+    if (!stored) fail('BATCH_PLAN_UNKNOWN');
+    if (stored.used) fail('BATCH_PLAN_CONSUMED');
+    if (identityKey(options.identity) !== stored.key) fail('BATCH_IDENTITY_MISMATCH');
+    if (!Array.isArray(options.selectedActionIds) || !options.selectedActionIds.length ||
+        new Set(options.selectedActionIds).size !== options.selectedActionIds.length ||
+        options.selectedActionIds.some(id => !stored.plan.actions.some(a => a.actionId === id))) fail('BATCH_SELECTION_INVALID');
+    const selected = stored.plan.actions.filter(a => options.selectedActionIds.includes(a.actionId));
+    stored.guard.assertAnchors();
+    for (const action of selected) await this.verify(action, stored.guard, options.signal);
+    const base = { schemaVersion: 1 as const, planId: stored.plan.planId, version: 1 as const,
+      identity: stored.plan.identity, workspaceRoot: this.root, selectedActions: selected };
+    return freeze({ ...base, bindingSha256: digest(JSON.stringify(base)) });
+  }
+
   async execute(options: OfficeBatchExecuteOptions): Promise<OfficeBatchResult> {
     if (this.active) fail('BATCH_BUSY');
     const stored = this.plans.get(options.planId);

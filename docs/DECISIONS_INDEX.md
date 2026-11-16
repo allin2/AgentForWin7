@@ -340,3 +340,5 @@
 | ADR-0334 | A9-70 办公批处理、模板与只读邮件工具边界 | Accepted |
 | ADR-0335 | A9-70 双工作区配对转移与重新批准撤销 | Accepted |
 | ADR-0336 | A9-70 办公纯 JS 依赖闭包准入 | Accepted |
+| ADR-0337 | A9-70 整理确认卡选中清单修订 | Accepted |
+| ADR-0338 | A9-70 配对 checkpoint 的旧版拒读标记 | Accepted |

@@ -130,6 +130,9 @@ function createA9Api(scope) {
     continueTask: (conversationId, taskId, interruptedTurnId, recoveryRevision) => boundRequest('a9.task.continue', {
       conversationId, taskId, interruptedTurnId, recoveryRevision,
     }),
+    selectOfficeActions: (approvalId, bindingDigest, selectedActionIds, conversationId, taskId, turnId) => boundRequest('a9.approval.select', {
+      approvalId, bindingDigest, selectedActionIds, conversationId, taskId, turnId,
+    }),
     resumeApproval: (approvalId, decision, bindingDigest, conversationId, taskId, turnId) => boundRequest('a9.turn.resumeApproval', {
       approvalId, decision, bindingDigest, conversationId, taskId, turnId,
     }),

@@ -28,6 +28,7 @@ const A9_ACTIONS = Object.freeze({
   TURN_SUBMIT: 'a9.turn.submit',
   TASK_CONTINUE: 'a9.task.continue',
   TURN_RESUME_APPROVAL: 'a9.turn.resumeApproval',
+  OFFICE_SELECT: 'a9.approval.select',
   QUESTION_REPLY: 'a9.question.reply',
   TURN_STOP: 'a9.turn.stop',
   MANAGED_DISMISS_RECOVERED: 'a9.managed.dismissRecovered',
@@ -375,6 +376,16 @@ function createA9ProductRequestHandler(options) {
         case A9_ACTIONS.TURN_SUBMIT: {
           exactObject(payload, ['prompt'], 'A9_PAYLOAD_INVALID');
           return await runtime.submitTurn(payload.prompt);
+        }
+        case A9_ACTIONS.OFFICE_SELECT: {
+          exactObject(payload, ['approvalId', 'bindingDigest', 'conversationId', 'taskId', 'turnId', 'selectedActionIds'], 'A9_PAYLOAD_INVALID');
+          if (!['approvalId', 'bindingDigest', 'conversationId', 'taskId', 'turnId'].every(k => typeof payload[k] === 'string' && payload[k].length > 0 && payload[k].length <= 256) ||
+              !Array.isArray(payload.selectedActionIds) || payload.selectedActionIds.length < 1 || payload.selectedActionIds.length > 100 ||
+              new Set(payload.selectedActionIds).size !== payload.selectedActionIds.length ||
+              payload.selectedActionIds.some(id => typeof id !== 'string' || !/^a[0-9]{3}$/.test(id))) {
+            throw Object.assign(new Error('A9_OFFICE_SELECTION_INVALID'), { code: 'A9_OFFICE_SELECTION_INVALID' });
+          }
+          return await runtime.selectOfficeActions(payload);
         }
         case A9_ACTIONS.TURN_RESUME_APPROVAL: {
           exactObject(payload, ['approvalId', 'decision', 'bindingDigest', 'conversationId', 'taskId', 'turnId'], 'A9_PAYLOAD_INVALID');

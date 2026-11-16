@@ -327,6 +327,10 @@ export class A9WorkspaceService {
     return this.officeBatch.execute(options);
   }
 
+  prepareOrganize(options: Omit<OfficeBatchExecuteOptions, 'approvalId'>): ReturnType<OfficeBatchService['prepare']> {
+    return this.officeBatch.prepare(options);
+  }
+
   // -------------------------------------------------------------------------
   // 路径与基线
   // -------------------------------------------------------------------------

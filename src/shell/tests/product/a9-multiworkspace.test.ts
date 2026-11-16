@@ -16,7 +16,7 @@ async function until(check: () => boolean) {
   }
 }
 
-async function fixture() {
+async function fixture(options: { officeRoute?: (request: any) => any } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'win7-a9-52-'));
   const a = path.join(root, 'A 中文'), b = path.join(root, 'B space');
   fs.mkdirSync(a); fs.mkdirSync(b);
@@ -36,6 +36,10 @@ async function fixture() {
         send(res, { tool_calls: [{ index: 0, id: 'probe', function: { name: 'probe_test_echo', arguments: '{"message":"probe_ok"}' } }] }, 'tool_calls'); return;
       }
       requests.push(data);
+      if (options.officeRoute) {
+        const delta = options.officeRoute(data);
+        send(res, delta, delta.tool_calls ? 'tool_calls' : 'stop'); return;
+      }
       const prompt = data.messages.filter((m: any) => m.role === 'user').pop().content;
       if (!data.messages.some((m: any) => m.role === 'tool')) held.set(prompt, res);
       else send(res, { content: 'done' });
@@ -303,4 +307,76 @@ describe('A9-53 Windows workspace casing on reopen', () => {
     expect(displayCasing('c:\\b space', 'win32', () => { throw new Error('EPERM'); })).toBe('c:\\b space');
     expect(displayCasing('/tmp/b space', 'darwin', () => '/private/tmp/b space')).toBe('/tmp/b space');
   });
+});
+
+
+describe('A9-70 registered paired transfer product chain', () => {
+  it('requires fresh approvals, protects the idle target, restarts and undoes exact bytes in two registered roots', async () => {
+    let targetId = '', sourceId = '', transferId = '';
+    const f = await fixture({ officeRoute(data) {
+      const lastUser = data.messages.map((m: any) => m.role).lastIndexOf('user');
+      const prompt = data.messages[lastUser].content;
+      const tools = data.messages.slice(lastUser + 1).filter((m: any) => m.role === 'tool');
+      const call = (name: string, request: any) => ({ tool_calls: [{ index: 0, id: 'office-' + tools.length,
+        function: { name, arguments: JSON.stringify({ request: JSON.stringify(request) }) } }] });
+      if (!tools.length) return prompt === 'paired move'
+        ? call('transfer_plan', { source: 'note.txt', destination: '来自 A.txt', targetWorkspaceId: targetId })
+        : call('transfer_undo_plan', { transferId, sourceWorkspaceId: sourceId, targetWorkspaceId: targetId });
+      let result: any; try { result = JSON.parse(tools[tools.length - 1].content); } catch (_) { return { content: 'tool failed' }; }
+      if (result.planId) return call(prompt === 'paired move' ? 'transfer_execute' : 'transfer_undo', { planId: result.planId });
+      if (result.transferId) transferId = result.transferId;
+      return { content: 'done' };
+    } });
+    try {
+      const a = f.registry.getActive(), b = f.registry.open(f.b); sourceId = a.workspaceId; targetId = b.workspaceId;
+      b.runtime.setMode('full_access'); await Promise.all([a.runtime.whenReady(), b.runtime.whenReady()]);
+      const bytes = Buffer.alloc(64 * 1024, 0x7a); fs.writeFileSync(path.join(f.a, 'note.txt'), bytes);
+      const preview = await a.runtime.submitTurn('paired move');
+      expect(preview.result.outcome).toBe('needs_approval'); expect(fs.readFileSync(path.join(f.a, 'note.txt'))).toEqual(bytes);
+      expect(fs.existsSync(path.join(f.b, '来自 A.txt'))).toBe(false);
+      let earlyResult: any;
+      const approved = a.runtime.resumeApproval({ ...preview.result.pendingApproval, decision: 'approved' }).then((value: any) => { earlyResult = value; return value; });
+      let reserved = false;
+      // Observe the actual publish yield, without relying on a slow large-file fixture.
+      for (let i = 0; i < 100 && !reserved && !earlyResult; i++) {
+        await new Promise<void>(resolve => setImmediate(resolve));
+        reserved = String(b.runtime.canLeaveWorkspace().reason).includes('配对转移');
+      }
+      if (!reserved) throw new Error('TRANSFER_NOT_RESERVED: ' + JSON.stringify(earlyResult));
+      expect(await b.runtime.submitTurn('must not start')).toMatchObject({ ok: false, error: { code: 'A9_TRANSFER_BUSY' } });
+      await expect(f.registry.close(targetId)).rejects.toMatchObject({ code: 'A9_WORKSPACE_UNAVAILABLE' });
+      expect((await approved).ok).toBe(true);
+      expect(transferId).toMatch(/^transfer-/);
+      expect(fs.existsSync(path.join(f.a, 'note.txt'))).toBe(false); expect(fs.readFileSync(path.join(f.b, '来自 A.txt'))).toEqual(bytes);
+      expect((await a.runtime.undoTurn(preview.result.turnId)).outcome.errors).toEqual(['A9_TRANSFER_PAIRED_UNDO_REQUIRED']);
+      await f.registry.close(sourceId); await f.registry.close(targetId);
+      const reopened = f.registry.activate(f.a), reopenedB = f.registry.open(f.b);
+      await Promise.all([reopened.runtime.whenReady(), reopenedB.runtime.whenReady()]);
+      const undo = await reopened.runtime.submitTurn('paired undo'); expect(undo.result.outcome).toBe('needs_approval');
+      expect(fs.existsSync(path.join(f.a, 'note.txt'))).toBe(false);
+      const response = await reopened.runtime.resumeApproval({ ...undo.result.pendingApproval, decision: 'approved' });
+      expect(response.ok).toBe(true); expect(fs.readFileSync(path.join(f.a, 'note.txt'))).toEqual(bytes);
+      expect(fs.existsSync(path.join(f.b, '来自 A.txt'))).toBe(false);
+    } finally { await f.close(); }
+  });
+});
+
+test('A9-70 source Full Access cannot transfer into a registered Read Only workspace', async () => {
+  let targetId = '';
+  const f = await fixture({ officeRoute(data) {
+    const tools = data.messages.filter((m: any) => m.role === 'tool');
+    if (tools.length) return { content: 'refused' };
+    return { tool_calls: [{ index: 0, id: 'read-only-target', function: { name: 'transfer_plan', arguments: JSON.stringify({
+      request: JSON.stringify({ source: 'note.txt', destination: '拒绝.txt', targetWorkspaceId: targetId }),
+    }) } }] };
+  } });
+  try {
+    const source = f.registry.getActive(), target = f.registry.open(f.b); targetId = target.workspaceId;
+    target.runtime.setMode('read_only'); await Promise.all([source.runtime.whenReady(), target.runtime.whenReady()]);
+    const response = await source.runtime.submitTurn('目标只读');
+    expect(response.result.outcome).toBe('blocked');
+    expect(JSON.stringify(f.requests)).toContain('A9_TRANSFER_WORKSPACE_NOT_READY');
+    expect(fs.readFileSync(path.join(f.a, 'note.txt'), 'utf8')).toBe('preserved');
+    expect(fs.existsSync(path.join(f.b, '拒绝.txt'))).toBe(false);
+  } finally { await f.close(); }
 });

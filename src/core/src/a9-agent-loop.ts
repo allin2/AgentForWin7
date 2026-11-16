@@ -21,6 +21,7 @@ import {
 import { PolicyEngine } from './policy';
 import { ToolRegistry } from './tools';
 import { a9ToolSpecs, normalizeToolCallArgs } from './a9-tools';
+import { officeWorkflowToolSpecs, isOfficeRead, isOfficeWrite } from './a9-office-tools';
 import { buildA9SystemPrompt } from './system-prompt';
 import { LoopDetector, TurnOutcome } from './loop-control';
 import * as crypto from 'crypto';
@@ -337,6 +338,13 @@ export interface A9AgentLoopConfig {
     read(args: Record<string, any>, signal?: AbortSignal): Promise<any>;
     writeCopy(args: Record<string, any>, turnId: string, signal?: AbortSignal): Promise<any>;
   };
+  officeWorkflow?: {
+    supportedTools: readonly string[];
+    read(name: string, args: Record<string, unknown>, turnId: string, signal?: AbortSignal): Promise<unknown>;
+    prepare(name: string, args: Record<string, unknown>, turnId: string): Promise<{ summary: string; bindingSha256: string; selection?: A9OfficeSelection }>;
+    execute(name: string, args: Record<string, unknown>, turnId: string,
+      grant: { approvalId: string; bindingSha256: string }, signal?: AbortSignal): Promise<unknown>;
+  };
   targetOs?: string;
 }
 
@@ -344,6 +352,12 @@ export interface A9AgentLoopConfig {
  * 不可变审批对象（A9-01/R2）：挂起时生成并在等待用户前持久化；
  * 恢复执行前校验 approvalId 与 bindingDigest 与当前挂起调用完全一致。
  */
+export interface A9OfficeSelection {
+  schemaVersion: 1;
+  planId: string;
+  actions: Array<{ actionId: string; source: string; destination?: string; kind: string; sourceSha256: string }>;
+}
+
 export interface A9ApprovalRequest {
   approvalId: string;
   turnId: string;
@@ -354,6 +368,7 @@ export interface A9ApprovalRequest {
   summary: string;
   /** 绑定摘要：目标/参数/摘要变化即失效。 */
   bindingDigest: string;
+  officeSelection?: A9OfficeSelection;
   /** shell 工具为 git 操作时携带目标绑定。 */
   gitBinding?: GitCommandApprovalBinding;
   reason: string;
@@ -421,8 +436,10 @@ export function buildA9ApprovalRequest(
   toolName: string,
   args: Record<string, unknown>,
   reason: string,
+  preparedSummary?: string,
+  officeSelection?: A9OfficeSelection,
 ): A9ApprovalRequest {
-  const summary = buildApprovalSummary(toolName, args as Record<string, any>);
+  const summary = preparedSummary ?? buildApprovalSummary(toolName, args as Record<string, any>);
   const bindingDigest = computeApprovalBindingDigest(callId, toolName, args, summary);
   const gitBinding = (toolName === 'shell' || toolName === 'start_process') && typeof (args as any).command === 'string'
     ? classifyGitCommand((args as any).command)?.binding
@@ -435,6 +452,7 @@ export function buildA9ApprovalRequest(
     args,
     summary,
     bindingDigest,
+    ...(officeSelection ? { officeSelection: JSON.parse(JSON.stringify(officeSelection)) } : {}),
     ...(gitBinding ? { gitBinding } : {}),
     reason,
   };
@@ -567,6 +585,17 @@ export class A9AgentLoop {
     for (const spec of a9ToolSpecs(this.permissionMode, { images: Boolean(config.readImage), office: Boolean(config.office) })) {
       this.toolRegistry.register(spec);
     }
+    for (const spec of officeWorkflowToolSpecs(this.permissionMode, config.officeWorkflow?.supportedTools ?? [])) {
+      this.toolRegistry.register(spec);
+    }
+  }
+
+  private async officeApproval(name: string, args: Record<string, unknown>, turnId: string) {
+    if (!this.config.officeWorkflow || !isOfficeWrite(name)) throw new Error('A9_OFFICE_UNAVAILABLE');
+    const prepared = await this.config.officeWorkflow.prepare(name, args, turnId);
+    if (typeof prepared.summary !== 'string' || Buffer.byteLength(prepared.summary) > 128 * 1024 ||
+        !/^[a-f0-9]{64}$/.test(prepared.bindingSha256)) throw new Error('A9_OFFICE_APPROVAL_INVALID');
+    return { ...prepared, summary: `${name}\n${prepared.summary}\n绑定 SHA-256: ${prepared.bindingSha256}` };
   }
 
   getPermissionMode(): PermissionMode {
@@ -844,6 +873,31 @@ export class A9AgentLoop {
     );
   }
 
+  /** UI-only narrowing. Reissues a persisted pending approval; never executes. */
+  async selectOfficeActions(input: { approvalId: string; bindingDigest: string; selectedActionIds: string[] }, options: { signal?: AbortSignal } = {}): Promise<A9ApprovalRequest> {
+    const suspended = this.suspended;
+    if (!suspended || suspended.pending.name !== 'batch_organize' ||
+        input.approvalId !== suspended.approval.approvalId || input.bindingDigest !== suspended.approval.bindingDigest) {
+      throw new Error('A9_OFFICE_SELECTION_STALE');
+    }
+    if (!Array.isArray(input.selectedActionIds) || input.selectedActionIds.length < 1 || input.selectedActionIds.length > 100 ||
+        new Set(input.selectedActionIds).size !== input.selectedActionIds.length || input.selectedActionIds.some(id => typeof id !== 'string')) {
+      throw new Error('A9_OFFICE_SELECTION_INVALID');
+    }
+    const current = this.normalizePendingArgs(suspended.pending);
+    const request = JSON.parse(String(current.request));
+    if (!Array.isArray(request.selectedActionIds) || input.selectedActionIds.some(id => !request.selectedActionIds.includes(id))) {
+      throw new Error('A9_OFFICE_SELECTION_EXPANSION');
+    }
+    const args = { request: JSON.stringify({ planId: request.planId, selectedActionIds: [...input.selectedActionIds] }) };
+    const prepared = await this.officeApproval(suspended.pending.name, args, suspended.turnId);
+    if (this.suspended !== suspended || options.signal?.aborted) throw new Error('A9_OFFICE_SELECTION_STALE');
+    const approval = buildA9ApprovalRequest(suspended.turnId, suspended.pending.id, suspended.pending.name, args, suspended.reason, prepared.summary, prepared.selection);
+    if (this.config.onApprovalPending) await this.config.onApprovalPending(approval);
+    this.suspended = { ...suspended, pending: { ...suspended.pending, arguments: JSON.stringify(args) }, approval };
+    return approval;
+  }
+
   private async resumeAuditedApproval(input: A9ApprovalDecision, options: { signal?: AbortSignal }): Promise<A9TurnResult> {
     const suspended = this.suspended;
     if (!suspended) {
@@ -859,11 +913,17 @@ export class A9AgentLoop {
     // 与当前挂起调用重算摘要比对（与挂起时相同的规范化管道，含默认值填充）：
     // 目标、参数或摘要变化后旧审批失效。
     const currentArgs = this.normalizePendingArgs(suspended.pending);
+    // Denial must remain possible even if the source/plan has become stale.
+    const officePrepared = input.decision === 'approved' && isOfficeWrite(suspended.pending.name)
+      ? await this.officeApproval(suspended.pending.name, currentArgs, suspended.turnId) : undefined;
+    const currentSummary = isOfficeWrite(suspended.pending.name)
+      ? officePrepared?.summary ?? suspended.approval.summary
+      : buildApprovalSummary(suspended.pending.name, currentArgs as Record<string, any>);
     const currentDigest = computeApprovalBindingDigest(
       suspended.pending.id,
       suspended.pending.name,
       currentArgs,
-      buildApprovalSummary(suspended.pending.name, currentArgs as Record<string, any>),
+      currentSummary,
     );
     if (input.bindingDigest !== currentDigest || input.bindingDigest !== suspended.approval.bindingDigest) {
       throw new AgentError(AgentErrorCode.APPROVAL_INVALID, 'bindingDigest 与当前挂起调用不一致；审批已失效。', {}, '目标或参数已变化，重新审批新请求。');
@@ -893,7 +953,8 @@ export class A9AgentLoop {
     // execution. Use that signal for the approved call itself, not only for the
     // following model loop, otherwise Stop cannot reach a long-running command.
     const resumeSignal = options.signal ?? suspended.signal;
-    const result = await this.executeValidatedToolCall(turnId, suspended.pending, resumeSignal, suspended.stepCount);
+    const result = await this.executeValidatedToolCall(turnId, suspended.pending, resumeSignal, suspended.stepCount,
+      officePrepared ? { approvalId: input.approvalId, bindingSha256: officePrepared.bindingSha256 } : undefined);
     if (result.residueRisk) {
       return this.residueStop(turnId, suspended.stepCount, suspended.toolCallsExecuted, result.logPaths);
     }
@@ -1358,7 +1419,7 @@ export class A9AgentLoop {
 
       // A9-32: fresh policy/approval still applies after successful read-only recovery checks.
       if (this.recoveryCheck && (this.recoveryCheck.paths.size > 0 || this.recoveryCheck.opaque) &&
-          ['write','edit','copy','move','delete','shell','start_process','stop_process','document_write_copy'].includes(tc.name)) {
+          (['write','edit','copy','move','delete','shell','start_process','stop_process','document_write_copy'].includes(tc.name) || isOfficeWrite(tc.name))) {
         this.conversationHistory.push({ role: 'tool', toolCallId: tc.id, toolName: tc.name,
           content: 'A9_CONTINUE_READ_ONLY_CHECK_REQUIRED: prior side effects are result_unknown. Read the affected current files (or list current facts for an opaque operation) before proposing any new side effect. No prior tool or approval is authorized.' });
         continue;
@@ -1490,7 +1551,20 @@ export class A9AgentLoop {
 
       if (decision.verdict === PolicyVerdict.ASK) {
         const reason = decision.reason || 'Policy requires user approval for high impact operation';
-        const approval = buildA9ApprovalRequest(turnId, tc.id, tc.name, validatedCall.args, reason);
+        let preparedSummary: string | undefined;
+        let selection: A9OfficeSelection | undefined;
+        if (isOfficeWrite(tc.name)) {
+          try {
+            const prepared = await this.officeApproval(tc.name, validatedCall.args, turnId);
+            preparedSummary = prepared.summary; selection = prepared.selection;
+          }
+          catch (error: any) {
+            this.conversationHistory.push({ role: 'tool', toolCallId: tc.id, toolName: tc.name,
+              content: `Error: office preview rejected: ${String(error.code || error.message).slice(0, 200)}` });
+            continue;
+          }
+        }
+        const approval = buildA9ApprovalRequest(turnId, tc.id, tc.name, validatedCall.args, reason, preparedSummary, selection);
         this.emitEvent({
           type: 'approval_required',
           turnId,
@@ -1652,6 +1726,7 @@ export class A9AgentLoop {
     tc: A9ModelToolCall,
     signal: AbortSignal | undefined,
     step: number,
+    officeGrant?: { approvalId: string; bindingSha256: string },
   ): Promise<{ executed: boolean; result: string; residueRisk?: boolean; logPaths?: { stdout: string; stderr: string } }> {
     let parsedArgs: Record<string, unknown> = {};
     try {
@@ -1683,7 +1758,7 @@ export class A9AgentLoop {
     let logPaths: { stdout: string; stderr: string } | undefined;
     const isShellTool = tc.name === 'shell';
     try {
-      const outcome = await this.dispatchTool(tc.name, args, turnId, signal, tc.id);
+      const outcome = await this.dispatchTool(tc.name, args, turnId, signal, tc.id, officeGrant);
       if (tc.name === 'read_image') imageProjection = outcome.payload;
       // Edit previews expose surrounding file text; redact before JSON encoding,
       // truncation, model history and audit projection so split secrets cannot leak.
@@ -1778,7 +1853,7 @@ export class A9AgentLoop {
     }
 
     if (executed) {
-      if (this.permissionMode === PermissionMode.FULL_ACCESS && ['write', 'edit', 'copy', 'move', 'delete', 'document_write_copy'].includes(tc.name)) {
+      if (this.permissionMode === PermissionMode.FULL_ACCESS && (['write', 'edit', 'copy', 'move', 'delete', 'document_write_copy'].includes(tc.name) || isOfficeWrite(tc.name))) {
         // Review staging 不触碰正式工作区，不计为副作用。
         this.turnStats.mutations = true;
         // 验证之后又发生源码修改 → 回到 unverified。
@@ -1895,7 +1970,18 @@ export class A9AgentLoop {
     turnId: string,
     signal?: AbortSignal,
     toolCallId?: string,
+    officeGrant?: { approvalId: string; bindingSha256: string },
   ): Promise<{ payload: any; residueRisk?: boolean; logPaths?: { stdout: string; stderr: string } }> {
+    if (isOfficeRead(name)) {
+      if (!this.config.officeWorkflow) throw new Error('A9_OFFICE_UNAVAILABLE');
+      return { payload: await this.config.officeWorkflow.read(name, args, turnId, signal) };
+    }
+    if (isOfficeWrite(name)) {
+      if (!this.config.officeWorkflow || !officeGrant || this.permissionMode !== PermissionMode.FULL_ACCESS) {
+        throw new Error('A9_OFFICE_APPROVAL_REQUIRED');
+      }
+      return { payload: await this.config.officeWorkflow.execute(name, args, turnId, officeGrant, signal) };
+    }
     const ws = this.config.workspaceService;
     switch (name) {
       case 'document_inspect':

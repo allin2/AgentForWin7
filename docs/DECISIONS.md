@@ -5641,3 +5641,17 @@ Claude P2-1、P2-3 已补测试，P2-4 已修复；P2-2 按裁决保留为 K7。
 - 偏差：image-size 2.0.4 声明 Node >=18，本项目按源码 API 检查及 Node 16 直接运行接受限定用途，不冒充上游 Node 16 支持。MIME 库 GBK 正文转换不可直接使用，适配器必须从原始传输字节以 TextDecoder 解码并校验失败，不接受错误中文输出。
 - 交付：目标机离线使用锁定闭包，不在线安装；构建先生成实际依赖清单与闭包。依赖缺失或不支持的内容使对应能力拒绝，既有文本工具保持可用。不得升级 Electron/Node、引入 Office 自动化、外部程序或新原生模块。
 - 证据：outputs/a9-70-instabox/p0/dependencies-qualified-r2；Win7 实机与标准 ZIP 资源管理器兼容性为 NOT_PERFORMED。详细 Profile 见 WIN7_CONSTRAINTS。
+
+## ADR-0337 A9-70 整理确认卡选中清单修订
+
+- 状态：Accepted（2026-11-16 UTC，A9-70 已批准的 Dry-run 勾选确认范围）。
+- 决定：新增 Schema IPC 动作 a9.approval.select。只接受当前工作区、对话、任务、Turn、approvalId、bindingDigest 与选中 actionId；只可缩小当前 batch_organize 卡片中的动作集合。此动作无文件副作用，不等于批准。
+- 决定：宿主重新核验计划并生成新 approvalId、摘要与 bindingDigest，先持久化再返回。旧卡失效；随后由操作员核对新清单并独立批准或拒绝。源漂移时修订失败，原卡仍可拒绝。
+- 边界：Renderer 不提供源/目标绝对根或哈希，不接收文件权限；模型不能传 confirmed 布尔值取得批准。现有恢复未知与模式隔离保持。主版本 IPC 不变，新增动作只由同包入口暴露，旧动作与参数合同保持。
+
+## ADR-0338 A9-70 配对 checkpoint 的旧版拒读标记
+
+- 状态：Accepted（2026-11-16 UTC，ADR-0335 获批恢复边界内的格式保护）。
+- 背景：旧版 artifactBindingVersion 1 读取器会忽略未知 pairedTransfers 字段；降级打开新工作区时，可能绕过配对撤销保护并删除唯一目标副本。
+- 决定：只在带配对转移标记的 checkpoint 使用 artifactBindingVersion 2；现有普通 checkpoint 继续使用 1。新读取器支持 1，且仅在严格验证配对字段时接受 2；配对字段与版本必须一致。旧读取器因未知绑定版本拒绝恢复，不进行自动降级或移除标记。
+- 边界：不重写历史 checkpoint 或冻结候选。TransferReceipt 仍为 v1。旧版能否读取其他普通 checkpoint 与新版本能否读取历史普通 checkpoint 分别验证，不将拒读写成恢复 PASS。

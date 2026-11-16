@@ -66,6 +66,7 @@ function createA9WorkspaceRegistry(options) {
   let providerChanging = false;
   let closingAll = false;
   const closing = new Set();
+  const transferReservations = new Set();
   const accounting = { maxConcurrentRequests: 2, activeRequests: 0, requests: 0, usageReports: 0, missingUsageReports: 0,
     reportedTokens: { promptTokens: 0, completionTokens: 0, totalTokens: 0 } };
 
@@ -153,6 +154,32 @@ function createA9WorkspaceRegistry(options) {
     return next;
   }
 
+  function transferPort(ownerId) {
+    function resolve(id) {
+      const entry = entries.get(id);
+      if (!entry || closing.has(id) || closingAll || providerChanging || !entry.runtime.getTransferWorkspace) return undefined;
+      assertRuntimeAvailable(entry.runtime);
+      if (admit(entry.workspaceRoot).workspaceId !== id) throw failure('A9_TRANSFER_REGISTRATION_CHANGED', '转移工作区身份已变化。');
+      const value = entry.runtime.getTransferWorkspace({ allowActive: id === ownerId });
+      if (value.workspaceId !== id) throw failure('A9_TRANSFER_REGISTRATION_CHANGED', '转移工作区身份不一致。');
+      return value;
+    }
+    return { resolve, list: () => Array.from(entries.values()).map(entry => ({ workspaceId: entry.workspaceId, workspaceRoot: entry.workspaceRoot })), revalidate(value) {
+      const current = resolve(value.workspaceId);
+      if (!current || current.workspaceRoot !== value.workspaceRoot || current.checkpoint !== value.checkpoint) {
+        throw failure('A9_TRANSFER_REGISTRATION_CHANGED', '转移工作区已关闭或被替换。');
+      }
+    } };
+  }
+  async function withTransferReservation(ownerId, ids, operation) {
+    if (!Array.isArray(ids) || ids.length !== 2 || new Set(ids).size !== 2 || !ids.includes(ownerId) ||
+        ids.some(id => transferReservations.has(id))) throw failure('A9_TRANSFER_BUSY', '转移工作区正在使用。');
+    const port = transferPort(ownerId);
+    if (ids.some(id => !port.resolve(id))) throw failure('A9_TRANSFER_UNREGISTERED', '请先打开源和目标两个工作区。');
+    ids.forEach(id => transferReservations.add(id));
+    try { return await operation(); } finally { ids.forEach(id => transferReservations.delete(id)); }
+  }
+
   function open(workspace, initialWorkdir) {
     initializePersistence();
     const next = admit(workspace, initialWorkdir);
@@ -166,7 +193,13 @@ function createA9WorkspaceRegistry(options) {
           return persistenceOutcome;
         },
         wrapProvider,
-        assertExecutionAllowed,
+        assertExecutionAllowed: () => {
+          assertExecutionAllowed();
+          if (transferReservations.has(next.workspaceId)) throw failure('A9_TRANSFER_BUSY', '文件配对转移正在执行。');
+        },
+        isTransferReserved: () => transferReservations.has(next.workspaceId),
+        transferWorkspaces: transferPort(next.workspaceId),
+        withTransferReservation: (ids, operation) => withTransferReservation(next.workspaceId, ids, operation),
         isProviderConfiguring: () => providerChanging,
       });
       entry = { ...next, runtime };
@@ -376,6 +409,7 @@ function createA9WorkspaceRegistry(options) {
   }
 
   async function configureProvider(runtime, values) {
+    if (transferReservations.size) throw failure('A9_TRANSFER_BUSY', '文件转移完成或停止后才能更改模型配置。');
     assertExecutionAllowed();
     if (Array.from(entries.values()).some(entry => entry.runtime.canLeaveWorkspace && !entry.runtime.canLeaveWorkspace().allowed)) {
       throw failure('A9_PROVIDER_RECONFIGURE_BUSY', '请先完成或停止所有工作区任务、队列及后台进程，再修改全应用模型配置。');
@@ -394,7 +428,7 @@ function createA9WorkspaceRegistry(options) {
 
   async function close(id, shutdownOptions) {
     const entry = entries.get(id);
-    if (!entry || closing.has(id) || providerChanging) throw failure('A9_WORKSPACE_UNAVAILABLE', '工作区未打开或正在处理其他操作。');
+    if (!entry || closing.has(id) || providerChanging || transferReservations.has(id)) throw failure('A9_WORKSPACE_UNAVAILABLE', '工作区未打开或正在处理其他操作。');
     closing.add(id);
     try {
       const result = await entry.runtime.shutdown({ ...shutdownOptions, cancelPending: true });

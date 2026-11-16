@@ -13,7 +13,7 @@ Win7-Validation: NOT_PERFORMED
 
 负责人于 2026-11-16 指示“按照推荐修正表述，并且开启 instabox，实现上述内容，先给我看下如何安排，对应的模型和任务安排”，后继回复“开始做吧”。本任务为 `APPROVED_FOR_IMPLEMENTATION`，覆盖 O1～O4，按 §7 开始实施准备、模型准入及 InstaBox 派单。
 后续按既有 InstaBox 工作包流程实施。新依赖在引入前完成 [WIN7_CONSTRAINTS.md §6](../WIN7_CONSTRAINTS.md#6-依赖评审登记表) 登记，接口及恢复语义变化先登记配套 ADR。此次授权不包含公开推送发布、正式门 A/B 或 Win7 目标机执行窗口。
-本轮新增能力、依赖适配与交互改造在开发机、Win10 验收机与 Win7 实机的验证状态均为 `NOT_PERFORMED`。
+P0、P1 与 P1b 已有开发机检查，准确范围见 §10。ZIP、模板、汇报、邮件与办公 UI 仍待实施；Win10 验收机与 Win7 实机为 `NOT_PERFORMED`。
 
 ### 1.1 纳入范围（第一批）
 
@@ -45,7 +45,8 @@ Agent 负责理解意图、分类建议、字段映射与有来源的摘要；�
 flowchart LR
     OP["办公操作员"] --> UI["Renderer 办公工作台<br/>场景引导卡 / Dry-run 确认卡 / 样张预览"]
     UI <-->|"Schema IPC"| CORE["Agent Core 与 Policy<br/>工具目录 / 计划状态 / 审批绑定"]
-    CORE --> W1["Worker O1<br/>目录扫描 / 分块 SHA-256 / 流式 ZIP"]
+    CORE --> W1["Workspace O1<br/>协作扫描 / 分块 SHA-256 / 整理"]
+    CORE --> ZIP["Worker O1<br/>流式 ZIP（待实施）"]
     CORE --> W2["Worker O2<br/>DOCX-PPTX 模板渲染 / PPT 生成 / HTML 看板"]
     CORE --> M1["MailSourceAdapter O3<br/>MockMailAdapter / EmlDirectoryAdapter"]
     CORE --> WS["Workspace 服务<br/>跨盘兜底移动 / MAX_PATH 校验 / Checkpoint"]
@@ -251,3 +252,29 @@ flowchart LR
 - P0 r2 依赖已按 ADR-0336 安装于开发机 office-lite；无安装脚本、无原生重建。旧办公闭包复制验证的 3 项全通过；产品格式和新能力仍待各包真实消费者检查。
 
 - P1 本机修正仅规范化测试夹具根路径，未改产品行为或减少断言。macOS Node20 当前 dist 的 36 项定向测试全通过；此前 11 个注入失败现均执行并通过。旧 G1 FAIL 保留，新本机接收证据为该修复后的开发机定向结果，不伪造旧员工 tip G1。
+
+- P1b 首次开机因协调端错误完整 SHA 取码失败，员工未运行；日志与错误输入保留，密钥撤销、机器已回收。替代包 a9-70-transfer2 从 git 直接解析 d0eb14bb…，已在 chai2 Sol/high 启动，文件归属限转移模块、checkpoint 配对标记与测试。
+- 主代理并行完成 P1 Core/Policy/Runtime 接入；确认端口不信任模型布尔量。Core 359 项、真实 Runtime/SQLite/Provider 夹具/Workspace 已有8项通过。Electron 22 / Node16.17.1 ABI110 直接执行只读计划→批准→真实移动→重建服务后checkpoint撤销，字节一致，见 P1_NODE16_RESULT.json。均属开发机；Mock Provider不证明云端模型或Win7。
+- ADR-0337 增加只读的确认卡勾选清单修订：只能缩小当前动作集合，生成并持久化新批准身份后再独立确认；不允许用改参数的旧卡执行。
+
+- P1b 员工最终准确提交 60877ca7… 已私有交付并取回。新增36项与相关回归通过；完整 Linux G0 660 PASS、1 FAIL、1 skipped，原回执保留，工作机证据取回后已回收。失败为新增 undo 强制冷读全部工件触发旧混合写入样例的 newBlobPath SHA 不一致。协调端保持既有可信缓存语义，把配对拦截放在既有读取之后；冷启动仍严格校验。
+- 配对数据新增 artifactBindingVersion 2，旧普通 checkpoint 继续1。旧版真实 dist 对版本2在副作用前拒读的独立探针通过；新读取器拒绝版本/配对字段不一致。新增37项及 mixed Tool/Shell、manifest、checkpoint 共60项开发机通过。旧 G0 FAIL 不改判。混合写入的旧冷读工件缺口保留为继承边界，不据暖缓存通过声明其已修复。
+- 当前 T3 运行约束要求新模型员工经 delegate_task 调度；后继云端模型派单须先链接 chai2。现会话未提供 t3_environment_links（已尝试工具名），负责人已收到 Settings→Labs→Linked environments 链接提示。既有云端结果与本地工作继续，未静默改用本机模型员工或其他模型。
+
+
+## 10. 当前交付与接续点
+
+| 范围 | 当前源码与直接检查 | 尚未完成 |
+|---|---|---|
+| P0 | Sol/high 已在 chai2 真实生成；派单包装器62项、提交助手3项通过；115包纯JS闭包准入与复制后加载通过 | 后继员工改经 T3 远端链接；不改指定模型 |
+| P1 | 工作区内扫描、只读计划、批准选择、真实整理与checkpoint；Core 360项、Shell相关检查通过；Node16真实移动及重建服务撤销通过 | 办公确认卡的 Renderer 勾选展示仍属P6；Windows Hidden属性不可用 |
+| P1b | 已登记双工作区计划、双端收据、转移、新批准撤销；同包批准、保留模式边界与目标占用保护；37项转移定向通过 | 真实C盘→D盘、NTFS与Win7为NOT_PERFORMED；每计划一个文件 |
+| P2～P6 | ZIP派单输入已准备；准确依赖与Core宿主入口已准备 | ZIP、DOCX/PPTX模板、五版式PPTX、HTML、邮件与办公UI未交付 |
+| P7及目标验证 | 首失败及云端源码回执保留 | 独立审核、Win10/Win7、打包、正式门A/B、公开推送发布均NOT_PERFORMED |
+
+- 主代理接入后，开发机 Workspace 日常35套件663项通过。随后仅优化转移FD哈希路径，37项转移定向复验通过，未重复不受影响集合。Shell四个实际消费者文件67项通过，覆盖多工作区与SQLite、旧办公Worker、批准、Preload和IPC；后继目标模式负例见同目录最终日志。
+- Node16实际16MiB配对移动→重建服务→对账→普通undo拒绝→新批准撤销逐字节通过。原探针计时保留；去除已绑定FD每64KiB重复目录遍历后，第二份结果为总耗时2037ms、最大观测定时器间隔654ms、最大观测RSS142999552字节。不能写成总内存上限、始终流畅或Win7性能结论。同步计划/快照仍可能暂停主线程，容量和路径限制保持。
+- 双工作区宿主仅接收当前登记ID，两根都须Full Access；目标不得有任务、待审批、后台进程或状态操作。执行期临时占用两根，拒绝目标新任务、撤销和关闭；停止入口仍保留。只读的上下文统计刷新不误挡当前批准。目标checkpoint Turn由宿主按源工作区/对话/Turn派生紧凑ID，减少恢复路径长度，不减少身份绑定或放宽240字符预检。
+- 当前源码未完成整批办公交付。旧G1/G0 FAIL保留；本机修正结果独立记录，不回写云端原tip为PASS。实际回执与源码哈希集中于 outputs/a9-70-instabox/，历史候选不变。
+
+- 最终宿主补验：多工作区14项通过，包含两个真实 Runtime/SQLite 工作区的预览→批准→占用保护→移动→关闭重开→新批准撤销，以及源Full Access不能向Read Only目标转移。37项FD优化后转移复验和Node16 16MiB结果为直接证据，其余未变集合沿用前述当前开发机结果。相关文件已本地提交后以 outputs/a9-70-instabox/CURRENT_RESULT.json 绑定准确源码；不推送公开origin。

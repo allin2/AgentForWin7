@@ -88,7 +88,7 @@ async function setup(options: { steps: FixtureStep[]; mode?: string; journey?: b
         return;
       }
       res.end(`data: ${JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, id: `write-${stepIndex}`, type: 'function',
-        function: { name: step.name, arguments: JSON.stringify(step.args) } }] }, finish_reason: 'tool_calls' }] })}\n\ndata: [DONE]\n\n`);
+        function: { name: step.name, arguments: JSON.stringify(typeof step.args === 'function' ? step.args(requests[requests.length - 1]) : step.args) } }] }, finish_reason: 'tool_calls' }] })}\n\ndata: [DONE]\n\n`);
     });
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -212,4 +212,92 @@ describe('Office Lite actual Runtime/Core/Gateway/Worker/Workspace chain', () =>
       expect(JSON.stringify(f.requests[1]).toLowerCase()).toContain('redacted');
     } finally { await f.close(); }
   });
+});
+
+
+describe('A9-70 actual Runtime/Core/approval/Workspace chain', () => {
+  function executePlan(request: any) {
+    const message = request.messages.filter((m: any) => m.role === 'tool' && m.name === 'batch_organize_plan').pop()
+      || request.messages.filter((m: any) => m.role === 'tool').pop();
+    const plan = JSON.parse(message.content);
+    return { request: JSON.stringify({ planId: plan.planId, selectedActionIds: [plan.actions[0].actionId] }) };
+  }
+  it.each(['approved', 'denied'])('previews without writes, then handles %s with checkpoint-backed facts', async decision => {
+    const f = await setup({ steps: [
+      { kind: 'write', name: 'batch_organize_plan', args: { request: JSON.stringify({ actions: [{ kind: 'move', source: 'note.txt', destination: '整理/说明.txt' }] }) } },
+      { kind: 'write', name: 'batch_organize', args: executePlan }, { kind: 'text', content: 'done' },
+    ] });
+    try {
+      fs.mkdirSync(path.join(f.workspaceRoot, '整理'));
+      const first = await f.runtime.submitTurn('整理 note.txt，先展示计划');
+      expect(first.ok).toBe(true); expect(first.result.outcome).toBe('needs_approval');
+      const pending = f.runtime.getSnapshot().pendingApproval;
+      expect(pending.summary).toContain('整理/说明.txt'); expect(pending.summary).toContain('sourceSha256');
+      expect(fs.readFileSync(path.join(f.workspaceRoot, 'note.txt'), 'utf8')).toBe('current\n');
+      expect(fs.existsSync(path.join(f.workspaceRoot, '整理/说明.txt'))).toBe(false);
+      const response = await f.runtime.resumeApproval({ ...pending, decision });
+      expect(response.ok).toBe(true);
+      if (decision === 'approved') {
+        expect(fs.readFileSync(path.join(f.workspaceRoot, '整理/说明.txt'), 'utf8')).toBe('current\n');
+        expect(fs.existsSync(path.join(f.workspaceRoot, 'note.txt'))).toBe(false);
+        const undone = await f.ipc()({}, { schemaVersion: 7, action: 'a9.checkpoint.undoTurn', payload: { turnId: first.result.turnId } });
+        expect(undone.ok).toBe(true); expect(undone.outcome.errors).toEqual([]);
+        expect(fs.readFileSync(path.join(f.workspaceRoot, 'note.txt'), 'utf8')).toBe('current\n');
+        expect(fs.existsSync(path.join(f.workspaceRoot, '整理/说明.txt'))).toBe(false);
+      } else {
+        expect(fs.readFileSync(path.join(f.workspaceRoot, 'note.txt'), 'utf8')).toBe('current\n');
+        expect(fs.existsSync(path.join(f.workspaceRoot, '整理/说明.txt'))).toBe(false);
+      }
+      const duplicate = await f.runtime.resumeApproval({ ...pending, decision }); expect(duplicate.ok).toBe(false);
+      expect(f.db.prepare('SELECT count(*) n FROM a9_approvals').get()).toEqual({ n: 1 });
+    } finally { await f.close(); }
+  });
+  it('rejects source drift after preview and still permits a fresh user denial', async () => {
+    const f = await setup({ steps: [
+      { kind: 'write', name: 'batch_organize_plan', args: { request: JSON.stringify({ actions: [{ kind: 'move', source: 'note.txt', destination: '整理/说明.txt' }] }) } },
+      { kind: 'write', name: 'batch_organize', args: executePlan }, { kind: 'text', content: 'done' },
+    ] });
+    try {
+      fs.mkdirSync(path.join(f.workspaceRoot, '整理'));
+      await f.runtime.submitTurn('整理'); const pending = f.runtime.getSnapshot().pendingApproval;
+      fs.writeFileSync(path.join(f.workspaceRoot, 'note.txt'), '人工新稿');
+      const stale = await f.runtime.resumeApproval({ ...pending, decision: 'approved' });
+      expect(stale.ok).toBe(false); expect(fs.existsSync(path.join(f.workspaceRoot, '整理/说明.txt'))).toBe(false);
+      expect(fs.readFileSync(path.join(f.workspaceRoot, 'note.txt'), 'utf8')).toBe('人工新稿');
+      const denied = await f.runtime.resumeApproval({ ...pending, decision: 'denied' }); expect(denied.ok).toBe(true);
+      expect(fs.readFileSync(path.join(f.workspaceRoot, 'note.txt'), 'utf8')).toBe('人工新稿');
+    } finally { await f.close(); }
+  });
+
+  it('reissues a narrowed checklist through IPC, rejects the old card and moves only the selected file', async () => {
+    const f = await setup({ steps: [
+      { kind: 'write', name: 'batch_organize_plan', args: { request: JSON.stringify({ actions: [
+        { kind: 'move', source: 'note.txt', destination: '整理/说明.txt' },
+        { kind: 'move', source: 'stay.txt', destination: '整理/保留.txt' },
+      ] }) } },
+      { kind: 'write', name: 'batch_organize', args: (request: any) => {
+        const plan = JSON.parse(request.messages.filter((m: any) => m.role === 'tool').pop().content);
+        return { request: JSON.stringify({ planId: plan.planId, selectedActionIds: plan.actions.map((a: any) => a.actionId) }) };
+      } }, { kind: 'text', content: 'done' },
+    ] });
+    try {
+      fs.mkdirSync(path.join(f.workspaceRoot, '整理')); fs.writeFileSync(path.join(f.workspaceRoot, 'stay.txt'), '不选此项');
+      await f.runtime.submitTurn('展示两项计划'); const old = f.runtime.getSnapshot().pendingApproval;
+      expect(old.officeSelection.actions).toHaveLength(2);
+      const identity = { approvalId: old.approvalId, bindingDigest: old.bindingDigest, conversationId: old.conversationId, taskId: old.taskId, turnId: old.turnId };
+      const narrowed = await f.ipc()({}, { schemaVersion: 7, action: 'a9.approval.select', payload: { ...identity, selectedActionIds: ['a001'] } });
+      expect(narrowed).toMatchObject({ ok: true }); const current = narrowed.pendingApproval;
+      expect(current.approvalId).not.toBe(old.approvalId); expect(current.bindingDigest).not.toBe(old.bindingDigest);
+      expect(current.officeSelection.actions.map((a: any) => a.actionId)).toEqual(['a001']);
+      expect(fs.existsSync(path.join(f.workspaceRoot, 'note.txt'))).toBe(true);
+      expect(fs.existsSync(path.join(f.workspaceRoot, '整理/说明.txt'))).toBe(false);
+      expect((await f.runtime.resumeApproval({ ...old, decision: 'approved' })).ok).toBe(false);
+      expect((await f.runtime.resumeApproval({ ...current, decision: 'approved' })).ok).toBe(true);
+      expect(fs.readFileSync(path.join(f.workspaceRoot, '整理/说明.txt'), 'utf8')).toBe('current\n');
+      expect(fs.readFileSync(path.join(f.workspaceRoot, 'stay.txt'), 'utf8')).toBe('不选此项');
+      expect(fs.existsSync(path.join(f.workspaceRoot, '整理/保留.txt'))).toBe(false);
+      expect(f.db.prepare('SELECT decision FROM a9_approvals WHERE approval_id=?').get(old.approvalId)).toEqual({ decision: 'interrupted' });
+    } finally { await f.close(); }
+  });
+
 });

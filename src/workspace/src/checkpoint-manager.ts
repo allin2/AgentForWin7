@@ -118,7 +118,7 @@ export interface TurnCheckpoint {
   createdAt: string;
   updatedAt: string;
   /** 1 = 文件/目录恢复工件都绑定 turnId + filePath + role。 */
-  artifactBindingVersion?: 1;
+  artifactBindingVersion?: 1 | 2;
   changes: Record<string, FileChangeRecord>;
   /** v3：显式标记为不可恢复的外部变化（不静默遗漏）。 */
   unrecoverable: Record<string, UnrecoverableExternalChange>;
@@ -356,6 +356,8 @@ export class CheckpointManager {
     if (Object.keys(markers).length >= 100 && !markers[transferId]) throw new Error('A9_TRANSFER_LIMIT');
     markers[transferId] = { schemaVersion: 1, path: relative, closed };
     draft.pairedTransfers = markers;
+    // Older readers reject v2 before restoring a file. Ordinary manifests stay v1.
+    draft.artifactBindingVersion = 2;
     if (closed && draft.changes[relative]) draft.changes[relative].undoAppliedAt = new Date().toISOString();
     this.persist(draft);
     this.checkpoints.set(turnId, draft);
@@ -814,7 +816,7 @@ export class CheckpointManager {
       throw new Error(`checkpoint manifest schema mismatch for ${requestedTurnId}`);
     }
     if (parsed.turnId !== requestedTurnId) throw new Error(`checkpoint manifest turn mismatch for ${requestedTurnId}`);
-    if (parsed.artifactBindingVersion !== 1) {
+    if (parsed.artifactBindingVersion !== 1 && parsed.artifactBindingVersion !== 2) {
       throw new Error(`checkpoint manifest artifact binding is missing or unsupported for ${requestedTurnId}`);
     }
     this.assertSafeTurnId(requestedTurnId);
@@ -824,8 +826,11 @@ export class CheckpointManager {
         throw new Error(`checkpoint manifest ${field} is invalid`);
       }
     }
+    if ((parsed.artifactBindingVersion === 2) !== (parsed.pairedTransfers !== undefined)) {
+      throw new Error('A9_TRANSFER_METADATA_VERSION_INVALID');
+    }
     if (parsed.pairedTransfers !== undefined) {
-      if (!this.isPlainRecord(parsed.pairedTransfers) || Object.keys(parsed.pairedTransfers).length > 100) throw new Error('A9_TRANSFER_METADATA_INVALID');
+      if (!this.isPlainRecord(parsed.pairedTransfers) || Object.keys(parsed.pairedTransfers).length < 1 || Object.keys(parsed.pairedTransfers).length > 100) throw new Error('A9_TRANSFER_METADATA_INVALID');
       for (const [id, marker] of Object.entries(parsed.pairedTransfers)) {
         if (!/^transfer-[a-f0-9]{32}$/.test(id) || !this.isPlainRecord(marker)
           || Object.keys(marker).sort().join(',') !== 'closed,path,schemaVersion'
@@ -1649,11 +1654,12 @@ export class CheckpointManager {
    */
   undoTurn(turnId: string): UndoOutcome {
     this.validateRecoveryIdentity();
-    const paired = this.readValidatedCheckpoint(turnId)?.pairedTransfers;
-    if (paired && Object.values(paired).some(marker => !marker.closed)) {
+    // Existing trusted cache semantics remain; cold loads validate v2 metadata.
+    // setPairedTransfer durably updates this same manager before any transfer I/O.
+    const checkpoint = this.loadCheckpoint(turnId);
+    if (checkpoint?.pairedTransfers && Object.values(checkpoint.pairedTransfers).some(marker => !marker.closed)) {
       return { restored: [], errors: ['A9_TRANSFER_PAIRED_UNDO_REQUIRED'], drifted: [] };
     }
-    const checkpoint = this.loadCheckpoint(turnId);
     if (!checkpoint) {
       return { restored: [], errors: [`未找到 Checkpoint: ${turnId}`], drifted: [] };
     }
@@ -1691,11 +1697,12 @@ export class CheckpointManager {
   /** 按单文件撤销本轮变化。 */
   undoFile(turnId: string, relPath: string): UndoOutcome {
     this.validateRecoveryIdentity();
-    const paired = this.readValidatedCheckpoint(turnId)?.pairedTransfers;
-    if (paired && Object.values(paired).some(marker => !marker.closed)) {
+    // Existing trusted cache semantics remain; cold loads validate v2 metadata.
+    // setPairedTransfer durably updates this same manager before any transfer I/O.
+    const checkpoint = this.loadCheckpoint(turnId);
+    if (checkpoint?.pairedTransfers && Object.values(checkpoint.pairedTransfers).some(marker => !marker.closed)) {
       return { restored: [], errors: ['A9_TRANSFER_PAIRED_UNDO_REQUIRED'], drifted: [] };
     }
-    const checkpoint = this.loadCheckpoint(turnId);
     if (!checkpoint) {
       return { restored: [], errors: [`未找到 Checkpoint: ${turnId}`], drifted: [] };
     }

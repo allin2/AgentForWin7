@@ -8,6 +8,7 @@ import { ToolCall, ApprovalLevel, PolicyDecision, PolicyVerdict, CapabilityToken
 import { bindCapabilityToToolCall } from './approval-binding';
 import { policyDeniedError } from './errors';
 import { classifyGitCommand, MAX_ANALYZABLE_GIT_COMMAND_BYTES, tokenizeCommand } from './git-command-policy';
+import { OFFICE_READ_TOOLS, OFFICE_WRITE_TOOLS, isOfficeWrite } from './a9-office-tools';
 
 const PROHIBITED_SHELL_HOSTS = new Set([
   'cmd',
@@ -26,6 +27,7 @@ const PROHIBITED_SHELL_HOSTS = new Set([
  * @remarks 工具名区分大小写，支持中文路径（C10）
  */
 const TOOL_WHITELIST: ReadonlySet<string> = new Set([
+  ...OFFICE_READ_TOOLS, ...OFFICE_WRITE_TOOLS,
   // 文件系统只读
   'fs.readFile',
   'fs.readdir',
@@ -448,6 +450,9 @@ function shellImpactReading(command: string, depth: number, cmdShell: boolean, c
  * Git 命令使用 tokenize 分类器（git-command-policy），不依赖可绕过的正则。
  */
 function checkAlwaysConfirmOperation(toolCall: ToolCall): { needsConfirm: boolean; reason?: string } {
+  if (isOfficeWrite(toolCall.toolName)) {
+    return { needsConfirm: true, reason: '办公批量操作须确认准确清单、输入版本与目标；旧批准不能重用' };
+  }
   if (toolCall.toolName === 'delete' && toolCall.args.permanent === true) {
     return { needsConfirm: true, reason: '永久删除文件/目录操作需要用户显式确认' };
   }
@@ -601,6 +606,9 @@ export class PolicyEngine {
     // 1. 工具名白名单验证
     if (!this.toolWhitelist.has(toolCall.toolName)) {
       return decision(PolicyVerdict.DENY, toolCall.approvalLevel, 'POLICY_TOOL_NOT_ALLOWLISTED', `工具 ${toolCall.toolName} 不在白名单内`);
+    }
+    if (isOfficeWrite(toolCall.toolName) && toolCall.approvalLevel !== ApprovalLevel.FULL_ACCESS) {
+      return decision(PolicyVerdict.DENY, toolCall.approvalLevel, 'POLICY_OFFICE_WRITE_MODE', '办公副作用只允许 Full Access 中的新目标绑定批准');
     }
 
     // 2. 结构化 argv 验证

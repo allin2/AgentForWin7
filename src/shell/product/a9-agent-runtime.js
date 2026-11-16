@@ -161,6 +161,8 @@ function openA9RuntimePersistence(config, modules = config.modules || loadModule
 function createA9AgentRuntime(options) {
   const config = options || {};
   const modules = config.modules || loadModules();
+  const officeWorkflowModule = require('./a9-office-workflow');
+  const officeAuthority = officeWorkflowModule.createOfficeApprovalAuthority();
   const workspaceRoot = config.workspaceRoot;
   const dataRoot = config.dataRoot;
   const ownerId = config.ownerId || `window-${process.pid}`;
@@ -211,7 +213,7 @@ function createA9AgentRuntime(options) {
     if (!validation.valid) throw Object.assign(new Error(validation.error), { code: validation.error.split(':')[0] });
   }
   function guardedWorkspaceService(options) {
-    const service = new modules.workspace.A9WorkspaceService(workspaceRoot, options);
+    const service = new modules.workspace.A9WorkspaceService(workspaceRoot, { ...options, officeBatchApproval: officeAuthority.port });
     return new Proxy(service, { get(target, property) {
       const value = target[property];
       if (typeof value !== 'function') return value;
@@ -306,6 +308,7 @@ function createA9AgentRuntime(options) {
   // ----- R2：pending 审批（SQLite 记录来自原始 pending 对象） -----
   let currentPendingApproval = null;
   let approvalDecisionInFlightId = null;
+  let officeSelectionOriginal = null;
   let currentPendingQuestion = null;
   let questionReplyInFlightId = null;
 
@@ -439,7 +442,8 @@ function createA9AgentRuntime(options) {
   function scheduleRestoredContextRefresh() {
     const operation = refreshRestoredContextAsync();
     pendingStateOperations.add(operation);
-    operation.then(() => { pendingStateOperations.delete(operation); });
+    pendingReadOnlyRefreshes.add(operation);
+    operation.then(() => { pendingStateOperations.delete(operation); pendingReadOnlyRefreshes.delete(operation); });
   }
   /** Entry-point gate: restores (bounded, async) before the loop is built; the scope must be unchanged afterwards. */
   async function awaitProviderContextForEntry(sessionId) {
@@ -465,6 +469,7 @@ function createA9AgentRuntime(options) {
   let shutdownPromise = null;
   let shutdownRequested = false;
   const pendingStateOperations = new Set();
+  const pendingReadOnlyRefreshes = new Set();
   function assertAvailable() {
     if (shutdownRequested || workspaceLockReleased) {
       throw Object.assign(new Error('A9_RUNTIME_SHUTDOWN: 工作区正在关闭或已关闭'), { code: 'A9_RUNTIME_SHUTDOWN' });
@@ -478,6 +483,7 @@ function createA9AgentRuntime(options) {
   // calls retain their return/throw contract and do not delay an ordinary reopen.
   function trackStateOperation(operation) {
     assertAvailable();
+    if (config.isTransferReserved?.()) throw Object.assign(new Error('文件配对转移正在占用此工作区，请等待完成或在源工作区停止。'), { code: 'A9_TRANSFER_BUSY' });
     const result = operation();
     if (!result || typeof result.then !== 'function') return result;
     const pending = result.then(value => { pendingStateOperations.delete(pending); return value; },
@@ -801,6 +807,7 @@ function createA9AgentRuntime(options) {
       summary: redactSecrets(approval.summary || ''),
       args: redactForProjection(approval.args),
       ...(approval.gitBinding ? { gitBinding: redactForProjection(approval.gitBinding) } : {}),
+      ...(approval.officeSelection ? { officeSelection: redactForProjection(approval.officeSelection) } : {}),
     };
   }
 
@@ -1693,6 +1700,13 @@ function createA9AgentRuntime(options) {
         } : {}),
         provider,
         workspaceService,
+        ...(typeof workspaceService.prepareOrganize === 'function' ? { officeWorkflow: officeWorkflowModule.createOfficeWorkflow({
+          service: workspaceService, authority: officeAuthority,
+          identity: turnId => ({ workspaceId: shellWorkspaceKey, conversationId: a9SessionId, turnId }),
+          containsSensitiveData: containsSensitiveProjectInstructionData, assertAvailable,
+          workspaceModule: modules.workspace, transferWorkspaces: config.transferWorkspaces,
+          withTransferReservation: config.withTransferReservation,
+        }) } : {}),
         runner: runnerAdapter,
         managedProcesses: {
           async start(command, context) {
@@ -1793,8 +1807,12 @@ function createA9AgentRuntime(options) {
         onApprovalPending: (approval) => {
           markInboxActive();
           // 等待用户前持久化 pending 审批（含真实工具与目标绑定）。
-          currentPendingApproval = approval;
           const safeApproval = redactApproval(approval);
+          if (officeSelectionOriginal) {
+            const old = approvalIdentity(officeSelectionOriginal);
+            persistence.recordApproval({ approvalId: old.approvalId, sessionId: a9SessionId, turnId: old.turnId,
+              toolName: old.toolName, binding: old, decision: 'interrupted' });
+          }
           persistence.recordApproval({
             approvalId: approval.approvalId,
             sessionId: a9SessionId,
@@ -1811,6 +1829,14 @@ function createA9AgentRuntime(options) {
             },
             decision: 'pending',
           });
+          if (officeSelectionOriginal) {
+            const checkpoint = persistence.getCheckpoint(approval.turnId);
+            if (!checkpoint || checkpoint.sessionId !== a9SessionId) throw new Error('A9_OFFICE_SELECTION_CHECKPOINT_MISSING');
+            persistence.saveCheckpoint({ turnId: approval.turnId, sessionId: a9SessionId,
+              payload: { ...checkpoint.payload, pendingApproval: { approvalId: approval.approvalId,
+                toolName: approval.toolName, bindingDigest: approval.bindingDigest } } });
+          }
+          currentPendingApproval = approval;
         },
         onQuestionPending: (question) => {
           markInboxActive();
@@ -2730,6 +2756,33 @@ function createA9AgentRuntime(options) {
     }
   }
 
+  async function selectOfficeActions(input) {
+    const sessionId = a9SessionId;
+    let controller = null;
+    try {
+      assertOperationScope(sessionId);
+      const original = currentPendingApproval;
+      const bound = approvalIdentity(original);
+      if (!original || original.toolName !== 'batch_organize' || input.approvalId !== original.approvalId ||
+          input.bindingDigest !== bound.bindingDigest || input.conversationId !== bound.conversationId ||
+          input.taskId !== bound.taskId || input.turnId !== bound.turnId || !loop || !activeLifecycle) {
+        throw Object.assign(new Error('A9_OFFICE_SELECTION_STALE'), { code: 'A9_OFFICE_SELECTION_STALE' });
+      }
+      if (activeController) throw Object.assign(new Error('A9_TURN_ALREADY_ACTIVE'), { code: 'A9_TURN_ALREADY_ACTIVE' });
+      controller = new AbortController(); activeController = controller;
+      officeSelectionOriginal = original;
+      const approval = await loop.selectOfficeActions(input, { signal: controller.signal });
+      assertOperationScope(sessionId);
+      agentStatus = 'needs_approval';
+      return { ok: true, pendingApproval: approvalIdentity(approval) };
+    } catch (error) {
+      return { ok: false, error: presentError(error) };
+    } finally {
+      officeSelectionOriginal = null;
+      if (controller && activeController === controller) activeController = null;
+    }
+  }
+
   async function resumeApproval(input) {
     const sessionId = a9SessionId;
     if (checkpointRecoveryPending) await checkpointRecoveryReady;
@@ -3066,6 +3119,7 @@ function createA9AgentRuntime(options) {
   }
 
   function setMode(mode) {
+    if (config.isTransferReserved?.()) throw Object.assign(new Error('文件配对转移正在占用此工作区，请等待完成或在源工作区停止。'), { code: 'A9_TRANSFER_BUSY' });
     pauseQueue();
     if (mode !== 'full_access' && mode !== 'review' && mode !== 'read_only') {
       // F6：精确 A9_MODE_INVALID（serializeError 依赖 error.code 透传）。
@@ -3533,7 +3587,7 @@ function createA9AgentRuntime(options) {
   }
 
   function canLeaveWorkspace() {
-    const reason = conversationBlockReason();
+    const reason = config.isTransferReserved?.() ? '文件配对转移正在执行，请先停止或等待完成' : conversationBlockReason();
     return { allowed: !reason, reason };
   }
 
@@ -3718,6 +3772,22 @@ function createA9AgentRuntime(options) {
       providerContextRestorePending = true;
     },
     assertAvailable,
+    getTransferWorkspace({ allowActive = false } = {}) {
+      assertAvailable();
+      if (!lockHeld || permissionMode !== 'full_access' || checkpointRecoveryPending || checkpointRecoveryFatal) {
+        throw Object.assign(new Error('A9_TRANSFER_WORKSPACE_NOT_READY'), { code: 'A9_TRANSFER_WORKSPACE_NOT_READY' });
+      }
+      // Context statistics only read SQLite/history. They must not block the
+      // approval that just scheduled that refresh; actual state operations do.
+      const stateOperations = [...pendingStateOperations].filter(op => !pendingReadOnlyRefreshes.has(op)).length;
+      if (!allowActive && (conversationBlockReason() || stateOperations)) {
+        throw Object.assign(new Error('A9_TRANSFER_TARGET_BUSY'), { code: 'A9_TRANSFER_TARGET_BUSY' });
+      }
+      if (allowActive && stateOperations > 1) {
+        throw Object.assign(new Error('A9_TRANSFER_SOURCE_STATE_BUSY'), { code: 'A9_TRANSFER_SOURCE_STATE_BUSY' });
+      }
+      return { workspaceId: shellWorkspaceKey, workspaceRoot, checkpoint: workspaceServiceForState().getCheckpointManager() };
+    },
     configureProvider: input => trackAsyncStateOperation(() => configureProvider(input)),
     probeProvider,
     configureShell,
@@ -3736,6 +3806,7 @@ function createA9AgentRuntime(options) {
     updateQueue,
     continueTask: input => trackAsyncStateOperation(() => continueTask(input)),
     dismissRecovered,
+    selectOfficeActions: input => trackAsyncStateOperation(() => selectOfficeActions(input)),
     resumeApproval: input => {
       if (input && input.decision === 'denied') pauseQueue();
       return finishQueueOperation(trackAsyncStateOperation(() => resumeApproval(input)));

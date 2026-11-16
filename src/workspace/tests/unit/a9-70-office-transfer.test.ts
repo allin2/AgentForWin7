@@ -52,6 +52,22 @@ describe('A9-70 paired transfer current dist', () => {
     expect(b().undoTurn('target-turn').errors).toEqual([]);
     expect(fs.readFileSync(path.join(source, input().source.relativePath))).toEqual(bytes);
   });
+  it('uses binding v2 only for paired manifests and rejects mismatched or downgraded markers', async () => {
+    const ordinary = new CheckpointManager(source);
+    ordinary.recordPreMutation('ordinary-turn', input().source.relativePath);
+    const ordinaryFile = path.join(source, '.agent_recovery/checkpoints/ordinary-turn.json');
+    expect(JSON.parse(fs.readFileSync(ordinaryFile, 'utf8')).artifactBindingVersion).toBe(1);
+    expect(new CheckpointManager(source).loadCheckpoint('ordinary-turn')).toBeDefined();
+    await move();
+    const manifest = path.join(target, '.agent_recovery/checkpoints/target-turn.json');
+    const paired = JSON.parse(fs.readFileSync(manifest, 'utf8'));
+    expect(paired.artifactBindingVersion).toBe(2);
+    expect(new CheckpointManager(target).undoTurn('target-turn').errors).toEqual(['A9_TRANSFER_PAIRED_UNDO_REQUIRED']);
+    paired.artifactBindingVersion = 1; fs.writeFileSync(manifest, JSON.stringify(paired));
+    expect(() => new CheckpointManager(target).loadCheckpoint('target-turn')).toThrow('A9_TRANSFER_METADATA_VERSION_INVALID');
+    paired.artifactBindingVersion = 2; delete paired.pairedTransfers; fs.writeFileSync(manifest, JSON.stringify(paired));
+    expect(() => new CheckpointManager(target).loadCheckpoint('target-turn')).toThrow('A9_TRANSFER_METADATA_VERSION_INVALID');
+  });
   it('plan is read-only and binding returned to host cannot mutate stored plan', () => {
     const p = service.plan(input(), who), binding = service.getApprovalBinding(p.planId, who);
     expect(fs.readdirSync(source)).toEqual([input().source.relativePath]); expect(fs.readdirSync(target)).toEqual([]);

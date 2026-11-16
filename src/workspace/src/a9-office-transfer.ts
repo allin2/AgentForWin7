@@ -167,8 +167,11 @@ export class OfficeTransferService {
       if (before.ino !== st.ino || before.dev !== st.dev) fail('A9_TRANSFER_FILE_CHANGED');
       const digest = crypto.createHash('sha256'), buf = Buffer.alloc(64 * 1024);
       let count = 0;
-      for (;;) { this.check(pair); pair.guard.check(target); const n = fs.readSync(fd, buf, 0, buf.length, null); if (!n) break; count += n; if (count > MAX) fail('A9_TRANSFER_FILE_INVALID'); digest.update(buf.subarray(0, n)); }
-      const after = fs.fstatSync(fd); pair.guard.check(target); const leaf = fs.lstatSync(target);
+      // Reads use the already identity-bound descriptor, never a new path lookup.
+      // Rewalking both directory trees per 64 KiB caused seconds of main-thread
+      // stalls. Revalidate the namespaces and leaf before returning any fact.
+      for (;;) { const n = fs.readSync(fd, buf, 0, buf.length, null); if (!n) break; count += n; if (count > MAX) fail('A9_TRANSFER_FILE_INVALID'); digest.update(buf.subarray(0, n)); }
+      const after = fs.fstatSync(fd); this.check(pair); pair.guard.check(target); const leaf = fs.lstatSync(target);
       if (after.size !== before.size || after.mtimeMs !== before.mtimeMs || after.ctimeMs !== before.ctimeMs
         || leaf.ino !== before.ino || leaf.dev !== before.dev || count !== before.size) fail('A9_TRANSFER_FILE_CHANGED');
       return { exists: true, sha256: digest.digest('hex'), sizeBytes: count, dev: leaf.dev, ino: leaf.ino, mtimeMs: leaf.mtimeMs, ctimeMs: leaf.ctimeMs };
