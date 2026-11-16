@@ -120,7 +120,10 @@ shift
 npm run test:local -- "$@"
 """
 CODEX = r"""
-exec codex exec -C "$1/work" --sandbox "$2" --json --ephemeral -o "$1/last.md" - < "$1/TASK.md"
+dir="$1"
+sandbox="$2"
+shift 2
+exec codex exec -C "$dir/work" --sandbox "$sandbox" --json --ephemeral -o "$dir/last.md" "$@" - < "$dir/TASK.md"
 """
 CLAUDE = r"""
 dir="$1"
@@ -172,6 +175,23 @@ def digest(data):
 
 def bash(script, *args):
     return ["bash", "-c", script, "wp", *args]
+
+
+def employee_model_args(agent, model=None, effort=None):
+    """Explicit per-job configuration; never change the machine's defaults or permissions."""
+    if agent not in ("codex", "claude"):
+        raise WpError("UNKNOWN_AGENT")
+    if model is not None and (not isinstance(model, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,159}", model)):
+        raise WpError("INVALID_EMPLOYEE_MODEL")
+    if effort is not None and model is None:
+        raise WpError("EMPLOYEE_EFFORT_REQUIRES_MODEL")
+    supported = ("minimal", "low", "medium", "high", "xhigh") if agent == "codex" else ("low", "medium", "high", "max")
+    if effort is not None and effort not in supported:
+        raise WpError("INVALID_EMPLOYEE_EFFORT")
+    args = ["--model", model] if model is not None else []
+    if effort is not None:
+        args += ["-c", 'model_reasoning_effort="%s"' % effort] if agent == "codex" else ["--effort", effort]
+    return args
 
 
 def checked(response):
@@ -536,9 +556,44 @@ class Wp:
             self.pkg.set(machineDeleted=False, deleteError=str(error)[:80])
 
     # ---- run / poll ----
+    def employee_job_id(self):
+        return self.s.get("employeeJobId") or "emp-" + self.s["task"]
+
     def run(self, agent, task_file, allowed_tools=(), modules=(), mode="execute", timeout=EMPLOYEE_SECONDS,
-            embeds=(), require_read=(), g0=False):
-        if self.s.get("state") != "OPENED":
+            embeds=(), require_read=(), g0=False, model=None, effort=None, retry=False):
+        attempt = 1
+        history = list(self.s.get("employeeAttemptHistory", []))
+        if retry:
+            if self.s.get("state") != "RUNNING" or self.s.get("employeeAttempt", 1) != 1:
+                raise WpError("EMPLOYEE_RETRY_LIMIT_OR_STATE")
+            if (agent, mode, model, effort, list(modules)) != (
+                    self.s.get("agent"), self.s.get("mode"), self.s.get("requestedModel"),
+                    self.s.get("requestedEffort"), self.s.get("modules", [])) or agent != "codex" or mode != "execute":
+                raise WpError("EMPLOYEE_RETRY_SCOPE_CHANGED")
+            if not 1 <= timeout <= self.s.get("employeeTimeoutSeconds", 0):
+                raise WpError("EMPLOYEE_RETRY_TIMEOUT_INCREASED")
+            previous_id = self.employee_job_id()
+            previous = self.job_status(previous_id)
+            result = previous.get("result", {})
+            if (previous.get("state") != "FINISHED" or result.get("tmpdirRemoved") is not True
+                    or result.get("cancelled") or result.get("error")
+                    or result.get("timedOut") is not True):
+                raise WpError("EMPLOYEE_RETRY_REQUIRES_KNOWN_FAILED_EXIT_AND_CLEANUP")
+            collected = self.collect_job(previous_id, previous)
+            work = self.read_json(bash(WORK_STATE, self.s["task"], self.s["base"]), 20)
+            if work.get("head") != self.s["base"] or work.get("commits") != 0:
+                raise WpError("EMPLOYEE_RETRY_WORK_IDENTITY_CHANGED")
+            credentials = self.read_json(["python3", "-c", CREDENTIAL_META], 25)
+            if credentials != self.s["credentialsBaseline"]:
+                self.pkg.set(state="CREDENTIALS_HOLD", credentialsChanged=True, credentialsHoldBeforeCommit=True)
+                raise WpError("CREDENTIALS_HOLD_BEFORE_RETRY")
+            self.check_token_absent()
+            entry = {"jobId": previous_id, "taskSheetSha256": self.s["taskSheetSha256"],
+                     "requestedModel": model, "requestedEffort": effort, "result": result, "collected": collected}
+            self.pkg.receipt("employee-first-failure", entry)
+            history.append(entry)
+            attempt = 2
+        elif self.s.get("state") != "OPENED":
             raise WpError("EMPLOYEE_ALREADY_STARTED_OR_PACKAGE_NOT_OPEN")
         if mode not in ("execute", "review") or not 1 <= timeout <= EMPLOYEE_SECONDS:
             raise WpError("INVALID_EMPLOYEE_MODE_OR_TIMEOUT")
@@ -546,7 +601,10 @@ class Wp:
             raise WpError("INVALID_MODULE")
         if g0 and mode != "review":
             raise WpError("G0_FLAG_IS_FOR_REVIEW_PACKAGES")
+        model_args = employee_model_args(agent, model, effort)
         task = self.s["task"]
+        job_id = "emp-" + task + ("-r2" if retry else "")
+        task_name = "TASK-r2.md" if retry else "TASK.md"
         paths = self.paths()
         sheet, sheet_record = self.compose_task(Path(task_file).read_bytes(), embeds, require_read)
         present = self.read_json(["python3", "-c", ORIGINALS_PRESENT, paths["work"], *sheet_record["requiredOriginals"]], 20)
@@ -554,30 +612,35 @@ class Wp:
         if missing:
             raise WpError("REQUIRED_ORIGINAL_NOT_IN_CHECKOUT_EMBED_IT:" + ",".join(missing)[:150])
         if agent == "codex":
-            argv = bash(CODEX, paths["wp"], "read-only" if mode == "review" else "workspace-write")
+            script = CODEX.replace("/TASK.md", "/" + task_name)
+            argv = bash(script, paths["wp"], "read-only" if mode == "review" else "workspace-write", *model_args)
         elif agent == "claude":
             extra = ["--allowedTools", ",".join(allowed_tools)] if allowed_tools else []
             if mode == "review":
                 extra += ["--disallowedTools", "Edit,Write,NotebookEdit"]
             auth = self.token_path() if self.claude_token else "login"
-            argv = bash(CLAUDE, paths["wp"], "plan" if mode == "review" else "acceptEdits", auth, *extra)
+            argv = bash(CLAUDE, paths["wp"], "plan" if mode == "review" else "acceptEdits", auth, *model_args, *extra)
         else:
             raise WpError("UNKNOWN_AGENT")
         claude_auth = None
         if agent == "claude":
             claude_auth = "CLAUDE_CODE_OAUTH_TOKEN" if self.claude_token else "SNAPSHOT_LOGIN"
-        self.upload(paths["wp"] + "/TASK.md", sheet)
+        self.upload(paths["wp"] + "/" + task_name, sheet)
         if claude_auth == "CLAUDE_CODE_OAUTH_TOKEN":
             self.upload(self.token_path(), self.claude_token, "0600")
         self.pkg.receipt("employee-plan", {"agent": agent, "mode": mode, "timeout": timeout,
+                                           "attempt": attempt, "jobId": job_id, "taskFile": task_name,
+                                           "requestedModel": model, "requestedEffort": effort,
                                            "taskSheetSha256": digest(sheet), "claudeAuth": claude_auth,
                                            "claudeTokenAccount": self.claude_token_account if claude_auth else None,
                                            "reviewG0": g0, **sheet_record})
         self.pkg.set(agent=agent, mode=mode, employeeTimeoutSeconds=timeout, taskSheetSha256=digest(sheet),
+                     employeeAttempt=attempt, employeeJobId=job_id, employeeAttemptHistory=history,
+                     requestedModel=model, requestedEffort=effort,
                      modules=list(modules), state="RUNNING", employeeStartedAt=now(), claudeAuth=claude_auth,
                      claudeTokenAccount=self.claude_token_account if claude_auth else None, reviewG0=g0,
                      requiredOriginals=sheet_record["requiredOriginals"], embedded=sheet_record["embedded"])
-        self.start_job("emp-" + task, timeout, paths["work"], argv)
+        self.start_job(job_id, timeout, paths["work"], argv)
         self.renew_lease(force=True)
         return self.s
 
@@ -671,7 +734,7 @@ class Wp:
 
     def poll(self):
         task = self.s["task"]
-        status = self.job_status("emp-" + task)
+        status = self.job_status(self.employee_job_id())
         report = {"state": self.s["state"], "employee": status["state"]}
         if status["state"] == "RUNNING":
             self.renew_lease()
@@ -690,12 +753,12 @@ class Wp:
             raise WpError("COMMIT_REQUIRES_EXECUTION_PACKAGE")
         if self.s.get("commitStartedAt"):
             raise WpError("COMMIT_ALREADY_STARTED_RECONCILE_ORIGINAL_JOB")
-        employee = self.job_status("emp-" + self.s["task"])
+        employee = self.job_status(self.employee_job_id())
         result = employee.get("result", {})
         if (employee["state"] != "FINISHED" or result.get("exitCode") != 0
                 or result.get("timedOut") or result.get("signal") is not None):
             raise WpError("EMPLOYEE_NOT_SUCCESSFULLY_FINISHED")
-        self.collect_job("emp-" + self.s["task"], employee)
+        self.collect_job(self.employee_job_id(), employee)
         after = self.read_json(["python3", "-c", CREDENTIAL_META], 25)
         if after != self.s["credentialsBaseline"]:
             self.pkg.set(state="CREDENTIALS_HOLD", credentialsChanged=True, credentialsHoldBeforeCommit=True)
@@ -739,7 +802,7 @@ class Wp:
             if self.s.get("mode") == "review" and self.s.get("work") != {"head": self.s["base"], "dirty": False, "commits": 0}:
                 raise WpError("REVIEW_WORKSPACE_CHANGED_MACHINE_KEPT")
             return self.delete_machine_after_close(self.s["resumeState"])
-        employee = self.job_status("emp-" + task)
+        employee = self.job_status(self.employee_job_id())
         if employee["state"] != "FINISHED":
             raise WpError("EMPLOYEE_NOT_FINISHED")
         if self.s.get("mode") == "review":
@@ -750,7 +813,7 @@ class Wp:
         for m in self.s.get("modules", []):
             if m not in MODULES:
                 raise WpError("INVALID_MODULE")
-        jobs = [("emp-" + task, employee)]
+        jobs = [(self.employee_job_id(), employee)]
         if not defer_g0:
             g0_args = [a for m in self.s.get("modules", []) for a in ("--module", m)]
             self.start_job("g0-" + task, G0_SECONDS, self.paths()["work"], bash(G0, task, *g0_args))
@@ -793,7 +856,7 @@ class Wp:
         """Collect the report and prove no repository changes; never run G0 or request a write key."""
         self.pkg.set(state="FINISHING")
         try:
-            collected = self.collect_job("emp-" + self.s["task"], employee)
+            collected = self.collect_job(self.employee_job_id(), employee)
         except (WpError, CloudError) as error:
             self.pkg.set(state="COLLECT_FAILED", problems=[str(error)])
             raise WpError("COLLECT_FAILED_MACHINE_KEPT") from None
@@ -815,7 +878,7 @@ class Wp:
                 g0_summary = dict(self.parse_g0(g0), location="REVIEW_MACHINE")
                 work_after = self.read_json(bash(WORK_STATE, task, self.s["base"]), 20)
         self.check_token_absent()
-        originals = self.originals_evidence("emp-" + task)
+        originals = self.originals_evidence(self.employee_job_id())
         after = self.read_json(["python3", "-c", CREDENTIAL_META], 25)
         changed = after != self.s["credentialsBaseline"]
         result = employee["result"]
@@ -1006,6 +1069,9 @@ def main():
     opener.add_argument("--allow", action="append", default=[])
     runner = sub.add_parser("run")
     runner.add_argument("--agent", choices=("codex", "claude"), required=True)
+    runner.add_argument("--model", help="Explicit model for this employee invocation; no global config changes")
+    runner.add_argument("--effort", help="Explicit reasoning effort; requires --model and CLI capability verification")
+    runner.add_argument("--retry", action="store_true", help="One bounded Codex execution retry after a known timeout; preserve first logs and task")
     runner.add_argument("--task-file", type=Path, required=True)
     runner.add_argument("--allowed-tools", default="")
     runner.add_argument("--module", action="append", default=[])
@@ -1038,7 +1104,7 @@ def main():
         elif args.action == "run":
             tools = [t for t in args.allowed_tools.split(",") if t]
             out = wp.run(args.agent, args.task_file, tools, args.module, args.mode, args.timeout,
-                         args.embed, args.require_read, args.g0)
+                         args.embed, args.require_read, args.g0, args.model, args.effort, args.retry)
         elif args.action == "poll":
             out = wp.poll()
         elif args.action == "commit":

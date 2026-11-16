@@ -13,7 +13,7 @@ import { remotePath } from '../../win7-dev/win7-dev.mjs';
 test('copies the real locked Office closure and executes its packaged Worker without source-directory dependencies', async () => {
   const stage = tempRoot('a9-office-package-');
   const rows = copyOfficeLiteRuntime(process.cwd(), stage, copyDirectory);
-  assert.equal(rows.length, 99);
+  assert.equal(rows.length, 115);
   const manifest = JSON.parse(fs.readFileSync(path.join(stage, 'office-lite/DELIVERY_MANIFEST.json'), 'utf8'));
   assert.equal(manifest.schemaVersion, 1);
   assert.ok(manifest.omitted.length > 0);
@@ -33,7 +33,7 @@ test('copies the real locked Office closure and executes its packaged Worker wit
     assert.equal(fs.existsSync(path.join(stage, 'office-lite', item.path)), false);
   }
   const requireFromStage = createRequire(path.join(stage, 'office-lite/package.json'));
-  for (const name of ['docx', 'exceljs', '@xmldom/xmldom', 'jszip']) assert.ok(requireFromStage(name));
+  for (const name of ['docx', 'exceljs', '@xmldom/xmldom', 'jszip', 'yazl', 'docxtemplater', 'pizzip', 'pptxgenjs', 'emailjs-mime-parser']) assert.ok(requireFromStage(name));
   assert.equal(rows.every(row => row.optionalModule === 'office-lite'), true);
   fs.mkdirSync(path.join(stage, 'product'));
   for (const name of ['office-lite-worker.js', 'office-lite-engine.js', 'office-lite-zip.js']) {

@@ -337,3 +337,6 @@
 | ADR-0331 | A9-66/67 协作扫描、文件操作身份与网络预算 | Accepted |
 | ADR-0332 | A9-66/67 库层加固 Win7 限定接受（WIN7-61） | Accepted |
 | ADR-0333 | A9-69 alpha.8 发布身份与限定接受路径 | Accepted |
+| ADR-0334 | A9-70 办公批处理、模板与只读邮件工具边界 | Accepted |
+| ADR-0335 | A9-70 双工作区配对转移与重新批准撤销 | Accepted |
+| ADR-0336 | A9-70 办公纯 JS 依赖闭包准入 | Accepted |

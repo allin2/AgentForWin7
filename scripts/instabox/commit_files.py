@@ -14,6 +14,7 @@ import sys
 
 sys.dont_write_bytecode = True
 ATTRIBUTION = "Co-Authored-By: Claude Code <noreply@anthropic.com>"
+ATTRIBUTIONS = {"claude": ATTRIBUTION, "codex": "Co-Authored-By: Codex <noreply@openai.com>"}
 SHARED = {"docs/STATUS.md", "docs/STATUS_LOG.md", "docs/tasks/README.md",
           "docs/DECISIONS.md", "docs/DECISIONS_INDEX.md"}
 PROTECTED = {".git", ".agents", ".codex", ".aws"}
@@ -33,6 +34,9 @@ def commit(work, manifest_bytes):
     if spec.get("schemaVersion") != 1:
         raise Rejected("MANIFEST_VERSION")
     base, branch, subject = spec["base"], spec["branch"], spec["subject"]
+    agent = spec.get("agent", "claude")
+    if not isinstance(agent, str) or agent not in ATTRIBUTIONS:
+        raise Rejected("MANIFEST_AGENT")
     if (len(base) != 40 or any(c not in "0123456789abcdef" for c in base)
             or not branch.startswith("box/") or not subject.strip()
             or len(subject) > 200 or "\n" in subject or "\r" in subject):
@@ -125,7 +129,7 @@ def commit(work, manifest_bytes):
     # Recheck identity after staging. On any rejection, keep the machine and index.
     if text("rev-parse", "HEAD") != base or text("symbolic-ref", "--short", "HEAD") != branch:
         raise Rejected("IDENTITY_CHANGED_BEFORE_COMMIT")
-    message = subject.strip() + "\n\n" + ATTRIBUTION + "\n"
+    message = subject.strip() + "\n\n" + ATTRIBUTIONS[agent] + "\n"
     git("commit", "--quiet", "-F", "-", data=message.encode("utf-8"))
     result = text("rev-parse", "HEAD")
     if text("rev-list", "--parents", "-n", "1", result).split() != [result, base]:

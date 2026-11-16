@@ -5614,3 +5614,30 @@ Claude P2-1、P2-3 已补测试，P2-4 已修复；P2-2 按裁决保留为 K7。
 - 决定：新增 `0.3.0-alpha.8` / `WIN7-62` 独立发版 Profile 与输入锁 `release/win7-product-v3/a9-alpha8-input-lock.json`（`A9-ALPHA8-INPUTS-D013-V26-MANAGED`），整合 A9-54～A9-68、A9-Settings 与 `ci/windows-tests` Windows 测试适配；沿用既有 Electron 22.3.27、SQLite 3.43.1/ABI 110 与 D-013 v26 managed 原生字节，不改旧版身份或 ADR-0327 的 `A9-59` 开发锁 `A9-ALPHA8-DEVELOPER-INPUTS-D013-V26-MANAGED`。
 - 顺序：本地整合与全量验证 → 一轮增量只读独立审核 → 干净源码单次构建开发/预发布包与开发机检验 → 提交准确载荷申请 Win7 `DEV_CHANNEL` 窗口 → 负责人限定接受 → 更新下载指向并同字节推送与公开预发布。不做双干净构建、正式冻结与门 A/B，结论记为 `PASS_WITH_KNOWN_LIMITS`，不产生 FORMAL Win7 PASS。
 - 边界：本条不自动授权 Win7 实机窗口写入、删除历史证据、正式门 A/B、公开推送或 GitHub Release 发布；每步均以准确源码提交与包哈希报负责人逐次确认。合同见 [A9-69](tasks/A9_69_ALPHA8_RELEASE.md)。
+
+## ADR-0334 A9-70 办公批处理、模板与只读邮件工具边界
+
+- 状态：Accepted（2026-11-16 UTC，负责人批准修正表述、所列模型与任务安排，并指示“开始做吧”）。
+- 范围：A9-70 O1～O4。新增办公能力复用 Core/Policy、Schema IPC、Workspace、审计与 checkpoint；不改变权限模式、原生组件、Provider 协议及既有文档生成入口。
+- 批处理：扫描与计划无副作用。宿主绑定工作区、对话、Turn、计划版本、准确动作及源身份/哈希；操作员确认后只执行选定动作。执行前再次校验；计划漂移、重复或旧身份确认拒绝。SHA-256 相同与疑似版本分列，模型不能据文件名自动隔离旧稿。批操作逐项记事实，不承诺跨文件原子事务；中断后仅恢复事实，不自动重放。
+- 文件发布与恢复：新输出拒绝覆盖；路径继续经过 canonical/reparse 守卫。跨卷按实际 EXDEV 处理，核对复制与源漂移后发布目标；源处理前持久化可恢复状态，不能持久化时停止。撤销检查后续人工变更，冲突拒绝覆盖。容量、占用、取消和不完整临时输出均须有结构化结果。
+- 模板：新增受支持 DOCX/PPTX 模板结构与固定 PPTX 版式，保留原生成能力。字段映射和普通/边界样张确认绑定模板、数据、输出规则及来源摘要；任一输入变化须重新确认。不承诺任意文档版式保真。HTML 以受限 Chromium 108 查看为基线，数据转义，无 Node、外部导航或外部资源权限。
+- 邮件：schemaVersion 1 的只读来源适配器承载文件夹、分页邮件、正文及附件内容读取；宿主 Workspace 承载附件写入。Mock 明示 SURROGATE，EML 只读本地输入；不发信、删信、标记远端状态或接入真实邮箱认证。邮件与附件是不可信数据，不提供可执行表达式、模块路径或权限提升入口。
+- 依赖与证据：候选及准确交付闭包依 WIN7_CONSTRAINTS §6 登记；依赖未通过 Node 16 真实入口前不得启用。开发机、SURROGATE 与 Win7 证据分别记录；本条不授予 Win7 窗口、门 A/B 或公开推送发布权限。
+
+## ADR-0335 A9-70 双工作区配对转移与重新批准撤销
+
+- 状态：Accepted（2026-11-16 UTC，负责人对任务书 §9.1 推荐回复“继续”）。
+- 决定：只接受宿主已登记且身份重新核验的两个工作区。模型只提交 workspaceId 与相对路径；不从转移记录读取任意绝对根。批准绑定两个根的身份、对话、Turn、准确动作、源 SHA 和计划版本。
+- 决定：新增 TransferReceipt v1，记录双方 workspaceId、相对路径、双方 Turn、SHA、transferId 与阶段。双方 checkpoint 只管理自身根。转移源/目标基线先持久化；目标临时复制和校验后独占发布，目标事实及转移阶段持久化完成后才移除源。任一步恢复状态未知即停止。取消、失败或崩溃保留事实，不承诺跨卷原子事务或断电无损。
+- 决定：重启仅对账，不自动重放。配对撤销必须新批准，重新解析双方登记与身份；先恢复并核验源，再在目标准确匹配时移除目标。拒绝覆盖人工变化。普通单工作区 undo 对配对转移拒绝，不能显示整次转移已撤销。
+- 边界：保留 checkpoint 工作区外路径仅记事实规则。不增加任意路径权限、系统权限、原生 API 或真实跨卷已验证声明。开发机故障注入与 Win7/NTFS 直接证据分别记录。
+
+## ADR-0336 A9-70 办公纯 JS 依赖闭包准入
+
+- 状态：Accepted（2026-11-16 UTC，A9-70 获批范围内的 C15/C16 准入）。
+- 决定：在 office-lite 独立 runtime 锁定 yazl 3.3.1、docxtemplater 3.71.1、pizzip 3.3.0、pptxgenjs 4.0.1、emailjs-mime-parser 2.0.7，并将 pptxgenjs 的 image-size 锁为 2.0.4。pizzip 选择 MIT，未引入商业模块。其余新增直接依赖为 MIT，完整传递闭包许可证、工件 SHA 与来源见对应 DEPENDENCIES.json。
+- 依据：115 包闭包官方 integrity 与 tarball SHA-256 已核验，锁文件 SHA 4559626719f6e4a684be20916195f1cb668659920986d8de2c5212cdb85bc3e1；本轮 npm audit 报告为 0，不构成未来无漏洞保证。Electron 22 / Node 16 实际 DOCX、PPTX、PNG、ZIP 与 MIME 操作通过，只属于开发机准入证据。
+- 偏差：image-size 2.0.4 声明 Node >=18，本项目按源码 API 检查及 Node 16 直接运行接受限定用途，不冒充上游 Node 16 支持。MIME 库 GBK 正文转换不可直接使用，适配器必须从原始传输字节以 TextDecoder 解码并校验失败，不接受错误中文输出。
+- 交付：目标机离线使用锁定闭包，不在线安装；构建先生成实际依赖清单与闭包。依赖缺失或不支持的内容使对应能力拒绝，既有文本工具保持可用。不得升级 Electron/Node、引入 Office 自动化、外部程序或新原生模块。
+- 证据：outputs/a9-70-instabox/p0/dependencies-qualified-r2；Win7 实机与标准 ZIP 资源管理器兼容性为 NOT_PERFORMED。详细 Profile 见 WIN7_CONSTRAINTS。

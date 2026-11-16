@@ -419,6 +419,83 @@ class CloseTests(WorkPackageBase):
             runner.close()
 
 
+class RetryTests(WorkPackageBase):
+    def failed_employee(self):
+        runner = self.open_package()
+        sheet = self.root / "TASK.md"
+        sheet.write_text("first immutable task", encoding="utf-8")
+        self.api.work = {"head": BASE, "dirty": True, "commits": 0}
+        self.api.job_code["emp"] = "import time; time.sleep(4)"
+        runner.run("codex", sheet, modules=["workspace"], timeout=1, model="gpt-6.1-sol", effort="high")
+        status = runner.wait_job("emp-t1", 15, interval=0.05)
+        self.assertTrue(status["result"]["timedOut"])
+        self.assertTrue(status["result"]["tmpdirRemoved"])
+        return runner, sheet
+
+    def test_retry_preserves_first_failure_and_task_and_tracks_new_job(self):
+        runner, sheet = self.failed_employee()
+        first_sha = runner.s["taskSheetSha256"]
+        self.api.job_code["emp"] = "print('verified second attempt')"
+        sheet.write_text("bounded finishing task", encoding="utf-8")
+        runner.run("codex", sheet, modules=["workspace"], timeout=1,
+                   model="gpt-6.1-sol", effort="high", retry=True)
+        status = runner.wait_job("emp-t1-r2", 15, interval=0.05)
+        self.assertEqual(status["result"]["exitCode"], 0)
+        self.assertEqual(runner.employee_job_id(), "emp-t1-r2")
+        self.assertEqual(runner.s["employeeAttempt"], 2)
+        self.assertEqual(runner.s["employeeAttemptHistory"][0]["taskSheetSha256"], first_sha)
+        self.assertTrue(runner.s["employeeAttemptHistory"][0]["result"]["timedOut"])
+        tasks = {route.split("&")[0].rsplit("/", 1)[-1]: data for route, data in self.api.uploads.items() if "TASK" in route}
+        self.assertEqual(len(tasks), 2)
+        self.assertTrue(any(b"first immutable task" in data for data in tasks.values()))
+        self.assertTrue(any(b"bounded finishing task" in data for data in tasks.values()))
+        self.assertEqual(runner.poll()["employee"], "FINISHED")
+        with self.assertRaisesRegex(wp.WpError, "RETRY_LIMIT"):
+            runner.run("codex", sheet, modules=["workspace"], timeout=1,
+                       model="gpt-6.1-sol", effort="high", retry=True)
+        runner.abort("test")
+
+    def test_retry_cannot_change_model_mode_or_increase_timeout(self):
+        runner, sheet = self.failed_employee()
+        for model, mode, timeout in (("other-model", "execute", 1), ("gpt-6.1-sol", "review", 1),
+                                     ("gpt-6.1-sol", "execute", 2)):
+            with self.subTest(model=model, mode=mode, timeout=timeout):
+                with self.assertRaises(wp.WpError):
+                    runner.run("codex", sheet, modules=["workspace"], mode=mode, timeout=timeout,
+                               model=model, effort="high", retry=True)
+        self.assertEqual(runner.s["employeeAttempt"], 1)
+        self.assertFalse(any("TASK-r2" in route for route in self.api.uploads))
+        runner.abort("test")
+
+    def test_retry_stops_on_credentials_change_before_upload(self):
+        runner, sheet = self.failed_employee()
+        self.api.creds[".codex/auth.json"]["sha256"] = "9" * 64
+        with self.assertRaisesRegex(wp.WpError, "CREDENTIALS_HOLD_BEFORE_RETRY"):
+            runner.run("codex", sheet, modules=["workspace"], timeout=1,
+                       model="gpt-6.1-sol", effort="high", retry=True)
+        self.assertEqual(runner.s["state"], "CREDENTIALS_HOLD")
+        self.assertFalse(any("TASK-r2" in route for route in self.api.uploads))
+        runner.abort("test")
+
+    def test_retry_rejects_changed_source_identity(self):
+        runner, sheet = self.failed_employee()
+        self.api.work["head"] = HEAD
+        with self.assertRaisesRegex(wp.WpError, "WORK_IDENTITY_CHANGED"):
+            runner.run("codex", sheet, modules=["workspace"], timeout=1,
+                       model="gpt-6.1-sol", effort="high", retry=True)
+        self.assertFalse(any("TASK-r2" in route for route in self.api.uploads))
+        runner.abort("test")
+
+    def test_successful_employee_is_not_repeated(self):
+        runner = self.open_package()
+        self.finish_employee(runner)
+        sheet = self.root / "TASK.md"
+        with self.assertRaisesRegex(wp.WpError, "KNOWN_FAILED_EXIT"):
+            runner.run("codex", sheet, modules=["workspace"], timeout=1, retry=True)
+        self.assertFalse(any("TASK-r2" in route for route in self.api.uploads))
+        runner.abort("test")
+
+
 class CommitTests(WorkPackageBase):
     def manifest(self, runner):
         path = self.root / "manifest.json"
@@ -492,6 +569,42 @@ class ReviewTests(WorkPackageBase):
             (repo / name).parent.mkdir(parents=True, exist_ok=True)
             (repo / name).write_text(text, encoding="utf-8")
         return repo
+
+    def test_explicit_model_and_effort_reach_cli_without_shell_interpretation(self):
+        folder = self.root / "model package"
+        folder.mkdir()
+        (folder / "TASK.md").write_text("probe", encoding="utf-8")
+        for agent, script, prefix in (("codex", wp.CODEX, [str(folder), "read-only"]),
+                                      ("claude", wp.CLAUDE, [str(folder), "plan", "login"])):
+            stub = self.root / agent
+            stub.write_text('#!/bin/bash\nprintf "%s\\n" "$@"\n', encoding="utf-8")
+            stub.chmod(0o755)
+            model = "gpt-6.1-sol" if agent == "codex" else "claude-sonnet-5-5"
+            args = wp.employee_model_args(agent, model, "high")
+            done = subprocess.run(wp.bash(script, *prefix, *args),
+                                  env=dict(os.environ, PATH=str(self.root) + os.pathsep + os.environ["PATH"]),
+                                  capture_output=True, text=True, check=True, timeout=10)
+            argv = done.stdout.splitlines()
+            self.assertEqual(argv[argv.index("--model") + 1], model)
+            if agent == "codex":
+                self.assertIn('model_reasoning_effort="high"', argv)
+                self.assertEqual(argv[argv.index("--sandbox") + 1], "read-only")
+            else:
+                self.assertEqual(argv[argv.index("--effort") + 1], "high")
+                self.assertEqual(argv[argv.index("--permission-mode") + 1], "plan")
+
+    def test_model_config_rejected_before_any_employee_upload(self):
+        runner = self.open_package()
+        sheet = self.root / "TASK.md"
+        sheet.write_text("probe", encoding="utf-8")
+        for agent, model, effort in (("codex", "bad;echo", "high"), ("codex", "$(id)", "high"),
+                                     ("codex", None, "high"), ("claude", "sonnet", "xhigh")):
+            with self.subTest(agent=agent, model=model, effort=effort):
+                with self.assertRaises(wp.WpError):
+                    runner.run(agent, sheet, model=model, effort=effort)
+        self.assertEqual(runner.s["state"], "OPENED")
+        self.assertFalse(any("TASK.md" in route for route in self.api.uploads))
+        runner.abort("test")
 
     def uploaded_sheet(self):
         sheets = [data for route, data in self.api.uploads.items() if route.split("&")[0].endswith("TASK.md")]

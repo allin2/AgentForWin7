@@ -10,12 +10,20 @@
     "@xmldom/xmldom": "0.9.12",
     "docx": "8.0.0",
     "exceljs": "4.4.0",
-    "jszip": "3.10.1"
+    "jszip": "3.10.1",
+    "yazl": "3.3.1",
+    "docxtemplater": "3.71.1",
+    "pizzip": "3.3.0",
+    "pptxgenjs": "4.0.1",
+    "emailjs-mime-parser": "2.0.7"
   },
   "overrides": {
     "exceljs": {
       "uuid": "11.1.1",
       "unzipper": "0.12.3"
+    },
+    "pptxgenjs": {
+      "image-size": "2.0.4"
     }
   }
 }

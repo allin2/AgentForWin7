@@ -138,6 +138,38 @@ Runtime Profile 必须检测、安装/配置或提供明确失败说明的前置
 
 ## 6. 依赖评审登记表
 
+### A9-70 Office Workflow 候选准入（2026-11-16）
+
+负责人批准 A9-70 及 InstaBox 实施。目标继续为 Electron 22.3.27 / Node 16.17.1；
+候选为 yazl 3.3.1（MIT）、docxtemplater 3.71.1（MIT）、pizzip 3.3.0（选择 MIT）、
+pptxgenjs 4.0.1（MIT）与 mailparser 3.9.0（MIT）。先限于开发机系统临时目录内的准入检查，
+不因此登记为已交付或 Win7 可用；实际传递版本、来源、SHA-512、工件 SHA-256、许可证和审计结果
+经锁文件与清单核对后，才引入可选模块。mailparser 当前最新版要求 Node 20，不用于产品。
+候选不新增原生 ABI、系统安装、服务、注册表或管理员权限；目标机不联网安装。
+缺失或不兼容时对应办公能力拒绝并显示结构化原因，既有文本能力保持；不静默升级产品运行时。
+检查真实 Electron Node 16 的加载、模板填充、PPTX/ZIP 生成及 MIME 解码；临时目录 finally 清理，
+仅将锁文件、审计、哈希及检查结果复制到本机 outputs/a9-70-instabox/p0/。
+工件闭包与候选运行结果当前 UNKNOWN，Win7 实机为 NOT_PERFORMED。
+
+候选 r1 的 Electron Node 16 模板/PPTX/MIME 检查通过，但注册表审计报 5 高危与 2 低危，
+不得据运行通过进入产品。追加仅限临时目录的 r2 比较：emailjs-mime-parser 2.0.7（MIT）
+替代邮件解析候选；pptxgenjs 的 image-size 评估精确 override 2.0.4（MIT）。
+image-size 2.0.4 声明 Node >=18，必须单列声明偏差、源码/API 检查及 Node 16 实测；
+尚未批准作为产品兼容结论，不更改产品 Node、不扩大图片格式或降低现有检查。
+
+#### r2 开发机准入结论（ADR-0336）
+
+r1 历史候选保持。产品新增闭包采用 r2：yazl 3.3.1、docxtemplater 3.71.1、pizzip 3.3.0、
+pptxgenjs 4.0.1、emailjs-mime-parser 2.0.7，image-size override 2.0.4；不引入 mailparser。
+锁文件 SHA-256 为 `4559626719f6e4a684be20916195f1cb668659920986d8de2c5212cdb85bc3e1`。
+完整 115 包来源、integrity、tarball SHA-256、文件 SHA-256 与许可证在 src/shell/office-lite/DEPENDENCIES.json。
+pizzip 选择 MIT，其余新增直接库为 MIT；Node 16 真实加载及 DOCX/PPTX/ZIP/MIME/PNG 操作通过。
+审计报告 0 仅为该次已知库结果。image-size 上游 Node >=18 声明偏差由源码/API 和实际 Node 16 受限调用覆盖，
+保留不受上游支持的维护风险；不据此扩大图片格式。GBK 正文必须由原始 MIME 字节经过 TextDecoder 适配，错误或未知编码拒绝。
+产品构建机按锁离线收集 closure，Win7 不联网解析；无新原生 ABI、系统 API、KB、服务、安装、配置或提权。
+对应库缺失/格式不支持时只禁用该办公能力，保留文本工具。项目维护方负责漏洞监测与限定回补。
+实机必查中文路径、ZIP 资源管理器读取、模板查看环境、MIME 中文及字节、取消与退出；Win7 为 NOT_PERFORMED。
+
 ### A9-42 Office Lite Profile（ADR-0302，2026-10-29）
 
 负责人明确要求实现。复用 Electron 22.3.27 / Node 16.17.1 的 worker_threads、zlib 和 Buffer；

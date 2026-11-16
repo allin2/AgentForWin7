@@ -13,7 +13,8 @@ afterEach(() => {
   for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
 function fixture(approved = true) {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'a9-70-files-')); roots.push(root);
+  // Match the canonical root used by the service (/var resolves to /private/var on macOS).
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'a9-70-files-'))); roots.push(root);
   const bindings: OfficeBatchApprovalBinding[] = [];
   const service = new A9WorkspaceService(root, approved ? { officeBatchApproval: {
     async consume(id, binding) { bindings.push(binding); if (id !== 'ui-authorized') throw Object.assign(new Error('denied'), { code: 'UI_DENIED' }); return { status: 'approved', bindingSha256: binding.bindingSha256 }; },
