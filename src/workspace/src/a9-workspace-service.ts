@@ -39,6 +39,8 @@ import {
 import { WorkspaceError } from './types';
 import { copyTreeAsync, removeTreeAsync } from './async-tree';
 import { IoGuard, captureNearestAnchor, identityChanged, samePath } from './directory-identity';
+import { OfficeBatchService, OfficeBatchApprovalPort, OfficeBatchIdentity, OfficeScanOptions,
+  OfficeOrganizeActionInput, OfficeBatchExecuteOptions, OfficeMetadataScan, OfficeOrganizePlan, OfficeBatchResult } from './a9-office-batch';
 
 export interface A9ListResult {
   path: string;
@@ -223,6 +225,7 @@ export class A9WorkspaceService {
   private readonly rootIdentityError: WorkspaceError | undefined;
   private readonly ignoreFilter: IgnoreFilter;
   private readonly checkpointManager: CheckpointManager;
+  private readonly officeBatch: OfficeBatchService;
   private readonly baselines = new Map<string, BaselineFact>();
   private readonly containsSensitiveData: (value: string | Buffer) => boolean;
   private readonly containsSensitiveFeedbackData: (value: string | Buffer) => boolean;
@@ -250,7 +253,8 @@ export class A9WorkspaceService {
   constructor(
     workspaceRoot: string,
     options: { containsSensitiveData?: (value: string | Buffer) => boolean;
-      containsSensitiveFeedbackData?: (value: string | Buffer) => boolean } = {},
+      containsSensitiveFeedbackData?: (value: string | Buffer) => boolean;
+      officeBatchApproval?: OfficeBatchApprovalPort } = {},
   ) {
     // 规范化工作区根本身（macOS /var → /private/var、junction 等），
     // 否则 realpathSync 的文件会得到跨前缀的 ../../ 相对路径。
@@ -298,6 +302,7 @@ export class A9WorkspaceService {
     this.containsSensitiveFeedbackData = options.containsSensitiveFeedbackData ?? this.containsSensitiveData;
     this.ignoreFilter = createWorkspaceIgnoreFilter(canonicalRoot);
     this.checkpointManager = new CheckpointManager(canonicalRoot, undefined, this.containsSensitiveData);
+    this.officeBatch = new OfficeBatchService(canonicalRoot, this.checkpointManager, value => this.resolvePath(value), options.officeBatchApproval);
     if (fs.existsSync(this.checkpointManager.getRecoveryRoot())) {
       this.checkpointManager.ensureRecoveryIgnore();
     }
@@ -305,6 +310,21 @@ export class A9WorkspaceService {
 
   getCheckpointManager(): CheckpointManager {
     return this.checkpointManager;
+  }
+
+  /** A9-70 P1: asynchronous, bounded read-only metadata; no model calls. */
+  scanMetadata(targetPath = '', options: OfficeScanOptions = {}): Promise<OfficeMetadataScan> {
+    return this.officeBatch.scan(targetPath, options);
+  }
+
+  /** Creates a memory-only immutable preview. This does not confer approval. */
+  planOrganize(identity: OfficeBatchIdentity, actions: OfficeOrganizeActionInput[], signal?: AbortSignal): Promise<OfficeOrganizePlan> {
+    return this.officeBatch.plan(identity, actions, signal);
+  }
+
+  /** Host-only entry. A trusted Core/Policy approval port is required at construction. */
+  executeOrganize(options: OfficeBatchExecuteOptions): Promise<OfficeBatchResult> {
+    return this.officeBatch.execute(options);
   }
 
   // -------------------------------------------------------------------------
