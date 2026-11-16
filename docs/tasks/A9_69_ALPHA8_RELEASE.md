@@ -1,14 +1,14 @@
 # A9-69 — alpha.8 集成整合与发布准备
 
 ```text
-Status: APPROVED_FOR_IMPLEMENTATION
+Status: COMPLETE
 Task Type: PRODUCT_RELEASE
 Target Branch: main
 Source Baseline: d12f840bb5fff8bcb83a87e220ae8b3e8d753c83
 Target Version: 0.3.0-alpha.8
 Candidate: WIN7-62
-Phase-Gate: A9_69_IMPLEMENTATION_AUTHORIZED
-Win7-Validation: NOT_PERFORMED
+Phase-Gate: A9_69_WIN7_62_PASS_WITH_KNOWN_LIMITS
+Win7-Validation: DEV_CHANNEL
 ```
 
 ## 1. 当前范围
@@ -25,7 +25,7 @@ Win7-Validation: NOT_PERFORMED
 1. 完成本地整合修改与 `A9-ALPHA8-INPUTS-D013-V26-MANAGED` 身份登记。
 2. 在开发机运行 `npm run verify:tools`、`npm run verify:release`、`npm run docs:check`、`npm test` 与 `scripts/win7-dev/test/channel.test.mjs`。
 3. 对合并后的 `main` 增量进行一轮只读独立审核，闭环任一确认问题后形成干净本地提交。
-4. 从干净提交构建 `Win7CodingAgent-0.3.0-alpha.8-win7-x64.zip`，核对 manifest、3265 文件闭包、原生输入与 Mac Electron 22 包内主链路。
+4. 从干净提交构建 `Win7CodingAgent-0.3.0-alpha.8-win7-x64.zip`，核对 manifest、3283 文件闭包、原生输入与 Mac Electron 22 包内主链路。
 5. 准备 `WIN7-62` 同包 Win7 `DEV_CHANNEL` 运行载荷与空间方案，提交负责人批准新目标窗口。
 6. 获批后完成 Win7 `DEV_CHANNEL` 验证；取得负责人按 ADR-0333 / ADR-0320 的限定接受与推送发布授权后，更新 `README.md`、推送 `main` 与标签并回下载核验全部发布附件。
 
@@ -47,3 +47,27 @@ Win7-Validation: NOT_PERFORMED
   - `a9-workbench.js` `providerValues()` 显式捕获 `validity.badInput` 为非法哨兵交由 `applyProvider()` 与 Runtime 拒绝，同时保留主动留空语义。
   - 二次只读复审（`codex/gpt-6.1-sol`）结论：**PASS，P0=0、P1=0、P2=0**。
   - 新增/更新回归测试：`a9-68-checkpoint-recovery-pending.test.ts`（IPC `a9.snapshot.get` 非阻塞）、`a9-26-context-budget-config.test.ts`（128K 全链路、队列缩容保留、`null` 清除）、`a9-composer-state.test.ts`（缩容 `take()` 保留）、`a9-workbench-contract.test.ts`（`auto` 清除/回填、越界与 `badInput` 拒绝）。
+
+## 5. 干净构建、开发机复验与 Win7 DEV_CHANNEL 结果（2026-11-16 UTC）
+
+- **全量检查与干净打包（开发机）**：绑定提交 `585ea92b…`（未含未跟踪 `scripts/dashboard/`）。`npm run docs:check`（426/93）、`npm run verify:tools`、`channel.test.mjs`（46/46）、`npm test`（228 套件 / 4,378 项）、`npm run verify:release`（413 PASS / 0 FAIL / 16 `NOT_PERFORMED`）均 PASS。按 `A9-ALPHA8-INPUTS-D013-V26-MANAGED` 单次构建 `Win7CodingAgent-0.3.0-alpha.8-win7-x64.zip`（`111,281,027` 字节、ZIP SHA-256 `3e3970a9…`、manifest SHA-256 `a7ce32a8…`、`3,283` 受管文件、`source_dirty=false`、`external_acceptance_eligible=true`），开发机 `outputs/a9-69-alpha8/win7/local-verify.cjs` 取得 4/4 PASS。
+- **Win7 `DEV_CHANNEL` 运行 `win762`（Win7 实机）**：负责人批准 60 分钟窗口与临时 `26 GB` 上限后，执行代理在 `DCCS-CHAIZL-PC`（build `7601`、普通用户 `agent`、Session `1`、Medium 完整性）对同字节 `WIN7-62` 包运行 `a969-win762-controller`，取得 **14/14 PASS**（`exit_code=0`、`normal_quit=true`、回环请求 `4` 次、外部模型请求 `0` 次）：
+  1. `MANIFEST_IDENTITY` / `PACKAGE_SOURCE` / `PACKAGE_CLOSURE`（`3,283` 文件逐字节核验，仅入口 `package.json` 由驱动覆盖）。
+  2. `SQLITE_NATIVE_LOAD`（`3.43.1`）与 `PRODUCT_MODULE_AND_ALPHA8_DESCRIPTOR_LOAD`（`0.3.0-alpha.8` / `WIN7-CODING-AGENT-A9-ALPHA8`）。
+  3. `WIN7_DPAPI_AVAILABLE` / `WIN7_DPAPI_NO_PLAINTEXT_IN_SQLITE` / `WIN7_DPAPI_100K_AND_MULTIWORKSPACE_RESTORE`（真实 Win7 DPAPI 加密 100K 草稿与双中文工作区重启恢复）。
+  4. `A968_IPC_SNAPSHOT_NONBLOCKING`（对账期间 `a9.snapshot.get` 耗时 `326 ms`）、`A968_RECOVERED_TURN_EXECUTES`、`A968_CONTINUE_TASK_FATAL_FAIL_CLOSED`。
+  5. `A9_SETTINGS_128K_NO_TRUNCATION_AND_REJECTION`、`A9_SETTINGS_QUEUE_RETENTION_AND_AUTO_CLEAR`。
+  6. `WIN7_CHROMIUM108_WORKBENCH_DOM`（真实 Chromium `108.0.5359.215` `BrowserWindow` 验证 `maxLength=128000`、`budgetPlaceholder=400000`、`composerPlaceholder=128000`、`thinkingOptions`/`effortOptions` 含 `auto`）。
+- **收尾与后检**：`cleanup.ps1` 已删除 `runtime`、`sandbox`、`controller-profile`、`profile`。UTC `2026-11-16T05:00:48Z` 实机 `status` 核查 `root_bytes=24,565,966,508`、`free_bytes=855,244,808,192`、`lock.active=false`（`holder=a946lanrx`）、`processes=[]`、`tasks=[]`、`extraction_lifecycle_unknown=false`；临时 `26 GB` 容量例外已从 `common.ps1` 与 `win7-dev.mjs` 移除。汇总见本机 `outputs/a9-69-alpha8/win7/RESULT_FINAL.json`。
+- **待裁决**：ADR-0333 / ADR-0320 限定接受、`README.md` 下载指向更新、`origin/main` 与 `v0.3.0-alpha.8-win7-62` 标签推送及公开 GitHub Release 发布均为 `NOT_PERFORMED`。
+
+## 6. 负责人限定接受与发布授权（2026-11-16 UTC）
+
+负责人选择选项甲，依据 ADR-0333 与 ADR-0320 将 `WIN7-62`（源码 `585ea92b…`、ZIP `3e3970a9…`、manifest `a7ce32a8…`）签发为 `A9_69_WIN7_62_PASS_WITH_KNOWN_LIMITS`，并授权更新 `README.md` 下载指向、推送 `origin/main` 与标签 `v0.3.0-alpha.8-win7-62`，以及上传 4 个附件并公开 GitHub Pre-release；接受记录保存在本机 `outputs/a9-69-alpha8/publish/OWNER_ACCEPTANCE.json`。
+
+登记的已知限制：
+
+1. 证据层级为开发机验证加 Win7 实机 `DEV_CHANNEL`（`win762` 14/14 PASS）；未执行双构建、正式冻结与门 A/B，不产生正式 Win7 PASS。
+2. Win7 实机验证经候选外驱动与本地回环 SSE 完成（外部模型请求 `0` 次）；`C:\A9-DEV` 根当前已用约 `24.57 GB`（高于默认 `20 GB` 上限，后续新 Win7 上传需另行报批清理或扩容）。
+3. 同包 Win10 验收机验证、原生 125% DPI 视觉验证、真实外部模型推理、完整 Review 后端及完整人工 GUI 旅程为 `NOT_PERFORMED`。
+4. 沿用基线限制：会话内删除已绑定恢复目录后需重开工作区（A9-66/67 非阻断 P2）、深历史分页全量扫描及 200 MiB 单文件同步后态约 `829 ms`。

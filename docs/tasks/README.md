@@ -43,14 +43,11 @@ A9-64 只固定 `923bf875…` 的独立审查输入并登记任务；审查由�
 
 批次3、5（2026-11-12，负责人要求使用InstaBox开发）：A9-66/67 已完成开发、独审/G0/G1、本地整合与 Win7 限定接受（WIN7-61，ADR-0332），结论 `A9_66_A9_67_WIN7_61_PASS_WITH_KNOWN_LIMITS`，已移入已关闭任务。任务书定义全部15项finding的复核处置；本地 main 已提交，未公开推送。
 
-本轮 A9-69 alpha.8 集成整合与发布准备（2026-11-16 UTC，负责人确认“同意”）：
-`APPROVED_FOR_IMPLEMENTATION`，实际分支 `main`，基线 `d12f840b…`。
-按对应任务书与 ADR-0333 执行本地整合（含 `ci/windows-tests` Windows 适配提取、`czl` 探针报告、`A9_60` 文档与 `t3_sidebar_ux_mapping_proposal`）、建立 `A9-ALPHA8-INPUTS-D013-V26-MANAGED`（`0.3.0-alpha.8` / `WIN7-62`）、运行全量开发机验证与一轮增量只读独立审核，并单次构建 `Win7CodingAgent-0.3.0-alpha.8-win7-x64.zip`。
-Win7 实机窗口、限定接受、公开推送与 GitHub Release 发布须待准确产物就绪后逐次报负责人批准。
+本轮 A9-69 alpha.8 集成整合与发布准备（2026-11-16 UTC，负责人确认“同意”，后继批准 `WIN7-62` Win7 窗口并选择选项甲限定接受及公开发布）：
+`COMPLETE`，产品源码提交 `585ea92b…`，结论 `A9_69_WIN7_62_PASS_WITH_KNOWN_LIMITS`（ADR-0333 / ADR-0320），已移入已关闭任务。
 
 | 任务书 | 类型 | 状态 | Phase-Gate | Win7 验证 |
 |---|---|---|---|---|
-| [A9-69（alpha.8 集成整合与发布准备，0.3.0-alpha.8 / WIN7-62，ADR-0333）](A9_69_ALPHA8_RELEASE.md) | PRODUCT_RELEASE | APPROVED_FOR_IMPLEMENTATION | A9_69_IMPLEMENTATION_AUTHORIZED | NOT_PERFORMED |
 | [A9 Settings：上下文预算、输入框上限与 thinking 设置](A9_SETTINGS_CONTEXT_COMPOSER_THINKING.md) | PRODUCT_EXPERIENCE | APPROVED_FOR_IMPLEMENTATION | A9_SETTINGS_IMPLEMENTATION | NOT_PERFORMED |
 | [A9-65（已合入本地main；开发机收口完成，Win7未执行）](A9_65_VISIBLE_WAITS_AND_DIAGNOSTICS.md) | PRODUCT_RELIABILITY_HARDENING | APPROVED_FOR_IMPLEMENTATION | A9_65_DEVELOPER_VERIFIED | NOT_PERFORMED |
 | [A9-64（已合入本地main；开发机收口完成，Win7未执行）](A9_64_SEARCH_LIST_RESPONSIVENESS.md) | PRODUCT_RELIABILITY_HARDENING | APPROVED_FOR_IMPLEMENTATION | A9_64_DEVELOPER_VERIFIED | NOT_PERFORMED |
@@ -82,6 +79,7 @@ Win7 实机窗口、限定接受、公开推送与 GitHub Release 发布须待�
 
 | 任务书 | 类型 | 状态 | Phase-Gate | Win7 验证 |
 |---|---|---|---|---|
+| [A9-69（alpha.8 / WIN7-62 限定接受并授权发布）](A9_69_ALPHA8_RELEASE.md) | PRODUCT_RELEASE | COMPLETE | A9_69_WIN7_62_PASS_WITH_KNOWN_LIMITS | DEV_CHANNEL |
 | [A9-66（批次3；WIN7-61 限定接受）](A9_66_LARGE_INPUT_RESPONSIVENESS.md) | PRODUCT_RELIABILITY_HARDENING | COMPLETE | A9_66_A9_67_WIN7_61_PASS_WITH_KNOWN_LIMITS | DEV_CHANNEL |
 | [A9-67（批次5；WIN7-61 限定接受）](A9_67_NETWORK_AND_BOUNDARY_HARDENING.md) | PRODUCT_RELIABILITY_HARDENING | COMPLETE | A9_66_A9_67_WIN7_61_PASS_WITH_KNOWN_LIMITS | DEV_CHANNEL |
 | [A9-60（Win7模拟确认Checkpoint停顿；持续转圈未复现）](A9_60_BULK_FILE_HANG_DIAGNOSIS.md) | DIAGNOSTIC_TOOLING | COMPLETE | A9_60_DIAGNOSIS_COMPLETE | DEV_CHANNEL |
