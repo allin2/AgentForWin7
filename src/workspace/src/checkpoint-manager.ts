@@ -124,6 +124,8 @@ export interface TurnCheckpoint {
   unrecoverable: Record<string, UnrecoverableExternalChange>;
   /** Durable Shell-entry baseline; pending collection makes undo fail closed after a crash. */
   externalBaseline?: PersistedExternalBaseline;
+  /** ADR-0335: durable local guard; never grants authority over another root. */
+  pairedTransfers?: Record<string, { schemaVersion: 1; path: string; closed: boolean }>;
 }
 
 export interface PersistedExternalBaseline {
@@ -208,7 +210,7 @@ export class CheckpointManager {
     this.containsSensitiveData = containsSensitiveData;
     try {
       this.recoveryBaseAnchor = captureNearestAnchor(this.recoveryRoot, 'Recovery store');
-      for (const dir of [this.recoveryRoot, this.blobsRoot, this.snapshotsRoot, this.manifestsRoot]) {
+      for (const dir of [this.recoveryRoot, this.blobsRoot, this.snapshotsRoot, this.manifestsRoot, path.join(this.recoveryRoot, 'transfers')]) {
         if (fs.existsSync(dir)) this.recoveryDirectoryAnchors.set(dir, captureAnchor(dir, 'Recovery directory'));
       }
     } catch (error) {
@@ -296,7 +298,7 @@ export class CheckpointManager {
     // Resolve namespace anchors at each I/O, including namespaces first created
     // after this guard. IoGuard checks each anchor once; recursively validating
     // four overlapping directory chains here would multiply every tree step.
-    return new IoGuard([...anchors, ...[this.blobsRoot, this.snapshotsRoot, this.manifestsRoot]
+    return new IoGuard([...anchors, ...[this.blobsRoot, this.snapshotsRoot, this.manifestsRoot, path.join(this.recoveryRoot, 'transfers')]
       .map((dir) => () => this.recoveryDirectoryAnchors.get(dir))]);
   }
 
@@ -322,7 +324,7 @@ export class CheckpointManager {
 
   /** Pure validation, including absent directories: no lazy-root creation. */
   validateRecoveryIdentity(): void {
-    for (const dir of [this.recoveryRoot, this.manifestsRoot, this.snapshotsRoot, this.blobsRoot]) {
+    for (const dir of [this.recoveryRoot, this.manifestsRoot, this.snapshotsRoot, this.blobsRoot, path.join(this.recoveryRoot, 'transfers')]) {
       const guard = this.recoveryIoGuard(dir);
       guard.assertAnchors();
       guard.checkInside(dir);
@@ -340,6 +342,84 @@ export class CheckpointManager {
       else this.recoveryDirectoryAnchors.set(entry, captureAnchor(entry, 'Recovery directory'));
     }
     this.ensureRecoveryIgnore();
+  }
+
+  getWorkspaceRoot(): string { return this.workspaceRoot; }
+
+  /** Host-only paired-transfer persistence. Writes acknowledge disk, never cache only. */
+  setPairedTransfer(turnId: string, transferId: string, relative: string, closed: boolean): void {
+    if (!/^transfer-[a-f0-9]{32}$/.test(transferId)) throw new Error('A9_TRANSFER_ID_INVALID');
+    this.assertWorkspaceRelativePath(relative, 'paired transfer path');
+    this.assertNotSensitive(relative, 'paired transfer path');
+    const draft = this.cloneCheckpoint(this.startTurn(turnId));
+    const markers = { ...draft.pairedTransfers };
+    if (Object.keys(markers).length >= 100 && !markers[transferId]) throw new Error('A9_TRANSFER_LIMIT');
+    markers[transferId] = { schemaVersion: 1, path: relative, closed };
+    draft.pairedTransfers = markers;
+    if (closed && draft.changes[relative]) draft.changes[relative].undoAppliedAt = new Date().toISOString();
+    this.persist(draft);
+    this.checkpoints.set(turnId, draft);
+  }
+
+  /** Original bytes come only from this root's validated checkpoint binding. */
+  readPairedOriginal(turnId: string, transferId: string, relative: string, sha256: string): Buffer {
+    this.validateRecoveryIdentity();
+    const checkpoint = this.readValidatedCheckpoint(turnId);
+    const marker = checkpoint?.pairedTransfers?.[transferId];
+    const record = checkpoint?.changes[relative];
+    if (!marker || marker.path !== relative || !record?.originalBlobPath || record.originalHash !== sha256) throw new Error('A9_TRANSFER_BASELINE_INVALID');
+    const guard = this.recoveryIoGuard(path.dirname(record.originalBlobPath));
+    guard.check(record.originalBlobPath);
+    const stat = fs.lstatSync(record.originalBlobPath);
+    if (!stat.isFile() || stat.nlink !== 1 || stat.size > 16 * 1024 * 1024) throw new Error('A9_TRANSFER_BASELINE_INVALID');
+    guard.check(record.originalBlobPath);
+    const bytes = fs.readFileSync(record.originalBlobPath);
+    if (bytes.length > 16 * 1024 * 1024 || this.hashBytes(bytes) !== sha256) throw new Error('A9_TRANSFER_BASELINE_INVALID');
+    return bytes;
+  }
+
+  /** Receipt names are opaque IDs, not paths; guarded by the existing recovery store. */
+  writeTransferReceipt(transferId: string, json: string): void {
+    if (!/^transfer-[a-f0-9]{32}$/.test(transferId) || Buffer.byteLength(json, 'utf8') > 16384) throw new Error('A9_TRANSFER_RECEIPT_INVALID');
+    this.assertNotSensitive(json, 'transfer receipt');
+    const dir = path.join(this.recoveryRoot, 'transfers');
+    this.ensureRecoveryDir(dir);
+    const guard = this.recoveryIoGuard(dir);
+    guard.checkInside(dir);
+    if (fs.readdirSync(dir).length >= 100 && !fs.existsSync(path.join(dir, transferId + '.json'))) throw new Error('A9_TRANSFER_LIMIT');
+    const target = path.join(dir, transferId + '.json');
+    guard.check(target);
+    if (fs.existsSync(target) && (!fs.lstatSync(target).isFile() || fs.lstatSync(target).nlink !== 1)) throw new Error('A9_TRANSFER_RECEIPT_INVALID');
+    const tmp = target + '.tmp-' + crypto.randomBytes(8).toString('hex');
+    let fd: number | undefined;
+    try {
+      guard.check(tmp); fd = fs.openSync(tmp, 'wx');
+      guard.check(tmp); fs.writeFileSync(fd, json, 'utf8');
+      guard.check(tmp); fs.fsyncSync(fd); fs.closeSync(fd); fd = undefined;
+      guard.check(target); fs.renameSync(tmp, target);
+    } finally {
+      if (fd !== undefined) fs.closeSync(fd);
+      guard.check(tmp);
+      if (fs.existsSync(tmp)) fs.unlinkSync(tmp);
+    }
+  }
+
+  readTransferReceipt(transferId: string): string | undefined {
+    if (!/^transfer-[a-f0-9]{32}$/.test(transferId)) throw new Error('A9_TRANSFER_ID_INVALID');
+    const dir = path.join(this.recoveryRoot, 'transfers');
+    const guard = this.recoveryIoGuard(dir);
+    guard.checkInside(dir);
+    if (fs.existsSync(dir) && fs.readdirSync(dir).length > 100) throw new Error('A9_TRANSFER_LIMIT');
+    const target = path.join(dir, transferId + '.json');
+    guard.check(target);
+    let stat: fs.Stats;
+    try { stat = fs.lstatSync(target); } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+      throw error;
+    }
+    if (!stat.isFile() || stat.nlink !== 1 || stat.size > 16384) throw new Error('A9_TRANSFER_RECEIPT_INVALID');
+    guard.check(target);
+    return fs.readFileSync(target, 'utf8');
   }
 
   private assertSafeTurnId(turnId: string): void {
@@ -742,6 +822,17 @@ export class CheckpointManager {
       const value = parsed[field];
       if (typeof value !== 'string' || !Number.isFinite(Date.parse(value))) {
         throw new Error(`checkpoint manifest ${field} is invalid`);
+      }
+    }
+    if (parsed.pairedTransfers !== undefined) {
+      if (!this.isPlainRecord(parsed.pairedTransfers) || Object.keys(parsed.pairedTransfers).length > 100) throw new Error('A9_TRANSFER_METADATA_INVALID');
+      for (const [id, marker] of Object.entries(parsed.pairedTransfers)) {
+        if (!/^transfer-[a-f0-9]{32}$/.test(id) || !this.isPlainRecord(marker)
+          || Object.keys(marker).sort().join(',') !== 'closed,path,schemaVersion'
+          || marker.schemaVersion !== 1 || typeof marker.closed !== 'boolean') throw new Error('A9_TRANSFER_METADATA_INVALID');
+        const relative = this.assertWorkspaceRelativePath(marker.path, 'paired transfer path');
+        this.assertNotSensitive(relative, 'paired transfer path');
+        if (!this.isPlainRecord(parsed.changes) || !Object.prototype.hasOwnProperty.call(parsed.changes, relative)) throw new Error('A9_TRANSFER_METADATA_INVALID');
       }
     }
     if (!this.isPlainRecord(parsed.changes)) throw new Error('checkpoint manifest changes must be an object');
@@ -1557,6 +1648,11 @@ export class CheckpointManager {
    * 条目被跳过并计入 drifted，不盲目覆盖。
    */
   undoTurn(turnId: string): UndoOutcome {
+    this.validateRecoveryIdentity();
+    const paired = this.readValidatedCheckpoint(turnId)?.pairedTransfers;
+    if (paired && Object.values(paired).some(marker => !marker.closed)) {
+      return { restored: [], errors: ['A9_TRANSFER_PAIRED_UNDO_REQUIRED'], drifted: [] };
+    }
     const checkpoint = this.loadCheckpoint(turnId);
     if (!checkpoint) {
       return { restored: [], errors: [`未找到 Checkpoint: ${turnId}`], drifted: [] };
@@ -1594,6 +1690,11 @@ export class CheckpointManager {
 
   /** 按单文件撤销本轮变化。 */
   undoFile(turnId: string, relPath: string): UndoOutcome {
+    this.validateRecoveryIdentity();
+    const paired = this.readValidatedCheckpoint(turnId)?.pairedTransfers;
+    if (paired && Object.values(paired).some(marker => !marker.closed)) {
+      return { restored: [], errors: ['A9_TRANSFER_PAIRED_UNDO_REQUIRED'], drifted: [] };
+    }
     const checkpoint = this.loadCheckpoint(turnId);
     if (!checkpoint) {
       return { restored: [], errors: [`未找到 Checkpoint: ${turnId}`], drifted: [] };

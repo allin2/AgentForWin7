@@ -8,6 +8,7 @@
 // Types & error class
 export * from './a9-office-files';
 export * from './a9-office-batch';
+export * from './a9-office-transfer';
 export {
   Encoding,
   EncodingResult,
