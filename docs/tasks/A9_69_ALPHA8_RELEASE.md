@@ -71,3 +71,11 @@ Win7-Validation: DEV_CHANNEL
 2. Win7 实机验证经候选外驱动与本地回环 SSE 完成（外部模型请求 `0` 次）；`C:\A9-DEV` 根当前已用约 `24.57 GB`（高于默认 `20 GB` 上限，后续新 Win7 上传需另行报批清理或扩容）。
 3. 同包 Win10 验收机验证、原生 125% DPI 视觉验证、真实外部模型推理、完整 Review 后端及完整人工 GUI 旅程为 `NOT_PERFORMED`。
 4. 沿用基线限制：会话内删除已绑定恢复目录后需重开工作区（A9-66/67 非阻断 P2）、深历史分页全量扫描及 200 MiB 单文件同步后态约 `829 ms`。
+
+## 7. 同字节公开与回下载核验（2026-11-16 UTC）
+
+- `origin/main` 快进到接受与 `README.md` 更新提交 `2bf536c4…`（`scripts/dashboard/` 保持未跟踪）。
+- 标签 `v0.3.0-alpha.8-win7-62` 准确指向产品源码 `585ea92b…`；未重建产品。
+- Pre-release 于 UTC `2026-11-16T06:52:07Z` 公开，release ID `446694106`，[下载与说明](https://github.com/allin2/AgentForWin7/releases/tag/v0.3.0-alpha.8-win7-62)。
+- 附件 4 个：`Win7CodingAgent-0.3.0-alpha.8-win7-x64.zip` 111,281,027 字节、`WIN7-62-RELEASE-EVIDENCE.json` 2,836 字节、`ACCEPTANCE.md` 1,036 字节、`SHA256SUMS` 285 字节。
+- 草稿与公开后各完成回下载核验；大小、本地 SHA-256 与 GitHub asset digest 三方一致，asset ID 保持不变（草稿首次下载 `ACCEPTANCE.md` 遇到一次 TLS EOF 中断，重下后四件全部校验通过）。核验记录保存在本机 `outputs/a9-69-alpha8/publish/DRAFT_ASSET_VERIFICATION.json` 与 `outputs/a9-69-alpha8/publish/PUBLICATION_VERIFICATION.json`。
