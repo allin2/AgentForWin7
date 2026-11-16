@@ -69,3 +69,37 @@ jobs:
           if command -v pwsh >/dev/null; then echo "pwsh is still on PATH" >&2; exit 1; fi
       - name: Daily test set
         run: npm run test:local
+
+  test-windows:
+    name: Daily tests (Windows; runner, workspace, git-adapter)
+    # Windows Server is not Win7 evidence. It catches win32 paths, encodings, cmd.exe and
+    # Windows PowerShell 5.1 selection, and process handling before a Win7 window is spent.
+    # These modules need neither Electron nor the root better-sqlite3 build; the others do.
+    # windows-2022 keeps wmic, which Win7 has and process-tree cleanup uses; windows-2025 removed it.
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - name: Keep the checkout byte-identical to the macOS job
+        # Git for Windows on hosted runners defaults to core.autocrlf=true, which would rewrite
+        # LF sources and fixtures to CRLF; .gitattributes still applies to *.bat.
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: |
+            src/runner/package-lock.json
+            src/workspace/package-lock.json
+            src/git-adapter/package-lock.json
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          for package in src/runner src/workspace src/git-adapter; do
+            npm ci --prefix "$package" --no-audit --no-fund
+          done
+      - name: Daily test set (Windows modules)
+        run: npm run test:local -- --module runner --module workspace --module git-adapter

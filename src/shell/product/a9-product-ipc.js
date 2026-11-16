@@ -130,8 +130,18 @@ function createA9ProductRequestHandler(options) {
         if (!registry || request.schemaVersion !== 9 || request.scope) throw Object.assign(new Error('A9_SCOPE_INVALID'), { code: 'A9_SCOPE_INVALID' });
         exactObject(request.payload, ['prompt'], 'A9_PAYLOAD_INVALID', ['mode']);
         if (request.payload.mode !== undefined && !['full_access', 'read_only'].includes(request.payload.mode)) throw Object.assign(new Error('A9_PAYLOAD_INVALID'), { code: 'A9_PAYLOAD_INVALID' });
-        if (typeof request.payload.prompt !== 'string' || !request.payload.prompt.trim() || request.payload.prompt.length > 8000) {
+        if (typeof request.payload.prompt !== 'string' || !request.payload.prompt.trim() || request.payload.prompt.length > 1_000_000) {
           throw Object.assign(new Error('A9_PAYLOAD_INVALID'), { code: 'A9_PAYLOAD_INVALID' });
+        }
+        const maxPromptChars = typeof registry.getComposerMaxChars === 'function' ? registry.getComposerMaxChars() : 128_000;
+        if (request.payload.prompt.length > maxPromptChars) {
+          return {
+            ok: false,
+            error: {
+              code: 'A9_PROMPT_TOO_LONG',
+              message: `输入长度超过当前上限（${maxPromptChars} 字符），请精简或调高设置后重试。`,
+            },
+          };
         }
         if (selectionInFlight) throw Object.assign(new Error('A9_WORKSPACE_SELECTION_BUSY'), { code: 'A9_WORKSPACE_SELECTION_BUSY' });
         selectionInFlight = true;
@@ -180,7 +190,6 @@ function createA9ProductRequestHandler(options) {
           }
           const knownBefore = new Set(registry.directory().map(item => item.workspaceId));
           const entry = registry.open(workspace);
-          await awaitRuntimeReady(entry.runtime);
           if (registry.assertRuntimeAvailable) registry.assertRuntimeAvailable(entry.runtime);
           if (entry.runtime.assertAvailable) entry.runtime.assertAvailable();
           const snapshot = entry.runtime.getSnapshot({ conversationPage: true });
@@ -223,10 +232,13 @@ function createA9ProductRequestHandler(options) {
         };
       }
       if (!runtime) throw Object.assign(new Error('A9_RUNTIME_UNAVAILABLE'), { code: 'A9_RUNTIME_UNAVAILABLE' });
-      // A9-61: serve a runtime only after its cooperative startup checkpoint
-      // reconciliation settled. Stop is never held behind it.
-      if (request.action !== A9_ACTIONS.TURN_STOP) {
+      // A9-61: serve state-mutating actions only after cooperative startup
+      // checkpoint reconciliation settled. Stop and read-only snapshot reads
+      // never block UI opening behind reconciliation (A9-68).
+      if (request.action !== A9_ACTIONS.TURN_STOP && request.action !== A9_ACTIONS.SNAPSHOT_GET) {
         await awaitRuntimeReady(runtime);
+      }
+      if (request.action !== A9_ACTIONS.TURN_STOP) {
         // Readiness yields to workspace/conversation selection and shutdown.
         // Re-run the original resolver, including inbox/link/restricted scopes,
         // and never dispatch on a replacement Runtime with the same scope IDs.
@@ -438,7 +450,7 @@ function createA9ProductRequestHandler(options) {
           const validId = value => typeof value === 'string' && value.length > 0 && value.length <= 256;
           if (request.schemaVersion < 8 || !validId(payload.conversationId)
             || !['add', 'remove', 'pause', 'resume'].includes(payload.operation)
-            || (payload.operation === 'add' ? typeof payload.text !== 'string' || !payload.text.trim() || payload.text.length > 8000 : payload.text !== undefined)
+            || (payload.operation === 'add' ? typeof payload.text !== 'string' || !payload.text.trim() || payload.text.length > 1_000_000 : payload.text !== undefined)
             || (payload.operation === 'remove' ? !validId(payload.itemId) : payload.itemId !== undefined)) {
             throw Object.assign(new Error('A9_PAYLOAD_INVALID: invalid queue operation'), { code: 'A9_PAYLOAD_INVALID' });
           }

@@ -24,6 +24,20 @@ const temporaryRoots = new Set<string>();
 const runners = new Set<TrustedShellRunner>();
 let processesStopped = true;
 
+// Run a Node script through the shell the runner selects on this developer host. POSIX sh keeps the
+// inline form. Windows PowerShell 5.1 needs the call operator and drops embedded double quotes from
+// native arguments, so PowerShell and CMD run the script from a file instead.
+function nodeScriptCommand(source: string): string {
+  const kind = selectShell({}).kind;
+  if (kind !== 'powershell' && kind !== 'cmd') return `${JSON.stringify(process.execPath)} -e ${JSON.stringify(source)}`;
+  const dir = temporaryDirectory('a9-node-script-');
+  const file = path.join(dir, 'script.cjs');
+  fs.writeFileSync(file, source, 'utf8');
+  if (kind === 'cmd') return `"${process.execPath}" "${file}"`;
+  const literal = (value: string) => `'${value.replace(/'/g, "''")}'`;
+  return `& ${literal(process.execPath)} ${literal(file)}`;
+}
+
 function temporaryDirectory(prefix: string, roots = temporaryRoots, suffixes: string[] = []): string {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
   roots.add(root);
@@ -307,7 +321,7 @@ describe('A9-02 regression: honest termination and logs', () => {
       getSensitiveValues: () => [secret],
     });
     const script = "process.stdout.write('SPLIT-'); setTimeout(() => process.stdout.write('SECRET-42'), 30)";
-    const result = await runner.execute({ command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify(script)}` });
+    const result = await runner.execute({ command: nodeScriptCommand(script) });
 
     expect(result.stdout).toContain('***redacted***');
     expect(result.stdout).not.toContain(secret);
@@ -327,7 +341,7 @@ describe('A9-02 regression: honest termination and logs', () => {
       getSensitiveValues: () => [secret, boundarySecret],
     });
     const script = `process.stdout.write(${JSON.stringify(`AAAA${boundarySecret} ${encodedBase64}`)})`;
-    const result = await runner.execute({ command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify(script)}` });
+    const result = await runner.execute({ command: nodeScriptCommand(script) });
     const raw = fs.readFileSync(result.logPaths!.stdout, 'utf8');
 
     expect(result.stdout).not.toContain(encodedBase64);
@@ -344,7 +358,7 @@ describe('A9-02 regression: honest termination and logs', () => {
       getSensitiveValues: () => [secret],
     });
     const script = `process.stdout.write(${JSON.stringify(mixed)})`;
-    const result = await runner.execute({ command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify(script)}` });
+    const result = await runner.execute({ command: nodeScriptCommand(script) });
     const raw = fs.readFileSync(result.logPaths!.stdout, 'utf8');
 
     expect(result.stdout).not.toContain(mixed);
@@ -499,7 +513,7 @@ describe('A9-02 regression: honest termination and logs', () => {
     try {
       process.env.A9_BUILD_MODE = secret;
       for (const background of [false, true]) {
-        const result = await runner.execute({ command: JSON.stringify(process.execPath) + ' -e ' + JSON.stringify(script), background });
+        const result = await runner.execute({ command: nodeScriptCommand(script), background });
         if (background) {
           expect(result.status).toBe('background_started');
           await new Promise((resolve) => setTimeout(resolve, 300));

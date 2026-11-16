@@ -512,6 +512,7 @@ function createA9AgentRuntime(options) {
 
   const composer = createComposerState({
     available: draftEncryptionAvailable,
+    maxText: activeComposerMaxChars,
     read: id => persistence.getConversationDraftCiphertext(id),
     write: (id, value) => persistence.setConversationDraftCiphertext(id, value),
     encrypt: value => config.safeStorage.encryptString(value).toString('base64'),
@@ -549,6 +550,14 @@ function createA9AgentRuntime(options) {
     const sessionId = a9SessionId;
     const queue = composer.snapshot(sessionId);
     if (queue.paused || !queue.items.length) return;
+    const limit = activeComposerMaxChars();
+    if (queue.items[0].text.length > limit) {
+      pauseQueue({
+        code: 'A9_PROMPT_TOO_LONG',
+        message: `队列首条消息长度超过当前上限（${limit} 字符），已暂停；请调高设置或移除该项。`,
+      });
+      return;
+    }
     queueScheduled = true;
     const epoch = queueEpoch;
     setImmediate(async () => {
@@ -590,18 +599,30 @@ function createA9AgentRuntime(options) {
       else if (input.operation === 'pause') pauseQueue();
       else if (input.operation === 'resume') {
         if (!queueReady() && !activeController) throw new Error('A9_QUEUE_UNAVAILABLE');
+        const currentQueue = composer.snapshot(a9SessionId);
+        const limit = activeComposerMaxChars();
+        if (currentQueue.items[0] && currentQueue.items[0].text.length > limit) {
+          const message = `队列首条消息长度超过当前上限（${limit} 字符），已暂停；请调高设置或移除该项。`;
+          pauseQueue({ code: 'A9_PROMPT_TOO_LONG', message });
+          return { ok: false, error: { code: 'A9_PROMPT_TOO_LONG', message }, queue: composer.snapshot(a9SessionId) };
+        }
         composer.resume(a9SessionId); scheduleQueue();
       } else throw new Error('A9_QUEUE_OPERATION_INVALID');
       return { ok: true, queue: composer.snapshot(a9SessionId) };
     } catch (error) {
-      return { ok: false, error: { code: /^A9_QUEUE_[A-Z_]+$/.test(error.message) ? error.message : 'A9_QUEUE_FAILED', message: '队列更新失败，内容未发送。' } };
+      const code = /^A9_QUEUE_[A-Z_]+$/.test(error.message) ? error.message : 'A9_QUEUE_FAILED';
+      return { ok: false, error: { code, message: code === 'A9_QUEUE_TEXT_INVALID' ? '队列内容不能为空且不能超过当前输入框上限。' : '队列更新失败，内容未发送。' } };
     }
   }
 
   // ----- Provider（R4：非秘密配置版本化持久化；秘密仅 DPAPI；未配置即拒绝执行） -----
   const PROVIDER_CONFIG_SCHEMA_VERSION = 1;
   const DEFAULT_CONTEXT_BUDGET_CHARS = 400_000;
+  const DEFAULT_COMPOSER_MAX_CHARS = 128_000;
   const providerConfigPath = path.join(dataRoot, 'a9-provider-config.v1.json');
+  function activeComposerMaxChars() {
+    return providerConfig?.composerMaxChars ?? DEFAULT_COMPOSER_MAX_CHARS;
+  }
 
   // DPAPI 不可用时降级为仅内存（vault 构造抛错 → 捕获），不另造明文凭据文件。
   let apiKeySource = 'none'; // 'dpapi' | 'memory' | 'none'
@@ -2061,13 +2082,15 @@ function createA9AgentRuntime(options) {
     }
     let thinkingEnabled = providerConfig?.thinkingEnabled;
     if (hasInput('thinkingEnabled')) {
-      if (typeof values.thinkingEnabled !== 'boolean') throw Object.assign(new Error('A9_PROVIDER_CONFIG_INVALID: thinkingEnabled 必须是 boolean'), { code: 'A9_PROVIDER_CONFIG_INVALID' });
-      thinkingEnabled = values.thinkingEnabled;
+      if (values.thinkingEnabled === null) thinkingEnabled = undefined;
+      else if (typeof values.thinkingEnabled === 'boolean') thinkingEnabled = values.thinkingEnabled;
+      else throw Object.assign(new Error('A9_PROVIDER_CONFIG_INVALID: thinkingEnabled 必须是 boolean 或 null'), { code: 'A9_PROVIDER_CONFIG_INVALID' });
     }
     let reasoningEffort = providerConfig?.reasoningEffort;
     if (hasInput('reasoningEffort')) {
-      if (!['low', 'medium', 'high'].includes(values.reasoningEffort)) throw Object.assign(new Error('A9_PROVIDER_CONFIG_INVALID: reasoningEffort 必须是 low/medium/high'), { code: 'A9_PROVIDER_CONFIG_INVALID' });
-      reasoningEffort = values.reasoningEffort;
+      if (values.reasoningEffort === null) reasoningEffort = undefined;
+      else if (['low', 'medium', 'high'].includes(values.reasoningEffort)) reasoningEffort = values.reasoningEffort;
+      else throw Object.assign(new Error('A9_PROVIDER_CONFIG_INVALID: reasoningEffort 必须是 low/medium/high 或 null'), { code: 'A9_PROVIDER_CONFIG_INVALID' });
     }
 
     // Register newly supplied secrets before checking the fields documented as
@@ -2632,6 +2655,13 @@ function createA9AgentRuntime(options) {
       err.code = 'A9_QUESTION_REQUIRED';
       return { ok: false, error: presentError(err) };
     }
+    const rawPrompt = String(prompt || '');
+    const maxPromptChars = activeComposerMaxChars();
+    if (rawPrompt.length > maxPromptChars) {
+      const err = new Error(`A9_PROMPT_TOO_LONG: 输入长度超过当前上限（${maxPromptChars} 字符），请精简或调高设置后重试`);
+      err.code = 'A9_PROMPT_TOO_LONG';
+      return { ok: false, error: presentError(err) };
+    }
     let createdTaskId = null;
     let ownedController = null;
     try {
@@ -2640,7 +2670,7 @@ function createA9AgentRuntime(options) {
       agentStatus = 'running';
       // F5：Turn 开始前创建并持久化 active task。
       createdTaskId = `task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-      const requestPrompt = String(prompt || '').slice(0, 8000);
+      const requestPrompt = rawPrompt;
       const persistedRequestPrompt = redactSecrets(requestPrompt);
       persistence.upsertTask(createdTaskId, a9SessionId, 'active');
       markInboxActive();

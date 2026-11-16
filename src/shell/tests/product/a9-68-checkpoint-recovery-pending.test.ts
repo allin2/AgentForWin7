@@ -5,6 +5,7 @@ import * as path from 'path';
 import Database from 'better-sqlite3';
 
 const { createA9AgentRuntime } = require('../../product/a9-agent-runtime');
+const { createA9ProductRequestHandler, A9_ACTIONS } = require('../../product/a9-product-ipc');
 const { CheckpointManager, A9WorkspaceService } = require('../../../workspace/dist');
 const { A9PersistenceManager } = require('../../../state/dist');
 
@@ -109,5 +110,55 @@ describe('A9-68 nonblocking checkpoint recovery', () => {
       expect(await call()).toMatchObject({ ok: false, error: { code: 'A9_CHECKPOINT_RECONCILIATION_FAILED' } });
     }
     expect(requests).toBe(0);
+  });
+
+  it('serves a9.snapshot.get through product IPC immediately while checkpoint reconciliation is pending', async () => {
+    runtime = create();
+    const handler = createA9ProductRequestHandler({
+      isValidRendererSender: () => true,
+      getA9Runtime: () => runtime,
+    });
+    let snapshotSettled = false;
+    const snapshotPromise = handler({}, {
+      schemaVersion: 9,
+      action: A9_ACTIONS.SNAPSHOT_GET,
+      payload: { conversationPage: true },
+    }).then((value: any) => {
+      snapshotSettled = true;
+      return value;
+    });
+    const turnPromise = handler({}, {
+      schemaVersion: 9,
+      action: A9_ACTIONS.TURN_SUBMIT,
+      payload: { prompt: 'wait for reconciliation' },
+    });
+    const outcome = await Promise.race([
+      snapshotPromise.then((value: any) => ({ tag: 'snapshot', value })),
+      new Promise((resolve) => setImmediate(() => resolve({ tag: 'timeout' }))),
+    ]);
+    expect(snapshotSettled).toBe(true);
+    expect(outcome).toMatchObject({
+      tag: 'snapshot',
+      value: {
+        ok: true,
+        snapshot: {
+          status: 'ready',
+          activeConversationId: expect.any(String),
+          conversationPage: expect.any(Object),
+        },
+      },
+    });
+    expect(requests).toBe(0);
+    release();
+    await runtime.whenReady();
+    expect(await turnPromise).toMatchObject({ ok: true });
+    expect(requests).toBe(1);
+    await runtime.shutdown();
+    expect(await handler({}, {
+      schemaVersion: 9,
+      action: A9_ACTIONS.SNAPSHOT_GET,
+      payload: { conversationPage: true },
+    })).toMatchObject({ ok: false, error: { code: 'A9_RUNTIME_SHUTDOWN' } });
+    runtime = null;
   });
 });

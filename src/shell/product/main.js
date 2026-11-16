@@ -1032,6 +1032,7 @@ registerDiagnosticIpc('product:a8-request', withStartupBarrier(createA8ProductRe
 const a9Workspaces = createA9WorkspaceRegistry({
   createRuntime: createWorkspaceRuntime,
   getDocumentsPath: () => app.getPath('documents'),
+  getDataRoot: getA9DataRoot,
   onActivate: workspacePath => { if (activeWorkspaceStore) activeWorkspaceStore.save(workspacePath); },
   normalizeConversationTitle,
   openPersistence: () => openA9RuntimePersistence(workspaceRuntimeOptions()),

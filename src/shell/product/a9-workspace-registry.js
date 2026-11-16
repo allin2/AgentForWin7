@@ -185,6 +185,22 @@ function createA9WorkspaceRegistry(options) {
     return entry;
   }
 
+  function getComposerMaxChars() {
+    const providerMax = providerSource && typeof providerSource.getSnapshot === 'function'
+      ? providerSource.getSnapshot({ conversationPage: true })?.provider?.composerMaxChars
+      : undefined;
+    if (Number.isSafeInteger(providerMax) && providerMax >= 1_000 && providerMax <= 1_000_000) return providerMax;
+    if (typeof config.getDataRoot === 'function') {
+      try {
+        const doc = JSON.parse(fs.readFileSync(path.join(config.getDataRoot(), 'a9-provider-config.v1.json'), 'utf8'));
+        if (doc && Number.isSafeInteger(doc.composerMaxChars) && doc.composerMaxChars >= 1_000 && doc.composerMaxChars <= 1_000_000) {
+          return doc.composerMaxChars;
+        }
+      } catch (_error) { /* Fall back to default when unconfigured or unreadable. */ }
+    }
+    return 128_000;
+  }
+
   function startDefaultConversation(prompt, mode) {
     assertExecutionAllowed();
     if (creatingDefault) throw failure('A9_WORKSPACE_SELECTION_BUSY', '正在创建默认目录对话。');
@@ -406,7 +422,7 @@ function createA9WorkspaceRegistry(options) {
     } finally { closingAll = false; }
   }
 
-  return { admit, open, activate, startDefaultConversation, changeWorkdir, resolve, resolveWorkdirLinkScope, resolveInboxScope, assertRuntimeAvailable, directory, configureProvider, close, shutdown,
+  return { admit, open, activate, startDefaultConversation, getComposerMaxChars, changeWorkdir, resolve, resolveWorkdirLinkScope, resolveInboxScope, assertRuntimeAvailable, directory, configureProvider, close, shutdown,
     getActive: () => entries.get(activeId) || null,
     getById: id => entries.get(id) || null,
     get size() { return entries.size; },

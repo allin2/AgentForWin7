@@ -336,3 +336,4 @@
 | ADR-0330 | A9-64 异步目录扫描、取消与归属一致性 | Accepted |
 | ADR-0331 | A9-66/67 协作扫描、文件操作身份与网络预算 | Accepted |
 | ADR-0332 | A9-66/67 库层加固 Win7 限定接受（WIN7-61） | Accepted |
+| ADR-0333 | A9-69 alpha.8 发布身份与限定接受路径 | Accepted |

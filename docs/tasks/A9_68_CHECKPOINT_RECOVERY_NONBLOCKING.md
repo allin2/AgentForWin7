@@ -6,7 +6,7 @@ Task Type: PRODUCT_RELIABILITY_HARDENING
 Target Branch: main（本地整合）
 Source Baseline: 453c54a5（私有 staging base/a9-68-453c54a5）
 Phase-Gate: A9_68_DEVELOPER_VERIFIED
-Win7-Validation: NOT_PERFORMED
+Win7-Validation: DEV_CHANNEL
 ```
 
 ## 1. 范围
@@ -72,4 +72,14 @@ Win7-Validation: NOT_PERFORMED
 ### 7.4 状态
 
 - `A9_68_DEVELOPER_VERIFIED`（开发机全量 1667 测试通过）。
-- Win7/Win10、打包、门 A/B、发布 NOT_PERFORMED。
+- Win7 开发级运行 `DEV_CHANNEL` PASS（`a968w`，见 §7.5）；Win10 验收机、完整 GUI 旅程、正式门 A/B 与公开发布为 `NOT_PERFORMED`。
+
+### 7.5 Win7 开发级运行（2026-11-16 UTC，`DEV_CHANNEL`）
+
+- 绑定：源码提交 `d12f840b…`（含前序 `0153b394…`、`3a6d40ac…` A9-Settings 提交），双干净构建逐字节一致，开发包 ZIP `266ecd81…` / manifest `e8865679…`（`3265` 文件，`source_dirty=false`，`external_acceptance_eligible=false`）。
+- 窗口与通道：负责人先批准 60 分钟 `26 GB` 窗口（`01:32Z–02:32Z`，复用 inactive `a946lanrx`）；第 3 步 `put config.json` 因前两步各耗时约 128 秒触及 Shell 300 秒超时（`SIGTERM`）留下 `lock.active=true`。负责人于 `02:31Z` 批准选项甲（一次 `--steal` + 延续 30 分钟 `26 GB` 窗口 `02:31Z–03:01Z`）。
+- 实机验证（`DCCS-CHAIZL-PC` / Win7 SP1 x64 `6.1.7601` / 普通 `agent` / Medium / Session 1 / Electron `22.3.27` / Node `16.17.1` / SQLite `3.43.1`）：run `a968w`（`a968-controller`）13/13 项 `PASS`（`02:38:29Z–02:38:41Z`，正常退出 `normal_quit=true`）：
+  - 包身份、来源与 `3265` 文件完整闭包（`resources/app/package.json` 记为 `DRIVER_ENTRY_OVERRIDES_PACKAGED_MAIN`）、原生 SQLite `3.43.1` 与六模块/产品运行时加载全部通过。
+  - A9-68：`getSnapshot({ conversationPage: true })` 在挂起对账时立即返回（`352 ms`），缺失 turn 的 `getDiff` 同步抛 `A9_CHECKPOINT_NOT_FOUND`，挂起期间入口有界等待并在对账释放后执行成功；真实 Win7 NTFS 中文空格路径无 mock 对账开窗 `363 ms` 并完成回合；对账失败后 `continueTask({})` 与 `submitTurn` 立即 fail-closed 返回 `A9_CHECKPOINT_RECONCILIATION_FAILED`；对账期间 `shutdown()` 优先拦截并返回 `A9_RUNTIME_SHUTDOWN` 且干净释放锁；同包 A9-Settings 默认 400K/128K 与 `thinking`/`reasoning_effort` IPC 及本地回环请求体通过（外部模型请求 `0` 次，本地回环 `4` 次）。
+- 后飞行（UTC `02:41:21Z`）：运行沙箱与临时运行副本（`runtime`、`sandbox`、`controller-profile`、`profile`）已清理；`root_bytes=24,179,303,317`（低于 26 GB 窗口上限）、`free_bytes=855,641,354,240`、`lock.active=false`（`holder=a946lanrx`）、根内活动进程 `0`、任务 `0`。准确证据在本机 `outputs/win7-dev/a968w/controller.json`（SHA `799522ab…`）与 `outputs/a9-68-win7-r1/RESULT_FINAL.json`。
+- 未执行项：完整 GUI 旅程、Win10 验收机、正式门 A/B、公开推送与发布均为 `NOT_PERFORMED`。

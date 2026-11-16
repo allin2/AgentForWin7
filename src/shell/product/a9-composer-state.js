@@ -3,9 +3,14 @@
 // Main owns unsent text. Execution authority is deliberately never serialized.
 const PREFIX = '\u0000A9_COMPOSER\n';
 const MAX_ITEMS = 8;
-const MAX_TEXT = 8000;
+const DEFAULT_MAX_TEXT = 8000;
+const ENVELOPE_MAX_TEXT = 1000000;
 
 function createComposerState(storage) {
+  const maxText = () => {
+    const raw = typeof storage.maxText === 'function' ? storage.maxText() : storage.maxText;
+    return Number.isSafeInteger(raw) && raw >= 1000 && raw <= ENVELOPE_MAX_TEXT ? raw : DEFAULT_MAX_TEXT;
+  };
   const conversations = new Map();
   function read(id) {
     if (conversations.has(id)) return conversations.get(id);
@@ -23,10 +28,10 @@ function createComposerState(storage) {
       const plaintext = storage.decrypt(ciphertext);
       if (plaintext.startsWith(PREFIX)) {
         const payload = JSON.parse(plaintext.slice(PREFIX.length));
-        if (payload.schemaVersion !== 1 || typeof payload.text !== 'string' || payload.text.length > 32000
+        if (payload.schemaVersion !== 1 || typeof payload.text !== 'string' || payload.text.length > ENVELOPE_MAX_TEXT
           || !Array.isArray(payload.items) || payload.items.length > MAX_ITEMS
           || payload.items.some(item => !item || typeof item.id !== 'string' || !item.id || item.id.length > 100
-            || typeof item.text !== 'string' || !item.text.trim() || item.text.length > MAX_TEXT)
+            || typeof item.text !== 'string' || !item.text.trim() || item.text.length > ENVELOPE_MAX_TEXT)
           || new Set(payload.items.map(item => item.id)).size !== payload.items.length) throw new Error('INVALID_ENVELOPE');
         value.text = payload.text;
         value.items = payload.items.map(item => ({ id: item.id, text: item.text }));
@@ -72,14 +77,25 @@ function createComposerState(storage) {
   return {
     draft, snapshot, hasContent,
     saveDraft(id, text) {
-      read(id).text = String(text == null ? '' : text).slice(0, 32000);
+      const nextText = String(text == null ? '' : text);
+      const limit = maxText();
+      if (nextText.length > limit) {
+        return {
+          ok: false,
+          error: {
+            code: 'A9_DRAFT_TOO_LONG',
+            message: `草稿长度超过当前上限（${limit} 字符），未保存；请精简或调高设置。`,
+          },
+        };
+      }
+      read(id).text = nextText;
       save(id);
       const { persistence, note } = draft(id);
       return { ok: true, persistence, ...(note ? { note } : {}) };
     },
     add(id, itemId, text) {
       const value = read(id);
-      if (typeof text !== 'string' || !text.trim() || text.length > MAX_TEXT) throw new Error('A9_QUEUE_TEXT_INVALID');
+      if (typeof text !== 'string' || !text.trim() || text.length > maxText()) throw new Error('A9_QUEUE_TEXT_INVALID');
       if (value.items.length >= MAX_ITEMS) throw new Error('A9_QUEUE_FULL');
       const wasEmpty = value.items.length === 0;
       value.items.push({ id: itemId, text });
@@ -103,6 +119,15 @@ function createComposerState(storage) {
     take(id) {
       const value = read(id);
       if (value.paused || !value.items.length) return null;
+      const limit = maxText();
+      if (value.items[0].text.length > limit) {
+        value.paused = true;
+        value.error = {
+          code: 'A9_PROMPT_TOO_LONG',
+          message: `队列首条消息长度超过当前上限（${limit} 字符），已暂停；请调高设置或移除该项。`,
+        };
+        return null;
+      }
       const item = value.items.shift();
       save(id);
       // A stale durable copy could replay after a crash. Refuse dispatch when

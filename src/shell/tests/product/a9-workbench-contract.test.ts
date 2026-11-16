@@ -2559,3 +2559,88 @@ describe('A9-34 recovered cleanup disposition DOM contract', () => {
     expect(h.activeElement).toBe(button);
   });
 });
+
+describe('A9-Settings renderer validation, auto clearing and readback', () => {
+  const script = fs.readFileSync(path.join(__dirname, '../../product/renderer/a9-workbench.js'), 'utf8');
+
+  function makeSettingsContext() {
+    const fields: Record<string, any> = {
+      'a9-provider-url': { value: 'https://example.invalid/v1' },
+      'a9-provider-model': { value: 'gpt-4o' },
+      'a9-provider-budget': { value: '400000' },
+      'a9-provider-composer-max': { value: '128000' },
+      'a9-provider-thinking': { value: 'auto' },
+      'a9-provider-effort': { value: 'auto' },
+      'a9-provider-remember': { checked: false },
+      'a9-provider-images': { checked: false },
+      'a9-provider-key': { value: '' },
+      'a9-provider-ca': { value: '' },
+      'a9-provider-header-name': { value: '' },
+      'a9-provider-header-value': { value: '' },
+      'a9-provider-proxy-host': { value: '' },
+      'a9-provider-proxy-port': { value: '' },
+      'a9-provider-error': { textContent: '', hidden: true },
+      'a9-provider-apply': { disabled: false, setAttribute() {}, removeAttribute() {} },
+    };
+    const configureProvider = jest.fn(async () => ({ ok: true }));
+    const refreshSnapshot = jest.fn(async () => null);
+    const context: any = {
+      state: { browse: false, snapshot: { provider: { configured: true, baseUrl: 'https://example.invalid/v1', model: 'gpt-4o' } } },
+      el: (id: string) => fields[id],
+      setFieldError: (id: string, message: string) => { fields[id].textContent = message || ''; fields[id].hidden = !message; },
+      errorMessage: (res: any, fallback: string) => (res?.error?.message ? String(res.error.message) : fallback),
+      browseBlocked: () => false,
+      refreshSnapshot,
+      a9: { configureProvider },
+      Number, Object, Array, String, JSON,
+    };
+    const slice = script.slice(script.indexOf('  function providerValues('), script.indexOf('  async function probeProvider('));
+    vm.runInNewContext(slice + ';this.providerValues = providerValues;this.applyProvider = applyProvider;', context);
+    return { fields, configureProvider, refreshSnapshot, context };
+  }
+
+  it('sends null when switching saved thinkingEnabled/reasoningEffort back to auto, and omits when unconfigured', () => {
+    const t = makeSettingsContext();
+    expect(t.context.providerValues()).not.toHaveProperty('thinkingEnabled');
+    expect(t.context.providerValues()).not.toHaveProperty('reasoningEffort');
+    t.context.state.snapshot.provider.thinkingEnabled = false;
+    t.context.state.snapshot.provider.reasoningEffort = 'high';
+    expect(t.context.providerValues()).toMatchObject({ thinkingEnabled: null, reasoningEffort: null });
+  });
+
+  it('passes invalid contextBudgetChars/composerMaxChars from providerValues and rejects them in applyProvider', async () => {
+    const t = makeSettingsContext();
+    t.fields['a9-provider-budget'].value = '15000';
+    t.fields['a9-provider-composer-max'].value = '999';
+    expect(t.context.providerValues()).toMatchObject({ contextBudgetChars: 15000, composerMaxChars: 999 });
+    await t.context.applyProvider();
+    expect(t.configureProvider).not.toHaveBeenCalled();
+    expect(t.fields['a9-provider-error'].textContent).toContain('16000');
+
+    t.fields['a9-provider-budget'].value = '400000';
+    await t.context.applyProvider();
+    expect(t.configureProvider).not.toHaveBeenCalled();
+    expect(t.fields['a9-provider-error'].textContent).toContain('1000');
+
+    // Incomplete number input (e.g. '1e'): DOM clears .value='' and sets validity.badInput=true.
+    t.fields['a9-provider-composer-max'].value = '';
+    t.fields['a9-provider-composer-max'].validity = { badInput: true };
+    t.fields['a9-provider-budget'].value = '';
+    t.fields['a9-provider-budget'].validity = { badInput: true };
+    expect(t.context.providerValues()).toMatchObject({ contextBudgetChars: '__BAD_INPUT__', composerMaxChars: '__BAD_INPUT__' });
+    await t.context.applyProvider();
+    expect(t.configureProvider).not.toHaveBeenCalled();
+    expect(t.fields['a9-provider-error'].textContent).toContain('16000');
+    t.fields['a9-provider-budget'].value = '400000';
+    t.fields['a9-provider-budget'].validity = { badInput: false };
+    await t.context.applyProvider();
+    expect(t.configureProvider).not.toHaveBeenCalled();
+    expect(t.fields['a9-provider-error'].textContent).toContain('1000');
+  });
+
+  it('hydrates explicit false thinkingEnabled as disabled even for non-deepseek models', () => {
+    expect(script).not.toContain('modelUsesThinkingByDefault');
+    expect(script).toContain("el('a9-provider-thinking').value = provider.thinkingEnabled === undefined");
+    expect(script).toContain("reasoningEffort: provider.reasoningEffort || ''");
+  });
+});

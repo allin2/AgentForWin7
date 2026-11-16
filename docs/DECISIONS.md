@@ -5607,3 +5607,10 @@ Claude P2-1、P2-3 已补测试，P2-4 已修复；P2-2 按裁决保留为 K7。
   4. 200MiB 单文件 post-state 同步读取/哈希约 829ms 属基线已有逐文件限制。
 - 边界：限定接受只适用于 WIN7-61。发布（若进行）仍逐次等待负责人对准确源码与 ZIP 的批准；新权限、系统配置、超预算或删除不从本条推导。
 - 证据：run09 结果（controller.json 24/24 PASS，identity/Medium/session 1 核验）在 outputs/a9-66-67-win7-dev-r1/；Win7 库层断言与验证工具修改经负责人逐次批准。
+
+## ADR-0333 A9-69 alpha.8 发布身份与限定接受路径
+
+- 状态：Accepted（2026-11-16 UTC，负责人要求“开始推动合并，发版”，并同意 A9-69 本地整合、`v0.3.0-alpha.8` / `WIN7-62` 及 ADR-0320 限定接受路径）。
+- 决定：新增 `0.3.0-alpha.8` / `WIN7-62` 独立发版 Profile 与输入锁 `release/win7-product-v3/a9-alpha8-input-lock.json`（`A9-ALPHA8-INPUTS-D013-V26-MANAGED`），整合 A9-54～A9-68、A9-Settings 与 `ci/windows-tests` Windows 测试适配；沿用既有 Electron 22.3.27、SQLite 3.43.1/ABI 110 与 D-013 v26 managed 原生字节，不改旧版身份或 ADR-0327 的 `A9-59` 开发锁 `A9-ALPHA8-DEVELOPER-INPUTS-D013-V26-MANAGED`。
+- 顺序：本地整合与全量验证 → 一轮增量只读独立审核 → 干净源码单次构建开发/预发布包与开发机检验 → 提交准确载荷申请 Win7 `DEV_CHANNEL` 窗口 → 负责人限定接受 → 更新下载指向并同字节推送与公开预发布。不做双干净构建、正式冻结与门 A/B，结论记为 `PASS_WITH_KNOWN_LIMITS`，不产生 FORMAL Win7 PASS。
+- 边界：本条不自动授权 Win7 实机窗口写入、删除历史证据、正式门 A/B、公开推送或 GitHub Release 发布；每步均以准确源码提交与包哈希报负责人逐次确认。合同见 [A9-69](tasks/A9_69_ALPHA8_RELEASE.md)。

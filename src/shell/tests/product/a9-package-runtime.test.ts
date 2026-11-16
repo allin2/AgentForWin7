@@ -177,7 +177,7 @@ describe('A9-32 developer and A9-43 alpha.3 batch-2 package binding', () => {
   const BATCH2 = 'A9-BATCH2-INPUTS-D013-V26-MANAGED';
   const AUTHORITY = { formal_input_lock_sha256: 'b'.repeat(64), approval_registry_commit: 'c'.repeat(40), approval_registry_sha256: 'd'.repeat(64) };
 
-  function managed(kind: 'a9-32' | 'batch2' | 'alpha4' | 'alpha5' | 'alpha6' | 'alpha7' | 'alpha8-dev' | 'a9-31') {
+  function managed(kind: 'a9-32' | 'batch2' | 'alpha4' | 'alpha5' | 'alpha6' | 'alpha7' | 'alpha8' | 'alpha8-dev' | 'a9-31') {
     const env = fixture();
     const descriptorFile = path.join(env.productRoot, '..', 'a9-runtime.json');
     const manifestFile = path.join(env.releaseRoot, 'release-manifest.json');
@@ -200,7 +200,7 @@ describe('A9-32 developer and A9-43 alpha.3 batch-2 package binding', () => {
       manifest.status = 'A9_32_DEVELOPER_CHECK_NOT_WIN7_CANDIDATE';
       manifest.external_acceptance_eligible = false;
     } else {
-      const lockFile = kind === 'alpha7' ? 'a9-alpha7-input-lock.json' : kind === 'alpha6' ? 'a9-alpha6-input-lock.json' : kind === 'alpha5' ? 'a9-alpha5-input-lock.json' : kind === 'alpha4' ? 'a9-alpha4-input-lock.json' : 'a9-batch2-input-lock.json';
+      const lockFile = kind === 'alpha8' ? 'a9-alpha8-input-lock.json' : kind === 'alpha7' ? 'a9-alpha7-input-lock.json' : kind === 'alpha6' ? 'a9-alpha6-input-lock.json' : kind === 'alpha5' ? 'a9-alpha5-input-lock.json' : kind === 'alpha4' ? 'a9-alpha4-input-lock.json' : 'a9-batch2-input-lock.json';
       const lock = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../../../../release/win7-product-v3', lockFile), 'utf8'));
       descriptor.version = manifest.version = lock.version;
       descriptor.release_id = manifest.release_id = lock.release_id;
@@ -280,6 +280,26 @@ describe('A9-32 developer and A9-43 alpha.3 batch-2 package binding', () => {
       (e: any) => { e.descriptor.lock_id = e.manifest.lock_id = 'A9-ALPHA4-INPUTS-D013-V26-MANAGED'; },
     ]) {
       const env = managed('alpha5');
+      try { mutate(env); env.save(); expect(() => load(env.productRoot)).toThrow('A9_PACKAGE_RUNTIME_CONFIG_INVALID'); }
+      finally { env.cleanup(); }
+    }
+  });
+
+  it('A9-69 accepts alpha.8 release identity and rejects crossed alpha.7 or developer identity fields', () => {
+    const alpha8 = managed('alpha8');
+    try {
+      expect(load(alpha8.productRoot)).toMatchObject({ version: '0.3.0-alpha.8', releaseId: 'WIN7-CODING-AGENT-A9-ALPHA8' });
+      expect(alpha8.descriptor.candidate).toBe('WIN7-62');
+    } finally { alpha8.cleanup(); }
+    for (const mutate of [
+      (e: any) => { e.descriptor.candidate = e.manifest.candidate = 'WIN7-60'; },
+      (e: any) => { delete e.descriptor.candidate; delete e.manifest.candidate; },
+      (e: any) => { e.descriptor.version = e.manifest.version = '0.3.0-alpha.7'; },
+      (e: any) => { e.descriptor.release_id = e.manifest.release_id = 'WIN7-CODING-AGENT-A9-ALPHA7'; },
+      (e: any) => { e.descriptor.lock_id = e.manifest.lock_id = 'A9-ALPHA7-INPUTS-D013-V26-MANAGED'; },
+      (e: any) => { e.descriptor.lock_id = e.manifest.lock_id = 'A9-ALPHA8-DEVELOPER-INPUTS-D013-V26-MANAGED'; },
+    ]) {
+      const env = managed('alpha8');
       try { mutate(env); env.save(); expect(() => load(env.productRoot)).toThrow('A9_PACKAGE_RUNTIME_CONFIG_INVALID'); }
       finally { env.cleanup(); }
     }

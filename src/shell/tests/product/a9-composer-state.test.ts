@@ -56,6 +56,29 @@ describe('A9-50 unsent Composer state', () => {
     state.remove('a', '0'); state.resume('a'); expect(state.take('a').id).toBe('1');
     expect(f.disk.size).toBe(0);
   });
+  it('retains a queued item and durable storage when maxText is lowered below its length', () => {
+    let limit = 128000;
+    const writes: any[] = [];
+    const f = fixture();
+    const state = createComposerState({
+      ...f.storage,
+      maxText: () => limit,
+      write: (id: string, value: any) => { writes.push(value); f.storage.write(id, value); },
+    });
+    const text50k = 'k'.repeat(50000);
+    state.add('a', 'item-50k', text50k);
+    const savedCiphertext = f.disk.get('a');
+    writes.length = 0;
+    limit = 1000;
+    expect(state.take('a')).toBeNull();
+    expect(state.snapshot('a')).toMatchObject({
+      paused: true,
+      items: [{ id: 'item-50k', text: text50k }],
+      error: { code: 'A9_PROMPT_TOO_LONG' },
+    });
+    expect(writes).toEqual([]);
+    expect(f.disk.get('a')).toBe(savedCiphertext);
+  });
   it('separates editing, sending and queueing under real blockers', () => {
     const ready = { status: 'ready', mode: 'read_only', agentStatus: 'running',
       provider: { configured: true, probe: { classification: 'tool_calling' } } };

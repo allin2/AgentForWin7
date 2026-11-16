@@ -2907,8 +2907,8 @@
       model: provider.model || '',
       contextBudgetChars: provider.contextBudgetChars || snapshot.contextWindow && snapshot.contextWindow.budgetChars || 400000,
       composerMaxChars: provider.composerMaxChars || 128000,
-      thinkingEnabled: provider.thinkingEnabled,
-      reasoningEffort: provider.reasoningEffort || 'medium',
+      thinkingEnabled: provider.thinkingEnabled ?? null,
+      reasoningEffort: provider.reasoningEffort || '',
       imageInputEnabled: provider.imageInputEnabled === true,
       remembered: Boolean(provider.apiKey && provider.apiKey.remembered),
       caBundle: provider.caBundle || '',
@@ -2921,10 +2921,9 @@
       el('a9-provider-model').value = provider.model || '';
       el('a9-provider-budget').value = String(provider.contextBudgetChars || snapshot.contextWindow && snapshot.contextWindow.budgetChars || 400000);
       el('a9-provider-composer-max').value = String(provider.composerMaxChars || 128000);
-      const modelUsesThinkingByDefault = String(provider.model || '').toLowerCase().includes('deepseek');
-      const thinkingMatchesAuto = provider.thinkingEnabled === undefined
-        || provider.thinkingEnabled === modelUsesThinkingByDefault;
-      el('a9-provider-thinking').value = thinkingMatchesAuto ? 'auto' : provider.thinkingEnabled ? 'enabled' : 'disabled';
+      el('a9-provider-thinking').value = provider.thinkingEnabled === undefined
+        ? 'auto'
+        : provider.thinkingEnabled ? 'enabled' : 'disabled';
       el('a9-provider-effort').value = provider.reasoningEffort || 'auto';
       el('a9-provider-images').checked = provider.imageInputEnabled === true;
       el('a9-provider-remember').checked = Boolean(provider.apiKey && provider.apiKey.remembered);
@@ -3098,8 +3097,10 @@
       const response = await a9.saveDraft(draftText);
       if (isCurrent()) {
         el('draft-status').dataset.tone = !response || response.ok !== true ? 'error' : 'info';
-        if (!response || response.ok !== true) text('draft-status', '草稿保存失败，当前输入仍保留，请稍后重试。');
-        else if (response.note) text('draft-status', response.note);
+        if (!response || response.ok !== true) {
+          const reason = response && response.error && response.error.message ? `：${response.error.message}` : '，当前输入仍保留，请稍后重试。';
+          text('draft-status', `草稿保存失败${reason}`);
+        } else if (response.note) text('draft-status', response.note);
         else if (response.persistence === 'dpapi') text('draft-status', '');
         else if (response.persistence === 'memory') text('draft-status', '草稿仅在当前进程保留。');
       }
@@ -3724,6 +3725,15 @@
     const isCurrent = () => state.activeConversationId === requestConversationId && state.snapshotGeneration === requestGeneration;
     const prompt = el('task-prompt').value.trim();
     if (!prompt || !canSubmit()) return null;
+    const providerMax = state.snapshot && state.snapshot.provider && state.snapshot.provider.composerMaxChars;
+    const promptNode = el('task-prompt');
+    const maxPromptChars = (Number.isSafeInteger(providerMax) && providerMax >= 1000)
+      ? providerMax
+      : (promptNode && Number.isSafeInteger(promptNode.maxLength) && promptNode.maxLength >= 1000 ? promptNode.maxLength : 128000);
+    if (prompt.length > maxPromptChars) {
+      setFieldError('a9-turn-error', `输入长度超过当前上限（${maxPromptChars} 字符），请精简或调高设置后重试。`);
+      return null;
+    }
     clearGlobalError();
     setFieldError('a9-turn-error', '');
     state.localRequest = { prompt, at: Date.now() };
@@ -4321,16 +4331,34 @@
       rememberApiKey: el('a9-provider-remember').checked,
       imageInputEnabled: el('a9-provider-images').checked,
     };
-    const budgetText = el('a9-provider-budget').value;
-    const budget = Number(budgetText);
-    if (budgetText.trim() && Number.isSafeInteger(budget) && budget >= 16000 && budget <= 1000000) values.contextBudgetChars = budget;
-    const composerText = el('a9-provider-composer-max').value;
-    const composerMaxChars = Number(composerText);
-    if (composerText.trim() && Number.isSafeInteger(composerMaxChars) && composerMaxChars >= 1000 && composerMaxChars <= 1000000) values.composerMaxChars = composerMaxChars;
+    const budgetEl = el('a9-provider-budget');
+    const budgetText = budgetEl ? budgetEl.value : '';
+    if (budgetEl && budgetEl.validity && budgetEl.validity.badInput) {
+      values.contextBudgetChars = '__BAD_INPUT__';
+    } else if (budgetText.trim()) {
+      const budget = Number(budgetText);
+      values.contextBudgetChars = Number.isFinite(budget) ? budget : budgetText.trim();
+    }
+    const composerEl = el('a9-provider-composer-max');
+    const composerText = composerEl ? composerEl.value : '';
+    if (composerEl && composerEl.validity && composerEl.validity.badInput) {
+      values.composerMaxChars = '__BAD_INPUT__';
+    } else if (composerText.trim()) {
+      const composerMaxChars = Number(composerText);
+      values.composerMaxChars = Number.isFinite(composerMaxChars) ? composerMaxChars : composerText.trim();
+    }
     const thinkingMode = el('a9-provider-thinking').value;
-    if (thinkingMode !== 'auto') values.thinkingEnabled = thinkingMode === 'enabled';
+    if (thinkingMode === 'auto') {
+      if (provider.thinkingEnabled !== undefined) values.thinkingEnabled = null;
+    } else {
+      values.thinkingEnabled = thinkingMode === 'enabled';
+    }
     const effortMode = el('a9-provider-effort').value;
-    if (effortMode !== 'auto') values.reasoningEffort = effortMode;
+    if (effortMode === 'auto') {
+      if (provider.reasoningEffort !== undefined) values.reasoningEffort = null;
+    } else {
+      values.reasoningEffort = effortMode;
+    }
     const apiKey = el('a9-provider-key').value;
     if (apiKey) values.apiKey = apiKey;
     const caBundle = el('a9-provider-ca').value.trim();
@@ -4364,6 +4392,16 @@
     setFieldError('a9-provider-error', '');
     if (!values.baseUrl || !values.model) {
       setFieldError('a9-provider-error', 'Base URL 与模型 ID 都必须填写。');
+      return;
+    }
+    if (Object.prototype.hasOwnProperty.call(values, 'contextBudgetChars')
+      && (!Number.isSafeInteger(values.contextBudgetChars) || values.contextBudgetChars < 16000 || values.contextBudgetChars > 1000000)) {
+      setFieldError('a9-provider-error', '上下文预算必须是 16000～1000000 的整数。');
+      return;
+    }
+    if (Object.prototype.hasOwnProperty.call(values, 'composerMaxChars')
+      && (!Number.isSafeInteger(values.composerMaxChars) || values.composerMaxChars < 1000 || values.composerMaxChars > 1000000)) {
+      setFieldError('a9-provider-error', '输入框上限必须是 1000～1000000 的整数。');
       return;
     }
     const headerName = el('a9-provider-header-name').value.trim();
@@ -4806,6 +4844,15 @@
     if (state.browse && browseBlocked('发送消息')) return null;
     const prompt = el('task-prompt').value.trim();
     if (!prompt || !canSubmit()) return null;
+    const providerMax = state.snapshot && state.snapshot.provider && state.snapshot.provider.composerMaxChars;
+    const promptNode = el('task-prompt');
+    const maxPromptChars = (Number.isSafeInteger(providerMax) && providerMax >= 1000)
+      ? providerMax
+      : (promptNode && Number.isSafeInteger(promptNode.maxLength) && promptNode.maxLength >= 1000 ? promptNode.maxLength : 128000);
+    if (prompt.length > maxPromptChars) {
+      setFieldError('a9-turn-error', `输入长度超过当前上限（${maxPromptChars} 字符），请精简或调高设置后重试。`);
+      return null;
+    }
     state.workspaceOperation = true;
     state.snapshotGeneration += 1;
     state.snapshotPollingPauses += 1;
