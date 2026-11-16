@@ -278,3 +278,22 @@ flowchart LR
 - 当前源码未完成整批办公交付。旧G1/G0 FAIL保留；本机修正结果独立记录，不回写云端原tip为PASS。实际回执与源码哈希集中于 outputs/a9-70-instabox/，历史候选不变。
 
 - 最终宿主补验：多工作区14项通过，包含两个真实 Runtime/SQLite 工作区的预览→批准→占用保护→移动→关闭重开→新批准撤销，以及源Full Access不能向Read Only目标转移。37项FD优化后转移复验和Node16 16MiB结果为直接证据，其余未变集合沿用前述当前开发机结果。相关文件已本地提交后以 outputs/a9-70-instabox/CURRENT_RESULT.json 绑定准确源码；不推送公开origin。
+
+
+## 11. 负责人后继派单安排：czl / cloud-main
+
+负责人指定“请交给云端czl的cloud-main这个虚拟机，执行用opencode+hydrogen xhigh；审核由claude opus5.5 high”。本节替代 §7 的后续模型、账号及机器安排；已完成工作和历史失败不改判。
+
+| 角色 | 机器与模型 | 范围 |
+|---|---|---|
+| 主代理 | 当前会话，模型与全局默认保持 | 协调、跨模块契约、接收与开发机验证 |
+| 实施员工 | czl / cloud-main；OpenCode + Hydrogen / xhigh | 按 P2～P6 串行实施，先交付 ZIP，再模板、汇报、邮件及办公界面 |
+| 独立审核 | czl / cloud-main；Claude Opus 5.5 / high | 最终准确源码的全新只读任务；不沿用实施上下文，不改源码 |
+
+- 实时核对：cloud-main 为 running，机器 m_agqzbybbovx2docbd6ckgqd63q；其 T3 environmentId 为 45344b94-b1a8-49f1-8017-26ec2a332427。OpenCode v2.3.0、Claude Code 2.1.325 已安装。T3 进程通过现有入口运行，不能因 systemd 同名服务 inactive 就推定 T3 未运行。
+- 当前本机目录列出 google-vertex/gemini-4-hydrogen 与 variant xhigh；这不证明云端模型可用。云端目录和最短真实生成仍为 NOT_PERFORMED，远端接通后核对准确 provider/model/effort，再派产品任务。Opus 5.5 的云端准确ID与生成同样待核验。不静默回退模型或强度。
+- 跨机器 environment_read、orchestrator_capabilities、project_list 均被 T3 明确以 capability_denied 拒绝：当前机器的 Linked environments 已关闭。负责人须在当前 T3 Settings → Labs 打开该功能；之后由主代理重新核验远端身份和项目，再经 delegate_task 派单。本轮任务启动数0，不改用 CLI 启动模型或本机代理代替指定云端员工。
+- cloud-main 是负责人指定的既有共享虚拟机；保留全部既有项目、进程、登录和快照，不停止其 T3/OpenCode，不执行旧 wp.close 的自动删机流程。派单前核对远端仓库、HEAD、dirty；需要独立 checkout 时由 T3 的 worktree 隔离创建，不在 shell 或任务提示中自建员工 checkout。
+- 同一时间一名模型员工。审核在最终准确源码完成后用新的独立任务，实施与审核上下文分开；不再把同一既有VM描述成全新审核机器或沿用旧“新机G0”的结论。只读审核不替代产品检查或Win7证据。
+- 产品实际基线为06d2d961…，工作树仅保留原有 scripts/dashboard/。本节为派单治理记录，不代表源代码已同步至云端。后续同步与远端基线须另行绑定准确提交，保留未发布本地提交。公开 origin、发布与Win7窗口仍不在本轮授权内。
+- 准入结果与直接可用任务稿在 outputs/a9-70-instabox/cloud-main/；P2任务材料已备齐，阻塞只影响远端模型任务启动。
