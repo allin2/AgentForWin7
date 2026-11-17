@@ -30,6 +30,7 @@ function shutdownHarness(blocked?: string) {
     agentStatus: 'idle', pendingStateOperations: pending, managedStopPromise: blocked === 'managed_process_stop' ? gate.promise : null,
     currentPendingApproval: null, currentPendingQuestion: null, recordManagedHandle() {}, };
   context.setAgentStatus = (value: string) => { context.agentStatus = value; };
+  context.markCancelling = () => context.setAgentStatus('cancelling');
   const source = read('a9-agent-runtime.js');
   const start = source.includes('  let shutdownStage =') ? source.indexOf('  let shutdownStage =') : source.indexOf('  function shutdown(options');
   vm.runInNewContext(source.slice(start, source.indexOf('\n  return {\n    protocolVersion:', start)) + '\nthis.shutdown = shutdown; this.stage = () => typeof shutdownStage === "undefined" ? null : shutdownStage;', context);

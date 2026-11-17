@@ -201,6 +201,9 @@ function createA9WorkspaceRegistry(options) {
         transferWorkspaces: transferPort(next.workspaceId),
         withTransferReservation: (ids, operation) => withTransferReservation(next.workspaceId, ids, operation),
         isProviderConfiguring: () => providerChanging,
+        onSnapshotChanged: (change) => {
+          if (typeof config.onSnapshotChanged === 'function') config.onSnapshotChanged({ ...change, workspaceId: next.workspaceId });
+        },
       });
       entry = { ...next, runtime };
       if (providerSource && runtime.status === 'ready' && runtime.acceptProviderState) providerSource.shareProviderState(runtime.acceptProviderState);

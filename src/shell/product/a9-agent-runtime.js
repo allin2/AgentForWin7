@@ -508,21 +508,37 @@ function createA9AgentRuntime(options) {
     return imageService;
   }
   let activeController = null;
-  // agentStatus is the turn lifecycle the renderer projects; the vocabulary and
-  // phase rules live in renderer/a9-agent-status.js. Write it only through setAgentStatus.
-  // resync marks a reload from durable facts (not a lifecycle transition). The
-  // transition contract is observed, never enforced: config.agentStatusObserver
-  // (tests, diagnostics) sees { from, to, resync, legal } and cannot break the turn.
+  // agentStatus is the turn lifecycle the renderer projects; the vocabulary, the
+  // explicit transition table and the phase rules live in renderer/a9-agent-status.js.
+  // Write it only through setAgentStatus. C2 (fail-closed): an illegal edge is
+  // recorded as a structured diagnostic, reported to config.agentStatusObserver
+  // ({ from, to, resync, legal:false }) and rejected with
+  // A9_AGENT_STATUS_TRANSITION_ILLEGAL; the current status stays unchanged.
+  // resync marks a reload from durable facts (not a lifecycle transition) and
+  // bypasses the table. An observer can watch but cannot break or veto a transition.
   let agentStatus = 'idle';
+  /**
+   * C3：状态变化推送。把“有新事实可读”的信号交给宿主（config.onSnapshotChanged），
+   * 宿主合并后经 IPC 通知 Renderer 重新读取快照；载荷只含原因与时间，不含会话内容。
+   * 推送失败只留诊断，绝不影响 Runtime 行为。
+   */
+  function notifySnapshotChanged(reason) {
+    if (typeof config.onSnapshotChanged !== 'function') return;
+    try {
+      config.onSnapshotChanged({ reason: String(reason).slice(0, 64), at: Date.now() });
+    } catch (error) {
+      recordRuntimeDiagnostic('A9_SNAPSHOT_NOTIFY_FAILED', error);
+    }
+  }
   function setAgentStatus(next, { resync = false } = {}) {
     if (!agentStatusModel.isKnown(next)) {
       throw Object.assign(new Error(`A9_AGENT_STATUS_INVALID: ${String(next)}`), { code: 'A9_AGENT_STATUS_INVALID' });
     }
     const previous = agentStatus;
-    agentStatus = next;
+    const legal = resync || agentStatusModel.canTransition(previous, next);
     if (typeof config.agentStatusObserver === 'function') {
       try {
-        const result = config.agentStatusObserver({ from: previous, to: next, resync, legal: resync || agentStatusModel.canTransition(previous, next) });
+        const result = config.agentStatusObserver({ from: previous, to: next, resync, legal });
         if (result && typeof result.catch === 'function') {
           result.catch((error) => recordRuntimeDiagnostic('A9_STATUS_OBSERVER_FAILED', error));
         }
@@ -530,6 +546,30 @@ function createA9AgentRuntime(options) {
         // 观察者不得改变运行时行为，但其失败必须可见。
         recordRuntimeDiagnostic('A9_STATUS_OBSERVER_FAILED', error);
       }
+    }
+    if (!legal) {
+      // fail-closed：保留现场（当前状态、控制器、待决审批/问询），拒绝转移，不静默吞掉。
+      const violation = agentStatusModel.transitionError(previous, next, {
+        activeController: Boolean(activeController),
+        pendingApproval: Boolean(currentPendingApproval),
+        pendingQuestion: Boolean(currentPendingQuestion),
+        lifecycleOpen: Boolean(activeLifecycle),
+      });
+      recordRuntimeDiagnostic('A9_AGENT_STATUS_TRANSITION_ILLEGAL', Object.assign(new Error(
+        `${previous} -> ${next}; allowed=[${violation.diagnostics.allowed.join(',')}]; controller=${violation.diagnostics.activeController}; approval=${violation.diagnostics.pendingApproval}; question=${violation.diagnostics.pendingQuestion}`),
+      { code: violation.code }));
+      throw violation;
+    }
+    agentStatus = next;
+    if (previous !== next || resync) notifySnapshotChanged(`status:${next}`);
+  }
+  /**
+   * Stop / 关闭已经中止控制器；“cancelling”只是投影。若此刻状态机拒绝该转移（例如 Turn 刚结束），
+   * setAgentStatus 已留下 A9_AGENT_STATUS_TRANSITION_ILLEGAL 结构化诊断，这里不再让一次已生效的中止变成错误。
+   */
+  function markCancelling() {
+    try { setAgentStatus('cancelling'); } catch (error) {
+      if (!error || error.code !== 'A9_AGENT_STATUS_TRANSITION_ILLEGAL') throw error;
     }
   }
   function statusForConversationActivity(activity) {
@@ -602,7 +642,11 @@ function createA9AgentRuntime(options) {
     const operation = providerContext.refreshStatsAsync();
     pendingStateOperations.add(operation);
     pendingReadOnlyRefreshes.add(operation);
-    operation.then(() => { pendingStateOperations.delete(operation); pendingReadOnlyRefreshes.delete(operation); });
+    operation.then(() => {
+      pendingStateOperations.delete(operation);
+      pendingReadOnlyRefreshes.delete(operation);
+      notifySnapshotChanged('stats_refreshed');
+    });
   }
   /** Entry-point gate: restores (bounded, async) before the loop is built; the scope must be unchanged afterwards. */
   async function awaitProviderContextForEntry(sessionId) {
@@ -1166,6 +1210,7 @@ function createA9AgentRuntime(options) {
   // A9-19 P02 / ADR-0135：运行中模型输出的内存预览。只记录当前步在累积缓冲中的起点；
   // 预览文本在读取快照时按需脱敏并保留尾部，不进入事件、SQLite 或日志。
   let liveModelPreview = null; // { turnId, base }
+  let lastModelChunkNotifyTime = 0;
   const LIVE_PREVIEW_MIN_HOLD_BACK = 64;
   const LIVE_PREVIEW_MAX_CHARS = 8 * 1024;
 
@@ -1945,6 +1990,11 @@ function createA9AgentRuntime(options) {
             previous.content += event.data && typeof event.data.content === 'string' ? event.data.content : '';
             previous.timestamp = event.timestamp;
             pendingModelChunks.set(event.turnId, previous);
+            const now = Date.now();
+            if (now - lastModelChunkNotifyTime >= 600) {
+              lastModelChunkNotifyTime = now;
+              notifySnapshotChanged('model_chunk');
+            }
             return;
           }
           const flushed = flushModelChunks(event.turnId, false);
@@ -1982,6 +2032,7 @@ function createA9AgentRuntime(options) {
           if (audited.flushed) pushTimeline(audited.flushed);
           pushTimeline(audited.safeEvent);
           auditedEvents.delete(event);
+          notifySnapshotChanged(`event:${event.type}`);
         },
         onApprovalPending: (approval) => {
           markInboxActive();
@@ -2016,12 +2067,14 @@ function createA9AgentRuntime(options) {
                 toolName: approval.toolName, bindingDigest: approval.bindingDigest } } });
           }
           currentPendingApproval = approval;
+          notifySnapshotChanged('approval_pending');
         },
         onQuestionPending: (question) => {
           markInboxActive();
           const safeQuestion = redactForProjection(question);
           currentPendingQuestion = safeQuestion;
           persistence.recordQuestionPending(canonicalWorkspace, safeQuestion);
+          notifySnapshotChanged('question_pending');
         },
       });
       loopWorkspaceService = workspaceService;
@@ -3045,6 +3098,9 @@ function createA9AgentRuntime(options) {
     } finally {
       officeSelectionOriginal = null;
       if (controller && activeController === controller) activeController = null;
+      if (agentStatus === 'cancelling' && currentPendingApproval) {
+        setAgentStatus('needs_approval');
+      }
     }
   }
 
@@ -3376,7 +3432,7 @@ function createA9AgentRuntime(options) {
     if (activeController) {
       activeController.abort();
       if (providerContext.isRestorePending()) providerContext.invalidateScope();
-      setAgentStatus('cancelling');
+      markCancelling();
       return { ok: true };
     }
     const manager = loopTrustedRunner.getBackgroundManager();
@@ -4004,7 +4060,7 @@ function createA9AgentRuntime(options) {
       await shutdownWait('active_task_cancel', async () => {
         if (activeController) {
           activeController.abort();
-          setAgentStatus('cancelling');
+          markCancelling();
           const deadline = Date.now() + 10_000;
           while (activeController && Date.now() < deadline) {
             await new Promise((resolve) => setTimeout(resolve, 25));

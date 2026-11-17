@@ -273,3 +273,90 @@ describe('state-machine', () => {
     });
   });
 });
+
+describe('state-machine strict fail-closed contract (Phase C / C2)', () => {
+  const ALL_STATES = Object.values(AgentState) as AgentState[];
+  const ALL_TRIGGERS: TransitionTrigger[] = [
+    'start_planning', 'submit_for_approval', 'plan_ready', 'approval_granted', 'approval_rejected',
+    'execution_complete', 'execution_failed', 'verification_passed', 'verification_failed',
+    'verification_repair_requested', 'pause', 'resume', 'cancel',
+  ];
+
+  it('每个 (状态, 触发) 组合要么命中转移表，要么以结构化 INVALID_STATE_TRANSITION 拒绝', () => {
+    let accepted = 0;
+    let rejected = 0;
+    for (const from of ALL_STATES) {
+      const availableTriggers = getAvailableTriggers(from);
+      for (const trigger of ALL_TRIGGERS) {
+        if (availableTriggers.includes(trigger)) {
+          const result = transition(from, trigger);
+          expect(result.from).toBe(from);
+          expect(canTransition(from, result.to)).toBe(true);
+          expect(getAvailableTransitions(from)).toContain(result.to);
+          accepted += 1;
+        } else {
+          let caught: unknown;
+          try { transition(from, trigger); } catch (error) { caught = error; }
+          expect(caught).toBeInstanceOf(AgentError);
+          const error = caught as AgentError;
+          expect(error.code).toBe(AgentErrorCode.INVALID_STATE_TRANSITION);
+          // 现场诊断：源状态、触发事件与当时可用转移必须保留。
+          expect(error.context).toEqual({ from, trigger, available: getAvailableTransitions(from) });
+          rejected += 1;
+        }
+      }
+    }
+    expect(accepted + rejected).toBe(ALL_STATES.length * ALL_TRIGGERS.length);
+    expect(accepted).toBeGreaterThan(0);
+    expect(rejected).toBeGreaterThan(accepted);
+  });
+
+  it('终态没有任何出边，且每个终态的全部触发都被拒绝', () => {
+    for (const state of ALL_STATES.filter(isTerminalState)) {
+      expect(getAvailableTriggers(state)).toEqual([]);
+      expect(getAvailableTransitions(state)).toEqual([]);
+      for (const trigger of ALL_TRIGGERS) expect(() => transition(state, trigger)).toThrow(AgentError);
+      for (const target of ALL_STATES) expect(canTransition(state, target)).toBe(false);
+    }
+  });
+
+  it('非终态都有出边，不存在无法离开的隐式死状态', () => {
+    for (const state of ALL_STATES.filter((item) => !isTerminalState(item))) {
+      expect(getAvailableTriggers(state).length).toBeGreaterThan(0);
+    }
+  });
+
+  it('拒绝未知触发事件与未知状态，不静默放行', () => {
+    expect(() => transition(AgentState.IDLE, 'teleport' as TransitionTrigger)).toThrow(AgentError);
+    let caught: unknown;
+    try { transition('bogus' as AgentState, 'cancel'); } catch (error) { caught = error; }
+    expect((caught as AgentError).code).toBe(AgentErrorCode.INVALID_STATE_TRANSITION);
+    expect((caught as AgentError).context).toEqual({ from: 'bogus', trigger: 'cancel' });
+    expect(canTransition('bogus' as AgentState, AgentState.IDLE)).toBe(false);
+    expect(getAvailableTransitions('bogus' as AgentState)).toEqual([]);
+  });
+
+  it('主线 IDLE → PLANNING → AWAITING_APPROVAL → EXECUTING → VERIFYING → COMPLETED 逐步合法，跳步被拒绝', () => {
+    let state = AgentState.IDLE;
+    const line: Array<[TransitionTrigger, AgentState]> = [
+      ['start_planning', AgentState.PLANNING], ['submit_for_approval', AgentState.AWAITING_APPROVAL],
+      ['approval_granted', AgentState.EXECUTING], ['execution_complete', AgentState.VERIFYING],
+      ['verification_passed', AgentState.COMPLETED],
+    ];
+    for (const [trigger, expected] of line) {
+      state = transition(state, trigger).to;
+      expect(state).toBe(expected);
+    }
+    expect(() => transition(AgentState.IDLE, 'verification_passed')).toThrow(AgentError);
+    expect(() => transition(AgentState.PLANNING, 'verification_passed')).toThrow(AgentError);
+    expect(() => transition(AgentState.EXECUTING, 'verification_passed')).toThrow(AgentError);
+  });
+
+  it('拒绝不会产生转移记录，调用方只能拿到异常', () => {
+    const attempts: unknown[] = [];
+    for (const trigger of ALL_TRIGGERS) {
+      try { attempts.push(transition(AgentState.COMPLETED, trigger)); } catch { /* 预期拒绝 */ }
+    }
+    expect(attempts).toEqual([]);
+  });
+});

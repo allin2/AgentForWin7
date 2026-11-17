@@ -35,6 +35,7 @@ const { createDesktopRequestHandler } = require('./desktop-ipc');
 const { createA8ProductRequestHandler, ACTIONS: A8_ACTIONS } = require('./a8-product-ipc');
 const { createA9ProductRequestHandler, A9_ACTIONS } = require('./a9-product-ipc');
 const { createA9AgentRuntime, openA9RuntimePersistence, normalizeConversationTitle } = require('./a9-agent-runtime');
+const { createSnapshotPushNotifier } = require('./a9-snapshot-push');
 const { createA9WorkspaceRegistry } = require('./a9-workspace-registry');
 const { loadA9PackageRuntime } = require('./a9-package-runtime');
 const { createActiveWorkspaceStore } = require('./active-workspace-store');
@@ -963,6 +964,7 @@ function createMainWindow() {
     })();
   });
   window.on('closed', () => {
+    a9SnapshotPush.close();
     a9HtmlPreviewManager.closeAll();
     mainWindow = null;
   });
@@ -1032,8 +1034,20 @@ registerDiagnosticIpc('product:a8-request', withStartupBarrier(createA8ProductRe
 
 // A9 Trusted Agent Runtime（A9-06）：Renderer 只经此窄 IPC 访问。
 const a9HtmlPreviewManager = createRestrictedHtmlPreviewManager({ BrowserWindow, session });
+// C3：Runtime 状态变化经合并后推送 'a9:snapshot:updated'，Renderer 据此按需重读快照。
+const a9SnapshotPush = createSnapshotPushNotifier({
+  send: (channel, payload) => {
+    if (!mainWindow || mainWindow.isDestroyed() || !mainWindow.webContents || mainWindow.webContents.isDestroyed()) {
+      return false;
+    }
+    mainWindow.webContents.send(channel, payload);
+    return true;
+  },
+  onError: (error) => { runtimeState.errors.push('a9-snapshot-push:' + String(error && error.message).slice(0, 160)); },
+});
 const a9Workspaces = createA9WorkspaceRegistry({
   createRuntime: createWorkspaceRuntime,
+  onSnapshotChanged: change => a9SnapshotPush.notify(change),
   getDocumentsPath: () => app.getPath('documents'),
   getDataRoot: getA9DataRoot,
   onActivate: workspacePath => { if (activeWorkspaceStore) activeWorkspaceStore.save(workspacePath); },

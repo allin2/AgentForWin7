@@ -64,6 +64,7 @@ function loadMainHarness(options: { failHost?: boolean; deferPaint?: boolean; re
     if (request.endsWith('/a8-product-ipc')) return { createA8ProductRequestHandler: () => async () => ({ ok: true }) };
     if (request.endsWith('/a9-product-ipc')) return { createA9ProductRequestHandler: (config: any) => { a9Config = config; return async () => ({ ok: true }); } };
     if (request.endsWith('/a9-workspace-registry')) return require('../../product/a9-workspace-registry');
+    if (request.endsWith('/a9-snapshot-push')) return require('../../product/a9-snapshot-push');
     if (request.endsWith('/a9-agent-runtime')) return {
       createA9AgentRuntime: () => ({
         getWorkdirInfo: () => { throw Object.assign(new Error('ordinary workspace'), { code: 'A9_WORKDIR_NOT_AUTO' }); },

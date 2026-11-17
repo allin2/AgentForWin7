@@ -64,6 +64,12 @@
     needs_input: '等待回答',
     running: '运行中',
   });
+  // C3：快照刷新节奏。推送可用时轮询只做保活；无推送能力时保持历史 500 ms。
+  const SNAPSHOT_POLL_LEGACY_MS = 500;
+  const SNAPSHOT_POLL_MANAGED_MS = 5000;
+  const SNAPSHOT_KEEPALIVE_ACTIVE_MS = 30000;
+  const SNAPSHOT_KEEPALIVE_IDLE_MS = 60000;
+
   const state = {
     snapshot: null,
     conversationFacts: new Map(),
@@ -151,6 +157,10 @@
     snapshotPollingPauses: 0,
     snapshotPollingClosed: false,
     stopSnapshotPolling: null,
+    snapshotPollingMs: 0,
+    snapshotPushActive: false,
+    snapshotPushDirty: false,
+    stopSnapshotPush: null,
     streamDom: new Map(),
     truncatedNote: null,
     localRequest: null,
@@ -3943,25 +3953,62 @@
       || state.snapshotPollingRequests > 0 || hasLiveManaged
       || Boolean(snapshot && root.win7AgentStatus.isActive(snapshot.agentStatus))
       || Boolean(snapshot && snapshot.queue && !snapshot.queue.paused && snapshot.queue.items.length);
-    if (state.snapshotPollingClosed || state.snapshotPollingPauses > 0 || !needed) {
+    // C3：主进程推送 'a9:snapshot:updated' 后，轮询降级为保活兜底（活动 30 s、空闲 60 s）。
+    // 托管后台进程退出没有事件源，存活时保持 5 s 探测；没有推送能力时保持历史 500 ms 行为。
+    const pushed = state.snapshotPushActive;
+    if (state.snapshotPollingClosed || state.snapshotPollingPauses > 0 || (!needed && !pushed)) {
       if (state.stopSnapshotPolling) {
         void state.stopSnapshotPolling();
         state.stopSnapshotPolling = null;
       }
       return;
     }
-    if (state.stopSnapshotPolling) return;
+    if (state.snapshotPollingPauses === 0 && state.snapshotPushDirty) {
+      state.snapshotPushDirty = false;
+      Promise.resolve(refreshSnapshot())
+        .catch((error) => { if (!state.snapshotPollingClosed) showSnapshotError(error); });
+    }
+    const intervalMs = !pushed ? SNAPSHOT_POLL_LEGACY_MS
+      : hasLiveManaged ? SNAPSHOT_POLL_MANAGED_MS
+        : needed ? SNAPSHOT_KEEPALIVE_ACTIVE_MS : SNAPSHOT_KEEPALIVE_IDLE_MS;
+    if (state.stopSnapshotPolling) {
+      if (state.snapshotPollingMs === intervalMs) return;
+      void state.stopSnapshotPolling();
+      state.stopSnapshotPolling = null;
+    }
     let snapshotRefreshInFlight = null;
     const pollId = root.setInterval(() => {
       if (snapshotRefreshInFlight || state.snapshotRequest) return;
       snapshotRefreshInFlight = Promise.resolve(refreshSnapshot())
         .catch((error) => { if (!state.snapshotPollingClosed) showSnapshotError(error); })
         .finally(() => { snapshotRefreshInFlight = null; });
-    }, 500);
+    }, intervalMs);
+    state.snapshotPollingMs = intervalMs;
     state.stopSnapshotPolling = async () => {
       root.clearInterval(pollId);
       if (snapshotRefreshInFlight) await snapshotRefreshInFlight;
     };
+  }
+
+  // C3：事件响应式刷新。推送只是“有新事实”的信号，事实仍经 a9.snapshot.get 读取；
+  // 与显式操作共用 refreshSnapshot 的合并逻辑，推送风暴最多排一次后续读取。
+  function onSnapshotPushed(payload) {
+    if (state.snapshotPollingClosed) return;
+    if (payload && payload.workspaceId && state.workspaceSummary && state.workspaceSummary.workspaceId) {
+      if (payload.workspaceId !== state.workspaceSummary.workspaceId) return;
+    }
+    if (state.snapshotPollingPauses > 0) {
+      state.snapshotPushDirty = true;
+      return;
+    }
+    Promise.resolve(refreshSnapshot())
+      .catch((error) => { if (!state.snapshotPollingClosed) showSnapshotError(error); });
+  }
+  function subscribeSnapshotPush() {
+    if (state.stopSnapshotPush || !api || typeof api.onA9SnapshotUpdated !== 'function') return;
+    state.stopSnapshotPush = api.onA9SnapshotUpdated(onSnapshotPushed);
+    state.snapshotPushActive = true;
+    syncSnapshotPolling();
   }
 
   function openDialog(dialog) {
@@ -6048,6 +6095,7 @@
       state.browseGeneration += 1;
       state.snapshotPollingClosed = true;
       state.snapshotGeneration += 1;
+      if (state.stopSnapshotPush) { state.stopSnapshotPush(); state.stopSnapshotPush = null; }
       syncSnapshotPolling();
       stopLiveTracking();
       if (state.findObserver) state.findObserver.disconnect();
@@ -6323,6 +6371,8 @@
     // 不再在桌面断点调用 closeInspector/closeNavigation——那会在任何一次
     // 窗口缩放时把用户打开的左右栏一起折叠。
     root.addEventListener('resize', syncPaneState);
+    // C3：先订阅推送再做首次读取，启动窗口内的状态变化不会丢。
+    subscribeSnapshotPush();
   }
 
   async function initialize() {

@@ -184,6 +184,20 @@ const productApi = Object.freeze({
     return () => requestWaitListeners.delete(callback);
   },
   a9: createA9Api(),
+  // C3：主进程在 Runtime 状态变化时推送；载荷只含工作区 ID、原因和时间，Renderer 据此重读快照。
+  onA9SnapshotUpdated: callback => {
+    if (typeof callback !== 'function') throw new TypeError('onA9SnapshotUpdated callback must be a function');
+    const listener = (_event, message) => {
+      if (!message || message.schemaVersion !== 1 || typeof message.workspaceId !== 'string') return;
+      callback({
+        workspaceId: message.workspaceId.slice(0, 64),
+        reasons: Array.isArray(message.reasons) ? message.reasons.filter(item => typeof item === 'string').slice(0, 8) : [],
+        at: Number.isFinite(message.at) ? message.at : 0,
+      });
+    };
+    ipcRenderer.on('a9:snapshot:updated', listener);
+    return () => ipcRenderer.removeListener('a9:snapshot:updated', listener);
+  },
   getSettings: () => request('settings.get', 'desktop', {}),
   setSettings: (values) => request('settings.set', 'desktop', { values }),
   clearSavedApiKey: () => request('settings.credential_clear', 'desktop', { credential: 'api-key' }),

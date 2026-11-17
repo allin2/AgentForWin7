@@ -5673,3 +5673,10 @@ Claude P2-1、P2-3 已补测试，P2-4 已修复；P2-2 按裁决保留为 K7。
 - 边界（C4）：不关闭、不弱化 TLS 校验；不新增 HTTPS 代理或 socks5 支持（`NodeNetworkStack` 仍只接受 HTTP 代理，与此前一致）；不改变 `OpenAICompatibleProvider` 内联的请求/代理实现，也不合并两套传输栈，该合并属后续独立决定。B9 在仓库中没有独立定义，本批次按“清除 DeepSeek 专用路径中与共享栈漂移的硬编码参数”处理。
 - 决定（运行时与供应链，C6）：在 `docs/WIN7_CONSTRAINTS.md` §6.2 与 `docs/SECURITY.md` §6.1 登记 Electron 22.3.27（Chromium 108 / Node 16.17.1）与 SQLite 3.43.1 在 Win7 SP1 x64 纯 CPU 环境下的 EOL 应对：缩小攻击面而不声称修复、开发机上对固定哈希的公告快照做离线漏洞比对并以固定判定词记录、SQLite 补丁级升级按新依赖登记、目标机不安装/不下载/不自动更新，以及当前只有哈希与 manifest 级完整性、正式代码签名未签发的声明。
 - 边界（C6）：本条只新增规则，不改变 D-009、D-014 的批准状态，不改动 Accepted ADR 正文，不新增依赖或系统权限；离线比对的实际结果与 Win7 实机安全验收为 NOT_PERFORMED。
+
+## ADR-0341 体检 Phase C 批次 2：Runtime 状态机强制转态（fail-closed）与事件驱动快照推送
+
+- 状态：Accepted（2026-11-17 UTC，负责人授权继续推进体检 Phase C 批次 2 的 C2、C3；开发机证据，Win10、Win7 实机和正式门 A/B 为 NOT_PERFORMED）。
+- 决定（C2 状态机）：`renderer/a9-agent-status.js` 以显式有限转移表 `TRANSITIONS` 取代原先按阶段推导的规则，`canTransition` 的合法边集合与原约定逐边一致（休息态只能开始 Turn 或以失败/中断结束；`running` 以结果或 `cancelling` 结束且不会静默回到 `idle`；等待审批/问询只能恢复、Stop、取消、互转或失败/中断；`cancelling` 只能以结果结束）。`a9-agent-runtime.js` 的 `setAgentStatus` 由“只观察”改为强制执行：非法转移记录 `A9_AGENT_STATUS_TRANSITION_ILLEGAL` 结构化诊断（源/目标状态、允许目标、控制器与待决审批/问询是否存在，限长、不含会话内容），仍先通知 `agentStatusObserver`（`legal:false`），随后抛出同码错误且保持原状态不变。从持久事实重载（启动、切换对话、恢复待决问询）仍以 `resync:true` 绕过转移表。Stop 与关闭路径经 `markCancelling` 调用：中止已经生效，若此刻转移被拒绝只留诊断、不把已生效的中止变成错误；其他异常照常抛出。Core `state-machine.ts` 的转移表与异常语义不变，补充穷举测试。
+- 决定（C3 快照推送）：Runtime 新增可选配置 `onSnapshotChanged`，在状态实际变化、Core 事件落库后、模型输出增量、审批待决、问询待决时报告“有新事实”。主进程 `a9-snapshot-push.js` 按工作区合并（默认 150 ms），经 `webContents.send('a9:snapshot:updated', { schemaVersion: 1, workspaceId, reasons, at })` 推送；载荷不含会话内容、路径或秘密。Preload 新增 `onA9SnapshotUpdated(callback)`，只透传校验后的 `workspaceId`、`reasons`、`at`。Renderer 收到推送后经既有 `a9.snapshot.get`（Schema IPC）重读，与显式操作共用 `refreshSnapshot` 的合并逻辑；轮询降级为保活：活动 30 秒、空闲 60 秒；存在存活的托管后台进程时保持 5 秒（后台进程退出目前没有事件源）；没有推送能力的宿主保持原 500 毫秒行为。推送失败只计数并写入主进程错误记录，不影响 Runtime，保活读取兜底。
+- 边界：不新增 Renderer 的文件、进程、凭据或网络权限，推送不是数据通道；不改变快照结构、持久化格式或既有 IPC 动作；不修改 Runner 的后台进程管理。Win7 实机下的推送时序与 Electron 22 IPC 行为为 NOT_PERFORMED。

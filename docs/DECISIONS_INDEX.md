@@ -344,3 +344,4 @@
 | ADR-0338 | A9-70 配对 checkpoint 的旧版拒读标记 | Accepted |
 | ADR-0339 | 体检 Phase B：SQLite 性能索引、Provider 窗口/超时设置与错误指引 | Accepted |
 | ADR-0340 | 体检 Phase C 批次 1：STATUS 瘦身与历史归档、Gateway TLS/超时策略收敛、EOL 运行时与供应链策略 | Accepted |
+| ADR-0341 | 体检 Phase C 批次 2：Runtime 状态机强制转态（fail-closed）与事件驱动快照推送 | Accepted |
