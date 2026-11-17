@@ -66,12 +66,15 @@ import {
   OfficeSkillsInstallPlan, OfficeSkillsApprovalBinding, OfficeSkillsInstallResult,
 } from './a9-office-skills';
 
+/** list/search 的 skipped 明细中，reason=ignored 最多占用的条目数（计数 skippedTotal 不受限）。 */
+const IGNORED_SKIP_DETAIL_LIMIT = 25;
+
 export interface A9ListResult {
   path: string;
   totalEntries: number;
   truncated: boolean;
   outsideWorkspace: boolean;
-  skipped: Array<{ path: string; reason: 'directory_unreadable' }>;
+  skipped: Array<{ path: string; reason: 'directory_unreadable' | 'ignored' }>;
   skippedTotal: number;
   entries: Array<{
     name: string;
@@ -117,6 +120,7 @@ export interface A9SearchResult {
 
 export type SearchSkippedReason =
   | 'directory_unreadable'
+  | 'ignored'
   | 'stat_failed'
   | 'too_large'
   | 'binary_or_ambiguous'
@@ -654,9 +658,10 @@ export class A9WorkspaceService {
     const entries: A9ListResult['entries'] = [];
     const skipped: A9ListResult['skipped'] = [];
     let skippedTotal = 0;
-    const recordSkipped = (directoryPath: string): void => {
+    const recordSkipped = (directoryPath: string, reason: 'directory_unreadable' | 'ignored' = 'directory_unreadable'): void => {
       skippedTotal += 1;
-      if (skipped.length < 50) skipped.push({ path: directoryPath || '.', reason: 'directory_unreadable' });
+      // 被规则忽略的项最多占用前 25 个明细位，避免挤掉真实读取失败。
+      if (skipped.length < (reason === 'ignored' ? IGNORED_SKIP_DETAIL_LIMIT : 50)) skipped.push({ path: directoryPath || '.', reason });
     };
     let truncated = false;
     // canonical path 集合防止 junction/symlink 递归环。
@@ -711,6 +716,7 @@ export class A9WorkspaceService {
 
         const itemRel = currentRel ? `${currentRel}/${dirent.name}` : dirent.name;
         if (!isOutside && this.ignoreFilter.isIgnored(itemRel, dirent.isDirectory())) {
+          recordSkipped(itemRel, 'ignored');
           continue;
         }
 
@@ -997,7 +1003,8 @@ export class A9WorkspaceService {
     const recordSkipped = (filePath: string, reason: SearchSkippedReason, countAsFile = true): void => {
       skippedTotal += 1;
       if (countAsFile) skippedFiles += 1;
-      if (skipped.length < 50) skipped.push({ path: filePath || '.', reason });
+      // 被规则忽略的项最多占用前 25 个明细位，避免挤掉真实读取失败。
+      if (skipped.length < (reason === 'ignored' ? IGNORED_SKIP_DETAIL_LIMIT : 50)) skipped.push({ path: filePath || '.', reason });
     };
     // 迭代遍历 + canonical path 集合：可取消、无递归环、不整体加载。
     const queue: Array<{ dir: string; rel: string; identity: DirectoryScanIdentity }> = [
@@ -1050,7 +1057,10 @@ export class A9WorkspaceService {
 
         const fullPath = path.join(dir, dirent.name);
         const relPath = path.relative(this.workspaceRoot, fullPath).replace(/\\/g, '/');
-        if (!isOutside && this.ignoreFilter.isIgnored(relPath, dirent.isDirectory())) continue;
+        if (!isOutside && this.ignoreFilter.isIgnored(relPath, dirent.isDirectory())) {
+          recordSkipped(relPath, 'ignored', false);
+          continue;
+        }
 
         if (dirent.isDirectory()) {
           let realChild: string;

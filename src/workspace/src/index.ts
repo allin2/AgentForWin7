@@ -142,6 +142,7 @@ export {
 export {
   createWorkspaceIgnoreFilter,
   IgnoreFilter,
+  IgnoreRuleWarning,
 } from './a9-ignore';
 
 export {

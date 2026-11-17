@@ -374,6 +374,16 @@ export interface A9ApprovalRequest {
   reason: string;
 }
 
+/** resumeAfterApproval 选项。 */
+export interface A9ResumeApprovalOptions {
+  signal?: AbortSignal;
+  /**
+   * core 完成 approvalId / bindingDigest / Office 来源校验之后、消费挂起并执行之前调用。
+   * 宿主在此落库审批决定；回调抛错会中止恢复且不执行工具。
+   */
+  onValidated?: (decision: 'approved' | 'denied') => void | Promise<void>;
+}
+
 export interface A9ApprovalDecision {
   approvalId: string;
   decision: 'approved' | 'denied';
@@ -747,7 +757,7 @@ export class A9AgentLoop {
    * - approved=true：执行原 tool call 并继续循环；
    * - approved=false：向模型回执“用户已拒绝”，原 tool call 零副作用。
    */
-  async resumeAfterApproval(input: A9ApprovalDecision, options: { signal?: AbortSignal } = {}): Promise<A9TurnResult> {
+  async resumeAfterApproval(input: A9ApprovalDecision, options: A9ResumeApprovalOptions = {}): Promise<A9TurnResult> {
     try {
       return await this.resumeAuditedApproval(input, options);
     } catch (error) {
@@ -898,7 +908,7 @@ export class A9AgentLoop {
     return approval;
   }
 
-  private async resumeAuditedApproval(input: A9ApprovalDecision, options: { signal?: AbortSignal }): Promise<A9TurnResult> {
+  private async resumeAuditedApproval(input: A9ApprovalDecision, options: A9ResumeApprovalOptions): Promise<A9TurnResult> {
     const suspended = this.suspended;
     if (!suspended) {
       throw new AgentError(AgentErrorCode.RUNTIME_INPUT_INVALID, 'No suspended turn awaiting approval.', {}, '先通过 runTurn 触发 NEEDS_APPROVAL。');
@@ -927,6 +937,14 @@ export class A9AgentLoop {
     );
     if (input.bindingDigest !== currentDigest || input.bindingDigest !== suspended.approval.bindingDigest) {
       throw new AgentError(AgentErrorCode.APPROVAL_INVALID, 'bindingDigest 与当前挂起调用不一致；审批已失效。', {}, '目标或参数已变化，重新审批新请求。');
+    }
+    // H-P2-10：校验已全部通过，宿主此时才可把审批决定落库；校验失败的路径永远到不了这里，
+    // 因而不会留下“已批准但未执行”的审计。宿主回调失败则不消费挂起、不执行。
+    if (options.onValidated) {
+      await options.onValidated(input.decision);
+      if (this.suspended !== suspended) {
+        throw new AgentError(AgentErrorCode.APPROVAL_INVALID, '审批在落库期间已失效。', {}, '重新确认当前挂起的审批。');
+      }
     }
     // 一次性消费：先清空挂起再执行；重复/跨 Turn 请求都会因无挂起被拒绝。
     this.suspended = undefined;

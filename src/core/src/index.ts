@@ -301,6 +301,7 @@ export {
   A9TurnResult,
   A9ApprovalRequest,
   A9ApprovalDecision,
+  A9ResumeApprovalOptions,
   A9QuestionResumeDecision,
   A9VisiblePlan,
   A9AgentLoop,

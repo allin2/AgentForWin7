@@ -215,6 +215,14 @@ function createA9AgentRuntime(options) {
       : fs.existsSync(workspaceRoot) ? modules.workspace.validatePath(target || '.', workspaceRoot) : { valid: true };
     if (!validation.valid) throw Object.assign(new Error(validation.error), { code: validation.error.split(':')[0] });
   }
+  /**
+   * Viewer 读取与目录浏览共用的相对路径边界（H-P2-11）：拒绝绝对路径（含 Windows 盘符、
+   * 根相对、UNC）、`..` 段与 NUL。空串与 `.` 由调用方按各自语义处理。
+   */
+  function isUnsafeWorkspaceRelativePath(value) {
+    return path.isAbsolute(value) || path.win32.isAbsolute(value) || path.posix.isAbsolute(value) ||
+      /^[A-Za-z]:/.test(value) || value.includes('\0') || value.split(/[\\/]+/).includes('..');
+  }
   function guardedWorkspaceService(options) {
     const officeArchiveWorker = {
       createZip: (input, signal) => getArchiveWorkerPort().createZip(input, signal),
@@ -1943,6 +1951,31 @@ function createA9AgentRuntime(options) {
   }
 
   /**
+   * H-P2-10：core 校验拒绝了审批回复（digest/目标/来源已变化）。a9_approvals 行保持 pending，
+   * 以独立的 approval_invalidated 审计事件记录这次被拒绝的回复，不记为已批准。
+   */
+  function emitApprovalInvalidated(approval, attemptedDecision, error) {
+    const invalidatedAt = new Date().toISOString();
+    const safeEvent = {
+      type: 'approval_invalidated',
+      turnId: approval.turnId,
+      timestamp: invalidatedAt,
+      data: redactForProjection({
+        approvalId: approval.approvalId,
+        attemptedDecision,
+        invalidatedAt,
+        toolName: approval.toolName,
+        reason: String((error && error.code) || 'A9_APPROVAL_INVALIDATED').slice(0, 80),
+      }),
+    };
+    const { eventId } = persistence.recordToolEvent(a9SessionId, approval.turnId, safeEvent.type, {
+      type: safeEvent.type,
+      data: safeEvent.data,
+    });
+    pushTimeline({ ...safeEvent, eventId, sequence: eventId });
+  }
+
+  /**
    * 配置 Provider：非秘密配置原子持久化；API Key 仅经 DPAPI 保存（不可用则
    * 仅内存并如实报告）；保存时执行最小真实 Tool Calling probe 并分类
    * tool_calling / chat_only / unavailable；模型切换保留会话上下文。
@@ -2201,6 +2234,11 @@ function createA9AgentRuntime(options) {
         throw error;
       }
     }
+    // H-P2-18：需要清除已保存凭据时，在任何配置/上下文状态变化之前执行；清除失败显式失败，
+    // 不让用户误以为 Key 已清除，也不留下半切换的配置。
+    if ((previousBaseUrl && baseUrlChanged) || remember === false) {
+      clearStoredProviderCredentials(previousBaseUrl && baseUrlChanged ? 'Base URL 已变化，旧 endpoint 的凭据必须清除' : '用户未选择记住凭据');
+    }
     const previousHistory = loop ? loop.getConversationHistory() : providerContext.carryOverHistory();
     providerContext.setCarryOverHistory(baseUrlChanged
       ? null
@@ -2226,10 +2264,6 @@ function createA9AgentRuntime(options) {
       providerContext.invalidateScope();
       providerContext.showDeferredStats('历史上下文统计正在刷新。');
       refreshStatsAfterProviderChange = true;
-    }
-    if (previousBaseUrl && baseUrlChanged) {
-      try { if (apiKeyVault) apiKeyVault.clearApiKey(); } catch (_err) { /* best effort */ }
-      try { if (secretsVault) secretsVault.clearApiKey(); } catch (_err) { /* best effort */ }
     }
 
     const retainedContextBudgetChars = contextBudgetChars;
@@ -2281,10 +2315,6 @@ function createA9AgentRuntime(options) {
       }
     } else if (remember && hasSecretMaterial(memorySecrets)) {
       providerDiagnostics = providerDiagnostics || { code: 'A9_PROVIDER_DPAPI_UNAVAILABLE', detail: '当前环境无 DPAPI（非 Windows 或 safeStorage 不可用）：Header/代理秘密仅保存在进程内存' };
-    }
-    if (remember === false) {
-      try { if (apiKeyVault) apiKeyVault.clearApiKey(); } catch (_err) { /* best effort */ }
-      try { if (secretsVault) secretsVault.clearApiKey(); } catch (_err) { /* best effort */ }
     }
     const persistedSecret = apiKeyPersisted || secretsPersisted;
     apiKeySource = persistedSecret ? 'dpapi'
@@ -2346,6 +2376,36 @@ function createA9AgentRuntime(options) {
     } finally {
       providerConfigurationInFlight = false;
     }
+  }
+
+  /**
+   * 清除 DPAPI 保存的凭据（API Key 与 Header/代理秘密两个保险库）。两个保险库都会尝试清除；
+   * 任一失败则记录脱敏诊断并抛出 A9_PROVIDER_CREDENTIAL_CLEAR_FAILED，绝不静默吞掉（H-P2-18）。
+   */
+  function clearStoredProviderCredentials(reason) {
+    const failures = [];
+    for (const [name, vault] of [['apiKey', apiKeyVault], ['secrets', secretsVault]]) {
+      if (!vault) continue;
+      try {
+        vault.clearApiKey();
+      } catch (err) {
+        failures.push({
+          vault: name,
+          code: err && err.code ? String(err.code) : 'UNKNOWN',
+          detail: redactSecrets(String(err && err.message ? err.message : err)).slice(0, 200),
+        });
+      }
+    }
+    if (failures.length === 0) return;
+    const summary = failures.map((item) => `${item.vault}:${item.code}`).join(', ');
+    providerDiagnostics = {
+      code: 'A9_PROVIDER_CREDENTIAL_CLEAR_FAILED',
+      detail: `${reason}；清除失败：${summary}。已保存的凭据可能仍在磁盘上，请关闭占用凭据文件的程序后重试。`,
+    };
+    const error = new Error(`A9_PROVIDER_CREDENTIAL_CLEAR_FAILED: 无法清除已保存的凭据（${summary}）；配置未应用。`);
+    error.code = 'A9_PROVIDER_CREDENTIAL_CLEAR_FAILED';
+    error.diagnostics = failures;
+    throw error;
   }
 
   /** F4：验证 DPAPI 秘密已持久化且当前可读取（不返回明文）。 */
@@ -2820,6 +2880,11 @@ function createA9AgentRuntime(options) {
     if (checkpointRecoveryPending) await checkpointRecoveryReady;
     let resumeProducedResult = false;
     let ownedController = null;
+    // H-P2-10：审批决定只在 core 校验通过后落库；core 调用已开始而决定未落库时，失败按 invalidated 单独留痕。
+    let coreResumeStarted = false;
+    let approvalDecisionRecorded = false;
+    let invalidatedApproval = null;
+    let approvalPersistFailed = false;
     try {
       assertOperationScope(sessionId);
       if (!input || typeof input !== 'object' || !input.approvalId || !input.bindingDigest ||
@@ -2864,30 +2929,44 @@ function createA9AgentRuntime(options) {
       activeController = ownedController;
       approvalDecisionInFlightId = input.approvalId;
       setAgentStatus('running');
-      // R2.7：SQLite 记录来自原始 pending 审批，而不是恢复执行后的结果。
-      persistence.recordApproval({
-        approvalId: original.approvalId,
-        sessionId: a9SessionId,
-        turnId: original.turnId,
-        toolName: original.toolName,
-        binding: {
-          conversationId: identity.conversationId,
-          taskId: identity.taskId,
-          turnId: identity.turnId,
-          summary: identity.summary,
-          bindingDigest: original.bindingDigest,
-          args: identity.args,
-          ...(identity.gitBinding ? { git: identity.gitBinding } : {}),
-        },
-        decision: input.decision,
-      });
-      // ADR-0114：审批决定落库后补发 approval_resolved 留痕（批准/拒绝均记录）。
-      emitApprovalResolved(original, input.decision);
+      invalidatedApproval = original;
+      coreResumeStarted = true;
       const result = await activeLoop.resumeAfterApproval({
         approvalId: input.approvalId,
         decision: input.decision,
         bindingDigest: input.bindingDigest,
-      }, { signal: ownedController.signal });
+      }, {
+        signal: ownedController.signal,
+        // core 校验 digest/来源通过后、执行前回调：此刻才把决定落库。
+        onValidated: (decision) => {
+          // R2.7：SQLite 记录来自原始 pending 审批，而不是恢复执行后的结果。
+          try {
+            persistence.recordApproval({
+            approvalId: original.approvalId,
+            sessionId: a9SessionId,
+            turnId: original.turnId,
+            toolName: original.toolName,
+            binding: {
+              conversationId: identity.conversationId,
+              taskId: identity.taskId,
+              turnId: identity.turnId,
+              summary: identity.summary,
+              bindingDigest: original.bindingDigest,
+              args: identity.args,
+              ...(identity.gitBinding ? { git: identity.gitBinding } : {}),
+            },
+            decision,
+            });
+          } catch (persistError) {
+            // 落库故障不是审批失效，不得记为 invalidated；原错误原样上报。
+            approvalPersistFailed = true;
+            throw persistError;
+          }
+          approvalDecisionRecorded = true;
+          // ADR-0114：审批决定落库后补发 approval_resolved 留痕（批准/拒绝均记录）。
+          emitApprovalResolved(original, decision);
+        },
+      });
       resumeProducedResult = true;
       if (result.auditIncomplete) return presentAuditFailure(result);
       const lifecycle = activeLifecycle || null;
@@ -2901,9 +2980,19 @@ function createA9AgentRuntime(options) {
       }
       return { ok: true, result: presentTurnResult(result) };
     } catch (error) {
+      let reported = error;
+      if (coreResumeStarted && !approvalDecisionRecorded && !approvalPersistFailed && !resumeProducedResult && invalidatedApproval) {
+        try {
+          emitApprovalInvalidated(invalidatedApproval, input.decision, error);
+        } catch (auditError) {
+          // 审计落库失败不得被原错误掩盖。
+          reported = Object.assign(new Error(`A9_APPROVAL_INVALIDATION_AUDIT_FAILED: ${auditError && auditError.message ? auditError.message : auditError}`),
+            { code: 'A9_APPROVAL_INVALIDATION_AUDIT_FAILED', cause: error });
+        }
+      }
       if (resumeProducedResult) persistUnexpectedFailure(error, activeLifecycle);
       else if (ownedController) setAgentStatus(currentPendingApproval ? 'needs_approval' : 'failed');
-      return { ok: false, error: presentError(error) };
+      return { ok: false, error: presentError(reported) };
     } finally {
       if (ownedController && approvalDecisionInFlightId === (input && input.approvalId)) approvalDecisionInFlightId = null;
       if (activeController === ownedController) activeController = null;
@@ -3642,7 +3731,7 @@ function createA9AgentRuntime(options) {
   async function readWorkspaceFile(input) {
     const requestedPath = String(input && input.path || '');
     validateWorkdirPath(requestedPath);
-    if (!requestedPath || path.isAbsolute(requestedPath) || requestedPath.split(/[\\/]+/).includes('..')) {
+    if (!requestedPath || isUnsafeWorkspaceRelativePath(requestedPath)) {
       const err = new Error('A9_WORKSPACE_READ_PATH_INVALID: Viewer 只能读取当前工作区内的相对路径');
       err.code = 'A9_WORKSPACE_READ_PATH_INVALID';
       throw err;
@@ -3952,9 +4041,22 @@ function createA9AgentRuntime(options) {
     getWorkdirConversationId: () => a9SessionId,
     ensureWorkdir,
     async listWorkspaceDirectory(target = '.') {
-      validateWorkdirPath(target);
+      const requested = String(target === undefined || target === null ? '.' : target);
+      // H-P2-11：与 readWorkspaceFile 相同的边界规则，对所有工作区（含用户自选）生效。
+      if (isUnsafeWorkspaceRelativePath(requested)) {
+        const err = new Error('A9_WORKSPACE_BROWSE_PATH_INVALID: 只能浏览当前工作区内的相对路径');
+        err.code = 'A9_WORKSPACE_BROWSE_PATH_INVALID';
+        throw err;
+      }
+      validateWorkdirPath(requested);
       if (!ensureWorkdir(false)) return { ok: true, result: { entries: [], truncated: false } };
-      return { ok: true, result: await standaloneWorkspaceService.list(target) };
+      const result = await standaloneWorkspaceService.list(requested);
+      if (result.outsideWorkspace) {
+        const err = new Error('A9_WORKSPACE_BROWSE_OUTSIDE: 路径经解析后位于工作区外，拒绝浏览');
+        err.code = 'A9_WORKSPACE_BROWSE_OUTSIDE';
+        throw err;
+      }
+      return { ok: true, result };
     },
     setMode,
     getSnapshot,

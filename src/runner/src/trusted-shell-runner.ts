@@ -22,7 +22,7 @@ import { spawn } from 'child_process';
 import { selectShell, ShellKind } from './shell-detection';
 import { BackgroundProcessHandle, BackgroundProcessManager, ManagedProcessOwner } from './background-process-manager';
 import { killProcessTree } from './process-cleanup';
-import { SafeOutputStream, secretVariants, ShellOutputChunk, OutputEncoding } from './stream-output';
+import { SafeOutputStream, secretVariants, ShellOutputChunk, OutputEncoding, StreamDecodeEncoding } from './stream-output';
 import { HelperTransport } from './native-transport';
 import { createTrustedShellEnvironment, validateTrustedShellEnvironmentOverlay } from './trusted-shell-environment';
 import {
@@ -194,7 +194,8 @@ export class TrustedShellRunner {
       shellVersion: identity.version ?? 'unknown',
       shellIdentity: identity.sha256.toLowerCase(),
       shellSource: request.shellPath ? 'workspace_explicit' : 'automatic',
-      command: request.command,
+      // cmd.exe：helper 要求 command 与 argv[3] 逐字相同，因此传递实际送入 /c 的命令行（可能含外层引号）。
+      command: shellMeta.kind === 'cmd' && args.length === 4 && args[2] === '/c' ? args[3] : request.command,
       cwd,
       envOverlay,
       maxStdoutBytes: Math.max(maxOutputBytes, 1024),
@@ -585,9 +586,11 @@ export class TrustedShellRunner {
     try {
       const v2 = this.createV2HelperRequest(requestId, request, exe, args, cwd, shell, Math.min(maxBytes, 1024 * 1024), false);
       const encoding = this.options.outputEncoding ?? { stdout: shell.kind === 'cmd' ? 'cp936' : 'utf-8', stderr: shell.kind === 'cmd' ? 'cp936' : 'utf-8' };
+      // helper 协议只接受 utf-8/cp936/utf-16le，字节解码在 Node 侧完成；CMD 默认 auto（严格 UTF-8 → CP936）。
+      const decoding = defaultOutputDecoding(shell.kind, this.options.outputEncoding);
       helperRequest = { ...v2, schemaVersion: 3, profileId: 'a9-trusted-shell-current-user-v2', outputEncoding: encoding };
       const secrets = secretVariants(this.options.getSensitiveValues?.() ?? []);
-      streams = { stdout: new SafeOutputStream(encoding.stdout, secrets, (s) => this.redact(s)), stderr: new SafeOutputStream(encoding.stderr, secrets, (s) => this.redact(s)) };
+      streams = { stdout: new SafeOutputStream(decoding.stdout, secrets, (s) => this.redact(s)), stderr: new SafeOutputStream(decoding.stderr, secrets, (s) => this.redact(s)) };
     } catch (_error) {
       return { ...mapHelperFailure('A9_OUTPUT_PROFILE_INVALID', 'protocol_error', true), durationMs: Date.now() - started, shell };
     }
@@ -659,7 +662,7 @@ export class TrustedShellRunner {
       status: clean ? response.canceled ? 'cancelled' : response.timedOut || response.idleTimedOut ? 'timeout' : 'exited' : 'failed',
       exitCode: clean ? response.exitCode : null, stdout: text.stdout, stderr: text.stderr,
       rawStdoutBytes: raw.stdout, rawStderrBytes: raw.stderr, truncated: response.outputTruncated || cut.stdout || cut.stderr,
-      durationMs: response.executionTimeMs, shell, encoding: helperRequest.outputEncoding.stdout === 'cp936' ? 'gbk' : helperRequest.outputEncoding.stdout,
+      durationMs: response.executionTimeMs, shell, encoding: streams.stdout.detectedEncoding ?? (helperRequest.outputEncoding.stdout === 'cp936' ? 'gbk' : helperRequest.outputEncoding.stdout),
       logPaths: paths, ...(clean ? {} : { residueRisk: true }),
       termination: { requested: response.canceled || response.timedOut || !clean, processTreeReaped: clean, containment: 'job_object' },
     };
@@ -699,7 +702,8 @@ export class TrustedShellRunner {
       }
       const handle = await this.backgroundManager.start(
         requestId, request.command, exe, args, cwd,
-        createTrustedShellEnvironment(process.env, request.envOverlay ?? {}, this.options.getSensitiveValues?.()), helperRequest, { owner: request.managedOwner, onOutput: request.onOutput },
+        createTrustedShellEnvironment(process.env, request.envOverlay ?? {}, this.options.getSensitiveValues?.()), helperRequest,
+        { owner: request.managedOwner, onOutput: request.onOutput, outputDecoding: defaultOutputDecoding(shellMeta.kind, this.options.outputEncoding) },
       );
       if (handle.status === 'failed' || handle.pid === undefined) {
         return {
@@ -822,6 +826,15 @@ export class TrustedShellRunner {
   }
 }
 
+/** 流式输出的 Node 侧解码模式：未显式配置时 CMD 用 auto（严格 UTF-8 → CP936），其余 UTF-8。 */
+function defaultOutputDecoding(
+  shellKind: ShellKind,
+  configured?: { stdout: OutputEncoding; stderr: OutputEncoding },
+): { stdout: StreamDecodeEncoding; stderr: StreamDecodeEncoding } {
+  if (configured) return configured;
+  return shellKind === 'cmd' ? { stdout: 'auto', stderr: 'auto' } : { stdout: 'utf-8', stderr: 'utf-8' };
+}
+
 /**
  * 构造 Shell 调用。PowerShell 使用 UTF-16LE Base64 EncodedCommand 并归一化
  * $LASTEXITCODE；CMD 使用 /d /s /c（调用方需 windowsVerbatimArguments）。
@@ -853,7 +866,9 @@ export function buildTrustedShellInvocation(
 
   if (shellKind === 'cmd') {
     // cmd.exe 必须以原始命令行传递，避免 Node 的默认引号规则破坏 /s /c 语义。
-    return { exe: shellExe, args: ['/d', '/s', '/c', command], verbatim: true };
+    // /s 会剥掉命令行首尾各一个引号：命令以引号开头时（如 "C:\Program Files\x.exe" arg）
+    // 外层再包一对引号，剥除后恢复原命令（H-P2-05）。
+    return { exe: shellExe, args: ['/d', '/s', '/c', command.startsWith('"') ? `"${command}"` : command], verbatim: true };
   }
 
   // POSIX sh / bash：仅开发机替代，不是 Win7 证据。

@@ -9,5 +9,15 @@
     "require schema_version and requestId",
     "add idleTimeoutMs and idleTimedOut",
     "rename the version banner"
-  ]
+  ],
+  "record_status": "historical_v21_migration_record",
+  "superseded_for_current_helper_by": {
+    "note": "This file records the D-013 v21 production migration only. The helper source in this directory is D-013 v26 managed (1.4.1-d013-v26-managed).",
+    "published_in": "0.3.0-alpha.8",
+    "input_lock": "release/win7-product-v3/a9-alpha8-input-lock.json",
+    "return_zip": "WIN7_D013_V26_HELPER_ARTIFACTS_20261003-060935.zip",
+    "return_zip_sha256": "251674103e519b4e642c46b38d2b8af29929732a209613cfc5d3721daba47a40",
+    "helper_exe_sha256": "2036bf697f16db523c297d150661b43be76458eb718ca24781ebed98ab51e4b7",
+    "source_commit": "10114503a1e79706131ea4a11a5b96bd2958807a"
+  }
 }

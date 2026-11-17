@@ -1,5 +1,22 @@
 # Win7 production helper — D-013 v25
 
+> **Version and hash status (corrected 2026-11-17, H-P2-17).** The body below describes the v25
+> profile and is kept as written. The source in this directory is now **D-013 v26 managed**
+> (`1.4.1-d013-v26-managed`, protocol v3; see the A9-30 and A9-31 sections below). It is the
+> version shipped in `0.3.0-alpha.8`. Hashes recorded for the published helper, from
+> `release/win7-product-v3/a9-alpha8-input-lock.json`:
+>
+> | Item | Value |
+> |---|---|
+> | Return ZIP | `WIN7_D013_V26_HELPER_ARTIFACTS_20261003-060935.zip` |
+> | Return ZIP SHA-256 | `251674103e519b4e642c46b38d2b8af29929732a209613cfc5d3721daba47a40` |
+> | `output/helper.exe` SHA-256 | `2036bf697f16db523c297d150661b43be76458eb718ca24781ebed98ab51e4b7` |
+> | Lock `source_commit` | `10114503a1e79706131ea4a11a5b96bd2958807a` (no difference from the current `*.cpp`, `*.h`, `CMakeLists.txt` here) |
+>
+> Older identities stay historical and must not be reused for the current helper: v21 (validated
+> helper `98964fc5…168ce5`, see `SOURCE_PROVENANCE.json`), v24 (`7f86dac8…0d1c134`) and v25 (no
+> release hash). `SOURCE_PROVENANCE.json` is the v21 migration record, not the current helper record.
+
 This directory contains D-013 v25. It retains the historical protocol v1
 low-risk profile for compatibility and adds protocol v2 profile
 `a9-trusted-shell-current-user-v1` for A9 TrustedShell. The v25 profile is

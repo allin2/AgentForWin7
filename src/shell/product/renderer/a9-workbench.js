@@ -862,6 +862,7 @@
       case 'plan_updated': return '更新计划';
       case 'approval_required': return `准备执行 · 等待批准 · ${data.toolName || '-'}`;
       case 'approval_resolved': return `审批${data.decision === 'approved' ? '已批准' : '已拒绝'} · ${data.toolName || '-'}`;
+      case 'approval_invalidated': return `审批已失效，未执行 · ${data.toolName || '-'}`;
       case 'tool_start': return `正在${toolHeadline(data)}`;
       case 'tool_end':
         return `${toolHeadline(data)} · ${toolEndStatus(data)[1]}${shell && shell.exitCode !== undefined ? ` · exit=${shell.exitCode}` : ''}`;
@@ -1079,6 +1080,13 @@
         block.progressEl.appendChild(buildApprovalRecord(approved ? 'approved' : 'denied',
           `${approved ? '已批准' : '已拒绝'}：${data.toolName || 'operation'}`,
           data.decidedAt ? new Date(data.decidedAt).toLocaleString() : ''));
+        break;
+      }
+      case 'approval_invalidated': {
+        closeActivityGroup(block);
+        block.progressEl.appendChild(buildApprovalRecord('denied',
+          `审批已失效：${data.toolName || 'operation'}`,
+          `目标或参数已变化，本次回复未生效、未执行。${data.invalidatedAt ? new Date(data.invalidatedAt).toLocaleString() : ''}`));
         break;
       }
       case 'tool_start': {
@@ -5679,6 +5687,11 @@
         card.insertBefore(body, card.children[1] || null);
       }
       item.appendChild(card);
+      return item;
+    }
+    if (event.type === 'approval_invalidated') {
+      item.appendChild(buildApprovalRecord('denied', `审批已失效：${String(data.toolName || 'operation').slice(0, 80)}`,
+        data.invalidatedAt ? new Date(data.invalidatedAt).toLocaleString() : ''));
       return item;
     }
     if (event.type === 'approval_required' || event.type === 'approval_resolved') {

@@ -9,7 +9,7 @@
 
 import { ChildProcess, spawn } from 'child_process';
 import { randomBytes } from 'crypto';
-import { SafeOutputStream, secretVariants, ShellOutputChunk } from './stream-output';
+import { SafeOutputStream, secretVariants, ShellOutputChunk, StreamDecodeEncoding } from './stream-output';
 import { StringDecoder } from 'string_decoder';
 import { killProcessTree } from './process-cleanup';
 import { HelperTransport, HelperTransportResult, ManagedHelperInvocation } from './native-transport';
@@ -19,6 +19,8 @@ export interface ManagedProcessOwner {
   workspace: string; conversationId: string; taskId: string; turnId: string; toolCallId: string;
 }
 export interface ManagedStartOptions {
+  /** Node 侧输出解码模式；缺省沿用 helper 请求的 outputEncoding。 */
+  outputDecoding?: { stdout: StreamDecodeEncoding; stderr: StreamDecodeEncoding };
   owner?: ManagedProcessOwner;
   onOutput?: (chunk: ShellOutputChunk) => Promise<void> | void;
 }
@@ -247,7 +249,8 @@ export class BackgroundProcessManager {
     }
     const v3 = 'schemaVersion' in request && request.schemaVersion === 3;
     const variants = secretVariants(this.getSensitiveValues());
-    const encoding = v3 ? request.outputEncoding : { stdout: 'utf-8' as const, stderr: 'utf-8' as const };
+    const encoding: { stdout: StreamDecodeEncoding; stderr: StreamDecodeEncoding } = options.outputDecoding
+      ?? (v3 ? request.outputEncoding : { stdout: 'utf-8' as const, stderr: 'utf-8' as const });
     const streams = { stdout: new SafeOutputStream(encoding.stdout, variants, this.redactText), stderr: new SafeOutputStream(encoding.stderr, variants, this.redactText) };
     const handle: BackgroundProcessHandle = {
       handleId,

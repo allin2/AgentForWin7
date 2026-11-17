@@ -51,4 +51,8 @@ export {
   TrustedGitExternalMechanism,
   projectTrustedGit,
   detectExternalMechanisms,
+  assertReadOnlyGitArgs,
+  resolveTrustedGitExecutable,
+  parsePorcelainV1Z,
+  TrustedGitReadOnlyViolation,
 } from './trusted-projection';

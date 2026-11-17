@@ -185,6 +185,7 @@ const NON_RETRYABLE_STATUS = new Set([400, 401, 403, 404, 405, 422]);
 export class OpenAICompatibleProvider {
   private readonly config: OpenAIProviderConfig;
   private readonly store: CredentialStore;
+  private tlsEnvWarningEmitted = false;
 
   constructor(config: OpenAIProviderConfig) {
     if (!config || !config.baseUrl || config.baseUrl.trim().length === 0) {
@@ -812,6 +813,19 @@ export class OpenAICompatibleProvider {
   }
 
   /**
+   * 检测到 NODE_TLS_REJECT_UNAUTHORIZED=0 时记录一次安全诊断（每个 Provider 实例一次）。
+   * 代理隧道已显式开启校验，该变量对本 Provider 无效；仍提示以便排查同进程内其他 Node 网络栈。
+   */
+  private warnIfTlsEnvOverrideDetected(): void {
+    if (this.tlsEnvWarningEmitted || process.env.NODE_TLS_REJECT_UNAUTHORIZED !== '0') return;
+    this.tlsEnvWarningEmitted = true;
+    process.emitWarning(
+      'NODE_TLS_REJECT_UNAUTHORIZED=0 detected in the process environment; certificate verification stays explicitly enabled for all provider requests and proxy connections, but other Node network stacks in this process may skip it.',
+      { type: 'SecurityWarning', code: 'A9_TLS_ENV_VERIFICATION_DISABLED' },
+    );
+  }
+
+  /**
    * 创建并发出请求。proxyConfig 生效：HTTP 目标走绝对形式；HTTPS 目标先
    * CONNECT 建立隧道再发送 payload。返回最外层请求句柄供取消。
    */
@@ -848,6 +862,15 @@ export class OpenAICompatibleProvider {
       throw new GatewayError(ErrorCode.INVALID_FRAME, 'socks5 proxy is not supported by this provider yet');
     }
     const proxyIsHttps = proxyProtocol === 'https';
+    if (proxyIsHttps) {
+      this.warnIfTlsEnvOverrideDetected();
+    }
+
+    const proxyTlsOptions = proxyIsHttps ? {
+      rejectUnauthorized: requestOptions.rejectUnauthorized !== false,
+      minVersion: (requestOptions.minVersion ?? 'TLSv1.2') as tls.SecureVersion,
+      ...(requestOptions.ca ? { ca: requestOptions.ca } : {}),
+    } : {};
 
     if (!isHttps) {
       // HTTP 目标：向代理发送绝对形式请求。
@@ -858,6 +881,7 @@ export class OpenAICompatibleProvider {
         port: proxy.port,
         path: parsedUrl.toString(),
         headers: { ...requestOptions.headers, ...proxyHeaders, Host: parsedUrl.host },
+        ...proxyTlsOptions,
       });
     }
 
@@ -870,6 +894,7 @@ export class OpenAICompatibleProvider {
       path: `${parsedUrl.hostname}:${parsedUrl.port || 443}`,
       headers: { ...proxyHeaders, Host: `${parsedUrl.hostname}:${parsedUrl.port || 443}` },
       timeout: requestOptions.timeout,
+      ...proxyTlsOptions,
     });
     connectReq.on('error', onError);
     connectReq.on('connect', (res: http.IncomingMessage, socket: any) => {
@@ -877,11 +902,15 @@ export class OpenAICompatibleProvider {
         onError(new Error(`Proxy CONNECT failed with status ${res.statusCode}`));
         return;
       }
+      // H-P1-02：显式传入校验开关与最低版本，使 NODE_TLS_REJECT_UNAUTHORIZED=0
+      // 无法静默关闭代理隧道内的证书校验（显式选项优先于该环境变量）。
+      this.warnIfTlsEnvOverrideDetected();
       const tlsSocket = tls.connect({
         socket,
         servername: parsedUrl.hostname,
+        rejectUnauthorized: requestOptions.rejectUnauthorized !== false,
+        minVersion: (requestOptions.minVersion ?? 'TLSv1.2') as tls.SecureVersion,
         ...(requestOptions.ca ? { ca: requestOptions.ca } : {}),
-        ...(requestOptions.rejectUnauthorized === false ? { rejectUnauthorized: false } : {}),
       });
       tlsSocket.on('error', onError);
       const tunneled = https.request({

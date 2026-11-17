@@ -119,4 +119,4 @@ export {
 } from './process-cleanup';
 
 export { SafeOutputStream, secretVariants } from './stream-output';
-export type { ShellOutputChunk, OutputEncoding } from './stream-output';
+export type { ShellOutputChunk, OutputEncoding, StreamDecodeEncoding } from './stream-output';

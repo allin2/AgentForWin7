@@ -630,6 +630,47 @@ describe('F5: pending approval keeps active state and resume continues the same 
     }
   }, 30_000);
 
+  it('Phase A7: a core validation failure is not persisted as approved; it leaves an independent approval_invalidated audit event', async () => {
+    const env = makeEnv();
+    const fixture = await startApprovalFixture();
+    const core = require('../../../core/dist');
+    try {
+      const runtime = makeRuntime(env);
+      runtime.setMode('full_access');
+      await runtime.configureProvider({ baseUrl: fixture.baseUrl, model: 'fixture', skipProbe: true });
+      const turn = await runtime.submitTurn('delete note');
+      const approval = turn.result.pendingApproval;
+      expect(turn.result.outcome).toBe('needs_approval');
+
+      // 模拟“挂起期间来源已变化”：core 重新校验失败，且不会调用 onValidated。
+      const spy = jest.spyOn(core.A9AgentLoop.prototype, 'resumeAfterApproval').mockImplementation(async () => {
+        throw new core.AgentError(core.AgentErrorCode.APPROVAL_INVALID, 'bindingDigest 与当前挂起调用不一致；审批已失效。');
+      });
+      const rejected = await runtime.resumeApproval(approvalDecision(approval, 'approved'));
+      spy.mockRestore();
+
+      expect(rejected.ok).toBe(false);
+      expect(rejected.error.code).toBe('APPROVAL_INVALID');
+      // SQLite 审批行仍为 pending：没有任何“已批准”记录。
+      expect(lifecycleFacts(env).approvals).toEqual([{ approval_id: approval.approvalId, decision: 'pending' }]);
+      const timeline = runtime.getSnapshot().timeline;
+      expect(timeline.some((e: any) => e.type === 'approval_resolved')).toBe(false);
+      const invalidated = timeline.find((e: any) => e.type === 'approval_invalidated');
+      expect(invalidated).toBeDefined();
+      expect(invalidated.data).toMatchObject({ approvalId: approval.approvalId, attemptedDecision: 'approved', toolName: 'delete', reason: 'APPROVAL_INVALID' });
+      expect(Number.isSafeInteger(invalidated.eventId)).toBe(true);
+      // 审批仍待决：之后用同一审批正常拒绝，才产生 denied 记录。
+      expect(runtime.getSnapshot().pendingApproval.approvalId).toBe(approval.approvalId);
+      const denied = await runtime.resumeApproval(approvalDecision(approval, 'denied'));
+      expect(denied.ok).toBe(true);
+      expect(lifecycleFacts(env).approvals).toEqual([{ approval_id: approval.approvalId, decision: 'denied' }]);
+      runtime.shutdown();
+    } finally {
+      await fixture.close();
+      fs.rmSync(env.root, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   it('preserves a second pending approval, rejects the consumed old approval, and refreshes the same checkpoint', async () => {
     const env = makeEnv();
     fs.writeFileSync(path.join(env.workspaceRoot, 'second.txt'), 'second\n');
