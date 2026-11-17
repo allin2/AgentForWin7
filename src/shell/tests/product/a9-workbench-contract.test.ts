@@ -2183,6 +2183,15 @@ describe('A9 unified desktop workbench contract', () => {
     expect(t.errors).toEqual([]);
   });
 
+  it('A9-70 bounds long approval summaries and keeps approval action buttons reachable inside the viewport', () => {
+    expect(css).toMatch(/\.composer-wrap\s*\{[^}]*max-height:\s*calc\(100% - 60px\)[^}]*overflow-y:\s*auto/);
+    expect(css).toMatch(/\.approval-copy\s*\{[^}]*max-height:\s*min\(300px, 44vh\)[^}]*overflow-y:\s*auto/);
+    expect(css).toMatch(/#a9-approval-summary\s*\{[^}]*max-height:\s*min\(150px, 22vh\)[^}]*overflow:\s*auto[^}]*font-size:\s*13px/);
+    expect(css).not.toMatch(/#a9-approval-summary\s*\{[^}]*overflow(?:-[xy])?:\s*(?:hidden|clip)/);
+    expect(css).toMatch(/\.approval-selection-list\s*\{[^}]*max-height:\s*min\(160px, 24vh\)[^}]*overflow:\s*auto/);
+    expect(css).toMatch(/\.sample-confirm-list\s*\{[^}]*max-height:\s*min\(180px, 26vh\)[^}]*overflow:\s*auto/);
+  });
+
 });
 
 
