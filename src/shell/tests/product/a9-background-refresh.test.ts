@@ -140,6 +140,7 @@ function workbench(initial: any = snapshot()) {
   };
   const window: any = { win7Agent: api, innerWidth: 1366, setInterval, clearInterval, setTimeout, clearTimeout,
     addEventListener: (type: string, listener: (event?: any) => any) => register(`window:${type}`, listener) };
+  window.win7AgentStatus = require('../../product/renderer/a9-agent-status');
   window.win7AgentComposerController = require('../../product/renderer/a9-composer-controller');
   vm.runInNewContext(source, { window, document, console }, { filename: 'a9-workbench.js' });
   const fire = (key: string) => Promise.all((listeners.get(key) || []).map((listener) => listener({})));

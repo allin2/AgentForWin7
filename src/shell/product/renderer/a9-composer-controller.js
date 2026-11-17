@@ -1,10 +1,12 @@
 'use strict';
 (function expose(root) {
+  const agentStatus = typeof module === 'object' && module.exports
+    ? require('./a9-agent-status') : root.win7AgentStatus;
   function controls(snapshot, running, text) {
     const ready = Boolean(snapshot && snapshot.status === 'ready'
       && ['full_access', 'read_only'].includes(snapshot.mode));
     const blocked = !ready || Boolean(snapshot.pendingApproval || snapshot.pendingQuestion
-      || ['needs_approval', 'needs_input', 'cancelling'].includes(snapshot.agentStatus));
+      || agentStatus.isAwaitingUser(snapshot.agentStatus) || snapshot.agentStatus === 'cancelling');
     const provider = ready && snapshot.provider && snapshot.provider.configured
       && snapshot.provider.probe && snapshot.provider.probe.classification === 'tool_calling';
     const hasText = typeof text === 'string' && Boolean(text.trim());

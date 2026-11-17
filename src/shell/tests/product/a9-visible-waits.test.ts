@@ -5,6 +5,8 @@ import * as path from 'path';
 import * as vm from 'vm';
 import Database from 'better-sqlite3';
 
+const { createWorkspaceLock } = require('../../product/a9-workspace-lock');
+
 const product = process.env.A9_65_PRODUCT || path.resolve(__dirname, '../../product');
 const read = (file: string) => fs.readFileSync(path.join(product, file), 'utf8');
 const deferred = () => { let resolve!: (value?: any) => void; let reject!: (error: Error) => void; const promise = new Promise<any>((r, j) => { resolve = r; reject = j; }); return { promise, resolve, reject }; };
@@ -21,11 +23,13 @@ function shutdownHarness(blocked?: string) {
   if (pending.size) gate.promise.then(() => pending.clear());
   const context: any = { Promise, Date, setTimeout, clearTimeout, config: { shutdownStageRecorder: (stage: string) => { events.push(['begin', stage]); return { end: () => events.push(['end', stage]) }; } },
     shutdownPromise: null, shutdownRequested: false, queueClosed: false, pauseQueue() {}, imageService: null, officeService: { close: office },
-    loopTrustedRunner: { getBackgroundManager: () => manager }, workspaceLockReleased: false, lockHeld: true,
+    loopTrustedRunner: { getBackgroundManager: () => manager },
+    workspaceLock: createWorkspaceLock({ acquire: () => ({ acquired: true, holder: 'owner' }), release }),
     persistence: { releaseWorkspaceLock: release }, canonicalWorkspace: '/test', ownerId: 'owner', checkpointRecoveryPending: blocked === 'checkpoint_recovery',
     checkpointRecoveryReady: blocked === 'checkpoint_recovery' ? gate.promise : Promise.resolve(), activeController: blocked === 'active_task_cancel' ? { abort: jest.fn() } : null,
     agentStatus: 'idle', pendingStateOperations: pending, managedStopPromise: blocked === 'managed_process_stop' ? gate.promise : null,
     currentPendingApproval: null, currentPendingQuestion: null, recordManagedHandle() {}, };
+  context.setAgentStatus = (value: string) => { context.agentStatus = value; };
   const source = read('a9-agent-runtime.js');
   const start = source.includes('  let shutdownStage =') ? source.indexOf('  let shutdownStage =') : source.indexOf('  function shutdown(options');
   vm.runInNewContext(source.slice(start, source.indexOf('\n  return {\n    protocolVersion:', start)) + '\nthis.shutdown = shutdown; this.stage = () => typeof shutdownStage === "undefined" ? null : shutdownStage;', context);

@@ -203,6 +203,7 @@ function workbench(initial: any = snapshot()) {
     A9QuestionCard: { create: () => ({ update: jest.fn() }) },
     getSelection: () => ({ anchorNode: null, removeAllRanges() {}, addRange() {} }),
     addEventListener: (type: string, listener: (event?: any) => any) => register(`window:${type}`, listener) };
+  window.win7AgentStatus = require('../../product/renderer/a9-agent-status');
   window.win7AgentComposerController = require('../../product/renderer/a9-composer-controller');
   vm.runInNewContext(source, { window, document, console }, { filename: 'a9-workbench.js' });
   const fire = (key: string, event: any = {}) => Promise.all((registry.get(key) || []).map((listener) => listener({ preventDefault() {}, stopPropagation() {}, ...event })));

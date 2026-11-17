@@ -306,6 +306,7 @@ describe('A9-70 P6 UI, skills installer & full product closure', () => {
     };
     const winStub: any = {
       win7Agent: { a9: a9Mock, signalReady: jest.fn(), getDiagnostics: async () => ({}) },
+      win7AgentStatus: require('../../product/renderer/a9-agent-status'),
       win7AgentComposerController: require('../../product/renderer/a9-composer-controller'),
       addEventListener: jest.fn(),
       setInterval, clearInterval, setTimeout, clearTimeout,

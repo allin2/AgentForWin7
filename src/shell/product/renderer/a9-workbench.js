@@ -2958,7 +2958,7 @@
     renderOfficeSkills(snapshot);
     renderApproval(snapshot);
     renderQuestion(snapshot);
-    state.running = ['running', 'cancelling'].includes(snapshot.agentStatus);
+    state.running = root.win7AgentStatus.isActive(snapshot.agentStatus);
     const preview = snapshot.liveModelPreview;
     state.liveModelPreview = preview && preview.turnId && typeof preview.text === 'string' ? preview : null;
     if (state.liveModelPreview) state.lastEventAt = Date.now();
@@ -2974,13 +2974,13 @@
     contextNote.hidden = !context.note;
     contextNote.textContent = context.note || '';
     configureModeDialog(snapshot, false);
-    const active = ['running', 'cancelling'].includes(snapshot.agentStatus);
+    const active = root.win7AgentStatus.isActive(snapshot.agentStatus);
     const managedActive = activeManagedProcesses(snapshot).length;
     state.running = active;
     if (snapshot.pendingQuestion || snapshot.agentStatus === 'needs_input') setTaskState('等待回答', 'running', '任务已暂停；回答只补充信息，不批准操作。');
     else if (snapshot.pendingApproval || snapshot.agentStatus === 'needs_approval') setTaskState('等待批准', 'running', '操作已暂停，等待你的决定。');
     else if (active) setTaskState(snapshot.agentStatus === 'cancelling' ? '正在停止' : '运行中', 'running');
-    else if (snapshot.agentStatus === 'failed') setTaskState('失败', 'failed');
+    else if (root.win7AgentStatus.isFailure(snapshot.agentStatus)) setTaskState('失败', 'failed');
     else if (managedActive > 0) setTaskState(`后台运行 ${managedActive}`, 'running', '托管后台进程可通过下方停止按钮回收。');
     else setTaskState('空闲', 'idle');
     syncComposer();
@@ -3895,9 +3895,10 @@
       && (snapshot.managedProcesses || []).some((item) =>
         ['running', 'starting'].includes(item.lastProbeStatus) && item.pidReusePossible !== true
         && !['released', 'release_unknown'].includes(item.ownershipState)));
-    const needed = (snapshot?.workspaces || []).some(item => item.opened && ['running', 'cancelling', 'needs_approval', 'needs_input'].includes(item.status))
+    const needed = (snapshot?.workspaces || []).some(item => item.opened
+        && (root.win7AgentStatus.isActive(item.status) || root.win7AgentStatus.isAwaitingUser(item.status)))
       || state.snapshotPollingRequests > 0 || hasLiveManaged
-      || Boolean(snapshot && ['running', 'cancelling'].includes(snapshot.agentStatus))
+      || Boolean(snapshot && root.win7AgentStatus.isActive(snapshot.agentStatus))
       || Boolean(snapshot && snapshot.queue && !snapshot.queue.paused && snapshot.queue.items.length);
     if (state.snapshotPollingClosed || state.snapshotPollingPauses > 0 || !needed) {
       if (state.stopSnapshotPolling) {
@@ -5511,7 +5512,7 @@
     if (snapshot.agentStatus === 'cancelling') return { label: '正在停止', kind: 'running', hint: '' };
     if (snapshot.agentStatus === 'running') return { label: '运行中', kind: 'running', hint: '继续执行，完成后不会自动切回。' };
     if (managed > 0) return { label: `后台进程运行中 ${managed}`, kind: 'running', hint: '停止后台进程需返回执行对话。' };
-    if (snapshot.agentStatus === 'failed') return { label: '失败', kind: 'error', hint: '返回执行对话查看详情。' };
+    if (root.win7AgentStatus.isFailure(snapshot.agentStatus)) return { label: '失败', kind: 'error', hint: '返回执行对话查看详情。' };
     return { label: '空闲', kind: 'idle', hint: '返回后可继续正常操作。' };
   }
 

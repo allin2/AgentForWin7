@@ -17,6 +17,9 @@ const os = require('os');
 const { serializeError } = require('./desktop-host');
 const { createDpapiCredentialVault } = require('./credential-vault');
 const { createComposerState } = require('./a9-composer-state');
+const { createWorkspaceLock } = require('./a9-workspace-lock');
+const { createProviderContextState } = require('./a9-provider-context-state');
+const agentStatusModel = require('./renderer/a9-agent-status');
 const { verifyWorkdir } = require('./a9-default-workdir');
 const { validateHistoryInput, visibleHistoryText, deliveryProjection } = require('./a9-history');
 
@@ -323,20 +326,11 @@ function createA9AgentRuntime(options) {
       return error && error.code === 'ESRCH' ? false : undefined;
     }
   }
-  let lock = persistence.acquireWorkspaceLock(canonicalWorkspace, ownerId, {
-    holderIsAlive: workspaceLockHolderIsAlive,
+  // States and transitions live in a9-workspace-lock.js (unlocked → acquired → released).
+  const workspaceLock = createWorkspaceLock({
+    acquire: () => persistence.acquireWorkspaceLock(canonicalWorkspace, ownerId, { holderIsAlive: workspaceLockHolderIsAlive }),
+    release: () => persistence.releaseWorkspaceLock(canonicalWorkspace, ownerId),
   });
-  let lockHeld = lock.acquired === true;
-  let workspaceLockReleased = false;
-
-  function retryWorkspaceLock() {
-    if (lockHeld || workspaceLockReleased) return lockHeld;
-    lock = persistence.acquireWorkspaceLock(canonicalWorkspace, ownerId, {
-      holderIsAlive: workspaceLockHolderIsAlive,
-    });
-    lockHeld = lock.acquired === true;
-    return lockHeld;
-  }
 
   // ----- R2：pending 审批（SQLite 记录来自原始 pending 对象） -----
   let currentPendingApproval = null;
@@ -405,8 +399,31 @@ function createA9AgentRuntime(options) {
     return imageService;
   }
   let activeController = null;
-  let agentStatus = activeConversation.activity === 'interrupted' ? 'interrupted'
-    : activeConversation.activity === 'waiting_input' ? 'needs_input' : 'idle';
+  // agentStatus is the turn lifecycle the renderer projects; the vocabulary and
+  // phase rules live in renderer/a9-agent-status.js. Write it only through setAgentStatus.
+  // resync marks a reload from durable facts (not a lifecycle transition). The
+  // transition contract is observed, never enforced: config.agentStatusObserver
+  // (tests, diagnostics) sees { from, to, resync, legal } and cannot break the turn.
+  let agentStatus = 'idle';
+  function setAgentStatus(next, { resync = false } = {}) {
+    if (!agentStatusModel.isKnown(next)) {
+      throw Object.assign(new Error(`A9_AGENT_STATUS_INVALID: ${String(next)}`), { code: 'A9_AGENT_STATUS_INVALID' });
+    }
+    const previous = agentStatus;
+    agentStatus = next;
+    if (typeof config.agentStatusObserver === 'function') {
+      try {
+        const result = config.agentStatusObserver({ from: previous, to: next, resync, legal: resync || agentStatusModel.canTransition(previous, next) });
+        if (result && typeof result.catch === 'function') {
+          result.catch(() => { /* observers must not change runtime behavior */ });
+        }
+      } catch (_error) { /* observers must not change runtime behavior */ }
+    }
+  }
+  function statusForConversationActivity(activity) {
+    return activity === 'interrupted' ? 'interrupted' : activity === 'waiting_input' ? 'needs_input' : 'idle';
+  }
+  setAgentStatus(statusForConversationActivity(activeConversation.activity), { resync: true });
   // F4：模型切换时保存的会话历史；新 loop 惰性创建后恢复并一次性清除。
   function restoreProviderContext(sessionId) {
     const metadata = persistence.getConversationMetadata(sessionId);
@@ -434,34 +451,22 @@ function createA9AgentRuntime(options) {
   let providerContextGeneration = Number.isSafeInteger(persistence.getConversationMetadata(a9SessionId).providerContextGeneration)
     ? persistence.getConversationMetadata(a9SessionId).providerContextGeneration
     : persistence.getConversationMetadata(a9SessionId).providerContextBoundaryAt ? 1 : 0;
-  let restoredContext = { messages: [], stats: { deferred: true, note: '历史上下文将在首次任务前恢复。' } };
-  let pendingConversationHistory = null;
-  let providerContextRestorePending = true;
-  function ensureProviderContextRestored() {
-    if (!providerContextRestorePending) return;
-    restoredContext = restoreProviderContext(a9SessionId);
-    pendingConversationHistory = restoredContext.messages;
-    providerContextRestorePending = false;
-  }
   // A9-66 F-007: the product entries restore Provider context through bounded
   // asynchronous batches (persistence.scanConversationFactsAsync). The
-  // synchronous restoreProviderContext/ensureProviderContextRestored pair above
-  // stays only as the legacy compatibility path (non-paged getSnapshot for
-  // schemaVersion<7 renderers) and as the independent oracle in tests.
+  // synchronous restoreProviderContext path stays only as the legacy
+  // compatibility path (non-paged getSnapshot for schemaVersion<7 renderers)
+  // and as the independent oracle in tests.
   // Every result is bound to a scope epoch: a conversation switch, Provider
   // state/generation change or shutdown invalidates in-flight work, whose late
   // result is dropped and never promoted into the cache.
-  let providerContextEpoch = 0;
-  // The signal also reads shutdownRequested, so an in-flight scan stops at its next batch on close.
-  const newProviderContextAbort = () => ({ stale: false, get aborted() { return this.stale || shutdownRequested; } });
-  let providerContextAbort = newProviderContextAbort();
-  let providerContextRestoreInFlight = null;
-  function invalidateProviderContextScope() {
-    providerContextEpoch += 1;
-    providerContextAbort.stale = true;
-    providerContextAbort = newProviderContextAbort();
-    providerContextRestoreInFlight = null;
-  }
+  // Phases (pending → restoring → ready), the epoch, the carry-over history and
+  // the displayed statistics live in a9-provider-context-state.js.
+  const providerContext = createProviderContextState({
+    currentSessionId: () => a9SessionId,
+    isShutdownRequested: () => shutdownRequested,
+    restoreSync: (sessionId) => restoreProviderContext(sessionId),
+    restoreAsync: (sessionId, signal) => restoreProviderContextAsync(sessionId, signal),
+  });
   function providerContextGenerationOf(sessionId) {
     const metadata = persistence.getConversationMetadata(sessionId);
     return Number.isSafeInteger(metadata.providerContextGeneration)
@@ -476,64 +481,22 @@ function createA9AgentRuntime(options) {
     });
     return buildPersistedTextContextFromSummary(summary);
   }
-  function staleProviderContextScope() {
-    return Object.assign(new Error('A9_SCOPE_STALE'), { code: 'A9_SCOPE_STALE' });
-  }
-  /** Shared, scope-bound initialization promise; failure/cancel leaves the cache untouched so a later call retries. */
-  function ensureProviderContextRestoredAsync() {
-    if (!providerContextRestorePending) return Promise.resolve();
-    const sessionId = a9SessionId;
-    const epoch = providerContextEpoch;
-    const inFlight = providerContextRestoreInFlight;
-    if (inFlight && inFlight.epoch === epoch && inFlight.sessionId === sessionId) return inFlight.promise;
-    const signal = providerContextAbort;
-    const entry = { epoch, sessionId, promise: null };
-    entry.promise = (async () => {
-      let context;
-      try { context = await restoreProviderContextAsync(sessionId, signal); }
-      catch (error) {
-        if (epoch !== providerContextEpoch || sessionId !== a9SessionId) throw staleProviderContextScope();
-        throw error;
-      }
-      if (epoch !== providerContextEpoch || sessionId !== a9SessionId || shutdownRequested) throw staleProviderContextScope();
-      restoredContext = context;
-      pendingConversationHistory = context.messages;
-      providerContextRestorePending = false;
-    })();
-    const clear = () => { if (providerContextRestoreInFlight === entry) providerContextRestoreInFlight = null; };
-    entry.promise.then(clear, clear);
-    providerContextRestoreInFlight = entry;
-    return entry.promise;
-  }
   /**
    * Statistics refresh after a Turn runs off the Turn: the Turn result and its
    * ownership release are not delayed. It is tracked as a state operation so
    * close waits for it, and it never throws.
    */
   function scheduleRestoredContextRefresh() {
-    const operation = refreshRestoredContextAsync();
+    const operation = providerContext.refreshStatsAsync();
     pendingStateOperations.add(operation);
     pendingReadOnlyRefreshes.add(operation);
     operation.then(() => { pendingStateOperations.delete(operation); pendingReadOnlyRefreshes.delete(operation); });
   }
   /** Entry-point gate: restores (bounded, async) before the loop is built; the scope must be unchanged afterwards. */
   async function awaitProviderContextForEntry(sessionId) {
-    if (!providerContextRestorePending) return;
-    await ensureProviderContextRestoredAsync();
+    if (!providerContext.isRestorePending()) return;
+    await providerContext.ensureRestoredAsync();
     assertOperationScope(sessionId);
-  }
-  /** Recomputes only the displayed context statistics (after a Turn or a generation change). Never throws. */
-  async function refreshRestoredContextAsync() {
-    const sessionId = a9SessionId;
-    const epoch = providerContextEpoch;
-    try {
-      const context = await restoreProviderContextAsync(sessionId, providerContextAbort);
-      if (epoch === providerContextEpoch && sessionId === a9SessionId) restoredContext = context;
-    } catch (error) {
-      if (epoch !== providerContextEpoch || sessionId !== a9SessionId) return;
-      restoredContext = { messages: [], stats: { deferred: true,
-        note: `历史上下文统计暂未刷新（${error && error.code ? error.code : 'A9_CONTEXT_STATS_REFRESH_FAILED'}）。` } };
-    }
   }
   // F5：当前 Turn 的 task/turn/run 生命周期句柄。
   let activeLifecycle = null;
@@ -542,7 +505,7 @@ function createA9AgentRuntime(options) {
   const pendingStateOperations = new Set();
   const pendingReadOnlyRefreshes = new Set();
   function assertAvailable() {
-    if (shutdownRequested || workspaceLockReleased) {
+    if (shutdownRequested || workspaceLock.isReleased()) {
       throw Object.assign(new Error('A9_RUNTIME_SHUTDOWN: 工作区正在关闭或已关闭'), { code: 'A9_RUNTIME_SHUTDOWN' });
     }
   }
@@ -607,7 +570,7 @@ function createA9AgentRuntime(options) {
   }
   function queueReady() {
     return !(config.isProviderConfiguring && config.isProviderConfiguring())
-      && !queueClosed && !workspaceLockReleased && lockHeld && !activeController
+      && !queueClosed && workspaceLock.isHeld() && !activeController
       && !currentPendingApproval && !currentPendingQuestion && !managedAuditFailure && !auditFailureBlock
       && !shellConfigurationInFlight
       && ['full_access', 'read_only'].includes(permissionMode)
@@ -668,7 +631,7 @@ function createA9AgentRuntime(options) {
   function updateQueue(input) {
     try {
       if (!input || input.conversationId !== a9SessionId) throw new Error('A9_QUEUE_CONVERSATION_MISMATCH');
-      if (queueClosed || !lockHeld || workspaceLockReleased || managedAuditFailure || auditFailureBlock) throw new Error('A9_QUEUE_UNAVAILABLE');
+      if (queueClosed || !workspaceLock.isHeld() || managedAuditFailure || auditFailureBlock) throw new Error('A9_QUEUE_UNAVAILABLE');
       if (input.operation === 'add') {
         if (!activeController || agentStatus !== 'running' || currentPendingApproval || currentPendingQuestion) throw new Error('A9_QUEUE_REQUIRES_RUNNING_TURN');
         composer.add(a9SessionId, crypto.randomBytes(12).toString('hex'), input.text);
@@ -1439,7 +1402,7 @@ function createA9AgentRuntime(options) {
       shellOptions = next;
       automaticShellSelection = null;
       shellConfigDiagnostics = null;
-      pendingConversationHistory = loop ? loop.getConversationHistory() : pendingConversationHistory;
+      if (loop) providerContext.setCarryOverHistory(loop.getConversationHistory());
       loop = null;
       return { ok: true, shell: shellSnapshot() };
     } finally {
@@ -1518,7 +1481,7 @@ function createA9AgentRuntime(options) {
     if (!manager.isRecoveredFact(fact.handleId) || !fact.cleanupRequired) return { canDismissRecovered: false };
     try {
       const identity = persistence.getManagedProcessRecoveryIdentity(fact.handleId);
-      if (!lockHeld || workspaceLockReleased) throw Object.assign(new Error('工作区锁无效'), { code: 'A9_WORKSPACE_LOCKED' });
+      if (!workspaceLock.isHeld()) throw Object.assign(new Error('工作区锁无效'), { code: 'A9_WORKSPACE_LOCKED' });
       if (managedStopPromise || shutdownPromise || managedDismissInFlight) throw Object.assign(new Error('后台处置正在进行'), { code: 'A9_MANAGED_DISPOSITION_BUSY' });
       manager.probeRecoveredCleanup(fact.handleId, { workspace: canonicalWorkspace, conversationId: a9SessionId });
       return { recoveryRevision: identity.recoveryRevision, canDismissRecovered: true };
@@ -1534,7 +1497,7 @@ function createA9AgentRuntime(options) {
       if (!input || Object.keys(input).length !== 3 || !['conversationId', 'handleId'].every((key) =>
         typeof input[key] === 'string' && input[key].trim() && input[key].length <= 256)
         || typeof input.recoveryRevision !== 'string' || !/^[a-f0-9]{64}$/.test(input.recoveryRevision)) fail('A9_PAYLOAD_INVALID');
-      if (!lockHeld || workspaceLockReleased) fail('A9_WORKSPACE_LOCKED');
+      if (!workspaceLock.isHeld()) fail('A9_WORKSPACE_LOCKED');
       if (input.conversationId !== a9SessionId) fail('A9_MANAGED_HANDLE_WRONG_OWNER');
       if (managedStopPromise || shutdownPromise || managedDismissInFlight) fail('A9_MANAGED_DISPOSITION_BUSY');
       managedDismissInFlight = true;
@@ -1611,12 +1574,8 @@ function createA9AgentRuntime(options) {
     providerContextGeneration = Number.isSafeInteger(metadata.providerContextGeneration)
       ? metadata.providerContextGeneration
       : metadata.providerContextBoundaryAt ? 1 : 0;
-    invalidateProviderContextScope();
-    providerContextRestorePending = true;
-    pendingConversationHistory = null;
-    restoredContext = { messages: [], stats: { deferred: true, note: '历史上下文将在首次任务前恢复。' } };
-    agentStatus = record.activity === 'interrupted' ? 'interrupted'
-      : record.activity === 'waiting_input' ? 'needs_input' : 'idle';
+    providerContext.requireRestore({ resetContext: true });
+    setAgentStatus(statusForConversationActivity(record.activity), { resync: true });
     return { ok: true, conversationId: a9SessionId };
   }
 
@@ -1678,8 +1637,8 @@ function createA9AgentRuntime(options) {
   function ensureRuntime() {
     ensureWorkdir(false);
     if (config.assertExecutionAllowed) config.assertExecutionAllowed();
-    if (!retryWorkspaceLock()) {
-      const err = new Error(`A9_WORKSPACE_LOCKED: 工作区写锁由 ${lock.holder} 持有`);
+    if (!workspaceLock.retry()) {
+      const err = new Error(`A9_WORKSPACE_LOCKED: 工作区写锁由 ${workspaceLock.holder} 持有`);
       err.code = 'A9_WORKSPACE_LOCKED';
       throw err;
     }
@@ -1741,7 +1700,7 @@ function createA9AgentRuntime(options) {
       }
       // Every modern caller awaits preparation before reaching this factory.
       // Never turn a missed await into an unbounded synchronous history read.
-      if (providerContextRestorePending) throw Object.assign(new Error('A9_CONTEXT_RESTORE_PENDING'), { code: 'A9_CONTEXT_RESTORE_PENDING' });
+      if (providerContext.isRestorePending()) throw Object.assign(new Error('A9_CONTEXT_RESTORE_PENDING'), { code: 'A9_CONTEXT_RESTORE_PENDING' });
       const detectedPlatform = os.platform();
       const detectedRelease = os.release();
       const detectedArch = os.arch();
@@ -1921,10 +1880,8 @@ function createA9AgentRuntime(options) {
         },
       });
       loopWorkspaceService = workspaceService;
-      if (pendingConversationHistory && pendingConversationHistory.length > 0) {
-        loop.restoreConversationHistory(pendingConversationHistory);
-        pendingConversationHistory = null;
-      }
+      const carryOverHistory = providerContext.takeCarryOverHistory();
+      if (carryOverHistory) loop.restoreConversationHistory(carryOverHistory);
     }
     return loop;
   }
@@ -2229,9 +2186,9 @@ function createA9AgentRuntime(options) {
     // 同一精确 Base URL 的模型切换保留经过脱敏的上下文；endpoint 路径、
     // origin 或端口任一改变，都必须清空旧上下文和旧凭据绑定。
     let refreshStatsAfterProviderChange = false;
-    if (!baseUrlChanged && providerContextRestorePending) {
+    if (!baseUrlChanged && providerContext.isRestorePending()) {
       try {
-        await ensureProviderContextRestoredAsync();
+        await providerContext.ensureRestoredAsync();
       } catch (error) {
         // A conversation switch during the restore drops the old scope's result;
         // the new scope restores lazily. Anything else (including shutdown) fails closed.
@@ -2244,10 +2201,10 @@ function createA9AgentRuntime(options) {
         throw error;
       }
     }
-    const previousHistory = loop ? loop.getConversationHistory() : pendingConversationHistory;
-    pendingConversationHistory = baseUrlChanged
+    const previousHistory = loop ? loop.getConversationHistory() : providerContext.carryOverHistory();
+    providerContext.setCarryOverHistory(baseUrlChanged
       ? null
-      : Array.isArray(previousHistory) ? redactForProjection(previousHistory) : null;
+      : Array.isArray(previousHistory) ? redactForProjection(previousHistory) : null);
     if (baseUrlChanged) {
       // 为本工作区所有（含归档）对话持久化 endpoint 边界；之后切换或
       // 恢复任一对话都不得把旧 Base URL 的上下文发送到新目标。
@@ -2266,8 +2223,8 @@ function createA9AgentRuntime(options) {
       // synchronous step as the metadata change. Statistics are recomputed
       // through the bounded async scan once the new configuration is fully
       // applied (below), so no await opens a window with a half-switched Provider.
-      invalidateProviderContextScope();
-      restoredContext = { messages: [], stats: { deferred: true, note: '历史上下文统计正在刷新。' } };
+      providerContext.invalidateScope();
+      providerContext.showDeferredStats('历史上下文统计正在刷新。');
       refreshStatsAfterProviderChange = true;
     }
     if (previousBaseUrl && baseUrlChanged) {
@@ -2375,7 +2332,7 @@ function createA9AgentRuntime(options) {
 
     // 模型切换：新 loop 在下次 ensureRuntime 时恢复会话历史（不丢已完成工具结果）。
     if (refreshStatsAfterProviderChange) {
-      await refreshRestoredContextAsync();
+      await providerContext.refreshStatsAsync();
       assertAvailable();
     }
 
@@ -2505,15 +2462,15 @@ function createA9AgentRuntime(options) {
       });
     }
     // A9-66 F-007: the displayed context statistics are refreshed by the async
-    // callers (refreshRestoredContextAsync) after this synchronous persistence step.
-    agentStatus = result.outcome;
+    // callers (providerContext.refreshStatsAsync) after this synchronous persistence step.
+    setAgentStatus(result.outcome);
     activeConversation = persistence.listConversations(canonicalWorkspace)
       .find((item) => item.sessionId === a9SessionId) || activeConversation;
     activeLifecycle = ['needs_approval', 'needs_input'].includes(result.outcome) ? lifecycle : null;
   }
 
   function persistUnexpectedFailure(error, lifecycle) {
-    agentStatus = 'failed';
+    setAgentStatus('failed');
     if (!lifecycle) return;
     const detail = redactSecrets(error && error.message ? error.message : String(error));
     try {
@@ -2571,7 +2528,7 @@ function createA9AgentRuntime(options) {
 
   function presentAuditFailure(result) {
     auditFailureBlock = result;
-    agentStatus = 'failed';
+    setAgentStatus('failed');
     activeLifecycle = null;
     currentPendingApproval = null;
     currentPendingQuestion = null;
@@ -2591,7 +2548,7 @@ function createA9AgentRuntime(options) {
 
   function continuationBlockReason(ownedController = null, ownQuestionReply = null) {
     if (managedAuditFailure || auditFailureBlock) return 'A9_AUDIT_PERSISTENCE_FAILED';
-    if (!lockHeld || workspaceLockReleased) return 'A9_WORKSPACE_LOCKED';
+    if (!workspaceLock.isHeld()) return 'A9_WORKSPACE_LOCKED';
     if (checkpointRecoveryFatal) return 'A9_CHECKPOINT_RECONCILIATION_FAILED';
     if (activeController && activeController !== ownedController) return 'A9_TURN_ALREADY_ACTIVE';
     if (currentPendingApproval || approvalDecisionInFlightId) return 'A9_APPROVAL_REQUIRED';
@@ -2642,7 +2599,7 @@ function createA9AgentRuntime(options) {
       assertOperationScope(sessionId);
       // Before any duplicate/ownership decision, so the ordering of concurrent
       // clicks is the same as without a restore (the restore itself is bounded and async).
-      if (providerContextRestorePending) await awaitProviderContextForEntry(sessionId);
+      if (providerContext.isRestorePending()) await awaitProviderContextForEntry(sessionId);
       if (!input || Object.keys(input).some((key) => !['conversationId', 'taskId', 'interruptedTurnId', 'recoveryRevision'].includes(key)) || input.conversationId !== a9SessionId ||
           !['taskId', 'interruptedTurnId', 'recoveryRevision'].every((key) => typeof input[key] === 'string' && input[key].length > 0)) {
         throw Object.assign(new Error('继续身份不匹配，请刷新当前中断卡。'), { code: 'A9_CONTINUE_IDENTITY_MISMATCH' });
@@ -2650,7 +2607,7 @@ function createA9AgentRuntime(options) {
       // Durable duplicate reads remain safe while the original request is running or after restart.
       const duplicate = persistence.findTaskContinuation(canonicalWorkspace, input);
       if (duplicate) return { ok: true, continuation: duplicate };
-      retryWorkspaceLock();
+      workspaceLock.retry();
       const reason = continuationBlockReason();
       if (reason) throw Object.assign(new Error(reason), { code: reason });
       const fact = persistence.getTaskRecovery(canonicalWorkspace, a9SessionId, input.taskId);
@@ -2687,7 +2644,7 @@ function createA9AgentRuntime(options) {
       lifecycle = { taskId: input.taskId, turnId: continuation.turnId, runId: `run-${continuation.turnId}`,
         requestPrompt: fact.originalGoal, continuation: { interruptedTurnId: input.interruptedTurnId, recoveryRevision: input.recoveryRevision } };
       activeLifecycle = lifecycle;
-      agentStatus = 'running';
+      setAgentStatus('running');
       // Reopen the current workspace through its real read-only path; history cannot stand in for files.
       const currentFiles = await standaloneWorkspaceService.list('.');
       if (currentFiles.outsideWorkspace || currentFiles.error) throw Object.assign(new Error('当前工作区事实核查失败。'), { code: 'A9_CONTINUE_FACT_CHECK_FAILED' });
@@ -2724,7 +2681,7 @@ function createA9AgentRuntime(options) {
           return presentAuditFailure(auditFailureBlock);
         }
       }
-      agentStatus = lifecycle ? 'interrupted' : agentStatus;
+      if (lifecycle) setAgentStatus('interrupted');
       if (lifecycle && activeLifecycle === lifecycle) activeLifecycle = null;
       return { ok: false, error: presentError(error), ...(lifecycle ? { continuation: { turnId: lifecycle.turnId, taskId: lifecycle.taskId } } : {}) };
     } finally {
@@ -2768,7 +2725,7 @@ function createA9AgentRuntime(options) {
     try {
       ownedController = new AbortController();
       activeController = ownedController;
-      agentStatus = 'running';
+      setAgentStatus('running');
       // F5：Turn 开始前创建并持久化 active task。
       createdTaskId = `task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       const requestPrompt = rawPrompt;
@@ -2783,7 +2740,7 @@ function createA9AgentRuntime(options) {
       activeConversation = persistence.maybeSetAutomaticTitle(a9SessionId, persistedRequestPrompt);
       if (!options.preserveDraft) saveDraft('');
       activeLifecycle = { taskId: createdTaskId, turnId: null, runId: null, requestPrompt: persistedRequestPrompt };
-      if (providerContextRestorePending) await awaitProviderContextForEntry(sessionId);
+      if (providerContext.isRestorePending()) await awaitProviderContextForEntry(sessionId);
       const activeLoop = ensureRuntime();
       if (options.onAccepted) options.onAccepted({ ok: true, accepted: true });
       const result = await activeLoop.runTurn(requestPrompt, { signal: ownedController.signal });
@@ -2811,7 +2768,7 @@ function createA9AgentRuntime(options) {
         failureLifecycle = { ...failureLifecycle, turnId: failureTurnId, runId: `run-${failureTurnId}` };
       }
       if (!shutdownRequested && ownedController && ownedController.signal.aborted && failureLifecycle
-          && providerContextRestorePending && ['A9_CONTEXT_RESTORE_CANCELLED', 'A9_SCOPE_STALE'].includes(error.code)) {
+          && providerContext.isRestorePending() && ['A9_CONTEXT_RESTORE_CANCELLED', 'A9_SCOPE_STALE'].includes(error.code)) {
         // Stop during preparation is a cancelled Turn, just as Stop in Core is.
         // No loop/model/tool was started and the partial restore stays uncached.
         const result = { turnId: failureLifecycle.turnId, outcome: 'cancelled', verification: 'not_applicable',
@@ -2848,7 +2805,7 @@ function createA9AgentRuntime(options) {
       officeSelectionOriginal = original;
       const approval = await loop.selectOfficeActions(input, { signal: controller.signal });
       assertOperationScope(sessionId);
-      agentStatus = 'needs_approval';
+      setAgentStatus('needs_approval');
       return { ok: true, pendingApproval: approvalIdentity(approval) };
     } catch (error) {
       return { ok: false, error: presentError(error) };
@@ -2885,7 +2842,7 @@ function createA9AgentRuntime(options) {
         err.code = 'A9_APPROVAL_STALE';
         throw err;
       }
-      if (providerContextRestorePending) {
+      if (providerContext.isRestorePending()) {
         await awaitProviderContextForEntry(sessionId);
         // The pending approval may have been resolved while the context was restored.
         if (currentPendingApproval !== original) {
@@ -2906,7 +2863,7 @@ function createA9AgentRuntime(options) {
       ownedController = new AbortController();
       activeController = ownedController;
       approvalDecisionInFlightId = input.approvalId;
-      agentStatus = 'running';
+      setAgentStatus('running');
       // R2.7：SQLite 记录来自原始 pending 审批，而不是恢复执行后的结果。
       persistence.recordApproval({
         approvalId: original.approvalId,
@@ -2945,7 +2902,7 @@ function createA9AgentRuntime(options) {
       return { ok: true, result: presentTurnResult(result) };
     } catch (error) {
       if (resumeProducedResult) persistUnexpectedFailure(error, activeLifecycle);
-      else if (ownedController) agentStatus = currentPendingApproval ? 'needs_approval' : 'failed';
+      else if (ownedController) setAgentStatus(currentPendingApproval ? 'needs_approval' : 'failed');
       return { ok: false, error: presentError(error) };
     } finally {
       if (ownedController && approvalDecisionInFlightId === (input && input.approvalId)) approvalDecisionInFlightId = null;
@@ -2983,7 +2940,7 @@ function createA9AgentRuntime(options) {
     activeConversation = persistence.listConversations(canonicalWorkspace)
       .find((item) => item.sessionId === a9SessionId) || activeConversation;
     activeLifecycle = null;
-    agentStatus = 'interrupted';
+    setAgentStatus('interrupted');
   }
 
   async function answerQuestion(input) {
@@ -3039,11 +2996,11 @@ function createA9AgentRuntime(options) {
       ownedController = new AbortController();
       activeController = ownedController;
       questionReplyInFlightId = input.questionId;
-      agentStatus = 'running';
+      setAgentStatus('running');
       let result;
       if (activeLifecycle && activeLifecycle.taskId === original.taskId && activeLifecycle.turnId === original.turnId) {
         lifecycle = activeLifecycle;
-        if (providerContextRestorePending) await awaitProviderContextForEntry(sessionId);
+        if (providerContext.isRestorePending()) await awaitProviderContextForEntry(sessionId);
         const activeLoop = ensureRuntime();
         result = await activeLoop.resumeAfterQuestion({
           conversationId: input.conversationId,
@@ -3067,7 +3024,7 @@ function createA9AgentRuntime(options) {
             schemaVersion: 1, outcome: 'cancelled', recoveredQuestion: true,
           });
           persistence.upsertRun(`run-${original.turnId}`, original.turnId, a9SessionId, 'cancelled');
-          agentStatus = 'cancelled';
+          setAgentStatus('cancelled');
           activeLifecycle = null;
           return { ok: true, result: presentTurnResult(result) };
         }
@@ -3080,7 +3037,7 @@ function createA9AgentRuntime(options) {
           throw Object.assign(new Error('权限配置已变化，请重新确认工作区模式。'), { code: 'A9_CONTINUE_MODE_DRIFT' });
         }
         loop = null;
-        if (providerContextRestorePending) await awaitProviderContextForEntry(sessionId);
+        if (providerContext.isRestorePending()) await awaitProviderContextForEntry(sessionId);
         const recoveredLoop = ensureRuntime();
         recoveredLoop.restoreConversationHistory([]);
         const summary = redactForProjection({
@@ -3144,7 +3101,7 @@ function createA9AgentRuntime(options) {
       else if (replyCommitted && lifecycle && lifecycle.turnId) {
         markQuestionContinuationInterrupted(lifecycle, error);
       }
-      else if (currentPendingQuestion) agentStatus = 'needs_input';
+      else if (currentPendingQuestion) setAgentStatus('needs_input');
       return { ok: false, error: presentError(error) };
     } finally {
       if (questionReplyInFlightId === (input && input.questionId)) questionReplyInFlightId = null;
@@ -3156,8 +3113,8 @@ function createA9AgentRuntime(options) {
     pauseQueue();
     if (activeController) {
       activeController.abort();
-      if (providerContextRestorePending) invalidateProviderContextScope();
-      agentStatus = 'cancelling';
+      if (providerContext.isRestorePending()) providerContext.invalidateScope();
+      setAgentStatus('cancelling');
       return { ok: true };
     }
     const manager = loopTrustedRunner.getBackgroundManager();
@@ -3219,22 +3176,22 @@ function createA9AgentRuntime(options) {
     modeStore.save(workspaceRoot, mode);
     persistence.setWorkspaceMode(canonicalWorkspace, mode);
     persistence.recordToolEvent(a9SessionId, null, 'mode.set', { mode, workspace: canonicalWorkspace });
-    pendingConversationHistory = loop ? loop.getConversationHistory() : pendingConversationHistory;
+    if (loop) providerContext.setCarryOverHistory(loop.getConversationHistory());
     loop = null;
     return { ok: true, mode };
   }
 
   function getSnapshot(options = {}) {
-    if (!options.conversationPage) ensureProviderContextRestored();
+    if (!options.conversationPage) providerContext.ensureRestoredSync();
     if (activeConversation && activeConversation.activity === 'waiting_input') {
       const persisted = persistence.getPendingQuestion(canonicalWorkspace, a9SessionId);
       if (persisted && (!currentPendingQuestion || currentPendingQuestion.questionId !== persisted.questionId)) {
         currentPendingQuestion = { ...persisted, recovered: true };
-        agentStatus = 'needs_input';
+        setAgentStatus('needs_input', { resync: true });
       }
     }
     const conversationPage = options.conversationPage ? persistence.listConversationFactPage(a9SessionId) : null;
-    retryWorkspaceLock();
+    workspaceLock.retry();
     const shellSelection = shellSnapshot();
     const managedProcesses = syncManagedProcessFacts();
     const activeManaged = managedProcesses.filter((item) => ['running', 'starting', 'running_unknown', 'identity_mismatch'].includes(item.lastProbeStatus) || item.cleanupRequired === true);
@@ -3256,7 +3213,7 @@ function createA9AgentRuntime(options) {
       status: 'ready',
       workspaceRoot,
       workdir,
-      lock: { held: lockHeld && !workspaceLockReleased, holder: lock.holder },
+      lock: { held: workspaceLock.isHeld(), holder: workspaceLock.holder },
       mode: permissionMode === undefined ? 'needs_selection' : permissionMode,
       modeRecommended: 'full_access',
       ...(modeDiagnostics ? { modeDiagnostics } : {}),
@@ -3312,7 +3269,7 @@ function createA9AgentRuntime(options) {
         reason: blockReason,
         maxActive: modules.state.A9_MAX_ACTIVE_CONVERSATIONS || 16,
       },
-      contextWindow: { ...restoredContext.stats, budgetChars: providerConfig?.contextBudgetChars ?? DEFAULT_CONTEXT_BUDGET_CHARS },
+      contextWindow: { ...providerContext.stats(), budgetChars: providerConfig?.contextBudgetChars ?? DEFAULT_CONTEXT_BUDGET_CHARS },
       draft: readDraft(a9SessionId),
       queue: composer.snapshot(a9SessionId),
       ...(persistenceOutcome.backupPath ? {
@@ -3750,12 +3707,7 @@ function createA9AgentRuntime(options) {
     pauseQueue();
     if (imageService) imageService.clear();
     const manager = loopTrustedRunner.getBackgroundManager();
-    const releaseWorkspaceLock = () => {
-      if (!workspaceLockReleased) {
-        if (lockHeld) persistence.releaseWorkspaceLock(canonicalWorkspace, ownerId);
-        workspaceLockReleased = true;
-      }
-    };
+    const releaseWorkspaceLock = () => workspaceLock.release();
     if (!checkpointRecoveryPending && pendingStateOperations.size === 0 && !officeService
       && !(typeof archiveWorkerPort !== 'undefined' && archiveWorkerPort)
       && !(typeof templateWorkerPort !== 'undefined' && templateWorkerPort)
@@ -3786,7 +3738,7 @@ function createA9AgentRuntime(options) {
       await shutdownWait('active_task_cancel', async () => {
         if (activeController) {
           activeController.abort();
-          agentStatus = 'cancelling';
+          setAgentStatus('cancelling');
           const deadline = Date.now() + 10_000;
           while (activeController && Date.now() < deadline) {
             await new Promise((resolve) => setTimeout(resolve, 25));
@@ -3837,7 +3789,7 @@ function createA9AgentRuntime(options) {
     attempt.then(() => {
       // A clean shutdown remains idempotently cached. An unresolved attempt is
       // retryable after the user stops a recovered process or cleanup settles.
-      if (!workspaceLockReleased && shutdownPromise === attempt) shutdownPromise = null;
+      if (!workspaceLock.isReleased() && shutdownPromise === attempt) shutdownPromise = null;
     }, () => {
       if (shutdownPromise === attempt) shutdownPromise = null;
     });
@@ -3863,13 +3815,12 @@ function createA9AgentRuntime(options) {
       value.knownBasicCredentials.forEach(secret => knownBasicCredentials.add(secret));
       rebuildProvider();
       if (providerConfig) alignConversationProviderBoundary(a9SessionId);
-      invalidateProviderContextScope();
-      providerContextRestorePending = true;
+      providerContext.requireRestore();
     },
     assertAvailable,
     getTransferWorkspace({ allowActive = false } = {}) {
       assertAvailable();
-      if (!lockHeld || permissionMode !== 'full_access' || checkpointRecoveryPending || checkpointRecoveryFatal) {
+      if (!workspaceLock.isHeld() || permissionMode !== 'full_access' || checkpointRecoveryPending || checkpointRecoveryFatal) {
         throw Object.assign(new Error('A9_TRANSFER_WORKSPACE_NOT_READY'), { code: 'A9_TRANSFER_WORKSPACE_NOT_READY' });
       }
       // Context statistics only read SQLite/history. They must not block the

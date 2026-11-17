@@ -108,6 +108,7 @@ it('R5-01 real workbench loads 300 of 2500 events on workspace selection without
   };
   const instrumented = script.replace('  root.win7AgentA9Workbench = Object.freeze({',
     '  root.__w39 = { chooseWorkspace, appendReviewFiles, state };\n  root.win7AgentA9Workbench = Object.freeze({');
+  window.win7AgentStatus = require('../../product/renderer/a9-agent-status');
   window.win7AgentComposerController = require('../../product/renderer/a9-composer-controller');
   vm.runInNewContext(instrumented, { window, document, Date });
   await window.__w39.chooseWorkspace();
@@ -157,6 +158,7 @@ function makeWorkbench(query: (request: any) => Promise<any>, empty = false) {
   };
   const instrumented = script.replace('  root.win7AgentA9Workbench = Object.freeze({',
     '  root.__w39 = { chooseWorkspace, appendReviewFiles, state };\n  root.win7AgentA9Workbench = Object.freeze({');
+  window.win7AgentStatus = require('../../product/renderer/a9-agent-status');
   window.win7AgentComposerController = require('../../product/renderer/a9-composer-controller');
   vm.runInNewContext(instrumented, { window, document, Date });
   const stream = node('a9-task-stream');
