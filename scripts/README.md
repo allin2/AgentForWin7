@@ -22,6 +22,19 @@ npm run verify:tools             # 入口/文档工具变化
 npm run verify:release           # 打包工具变化或发布准备
 ```
 
+## Agent Harness 辅助脚本
+
+原生 Node.js ESM，无外部依赖；Token 一律按 `src/core/src/token-estimator.ts` 的保守 UTF-8 口径估算（`scripts/lib/token_estimate.mjs`）。
+
+```sh
+# 上下文投影：只取任务相关的 AGENTS §1/§4/§5、WIN7_CONSTRAINTS 高相关小节、DECISIONS_INDEX 相关 ADR，默认 <= 2000 Token
+node scripts/context_project.mjs --task A9_42 --module office --topic gbk,unc-path [--budget 2000] [--json] [--output <file>]
+node scripts/test_context_project.mjs
+# 工具面 Token 审计：读取 src/core/dist（先 npm --prefix src/core run build）
+node scripts/audit_tool_tokens.mjs [--json] [--baseline <旧报告.json>] [--max-total N] [--max-tool N]
+node scripts/test_audit_tool_tokens.mjs
+```
+
 `verify:release` 执行当前发布规则检查。按 A9-43 D4，11 项历史回放在缺归档时记为 `NOT_PERFORMED`。
 恢复归档后设置 `A9_WIN10_ARCHIVE_ROOT` 为绝对路径；回放入口按原尺寸与 SHA-256 核验文件。
 两项旧 RC 包检查在包缺失时记为 `NOT_PERFORMED`；三项 Windows PowerShell 检查在非 Windows 开发机记同一状态。

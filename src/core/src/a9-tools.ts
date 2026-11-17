@@ -63,20 +63,20 @@ export function a9ToolSpecs(mode: PermissionMode = PermissionMode.FULL_ACCESS, o
           },
           startLine: {
             type: 'number',
-            description: '起始行号（正整数、1-based，默认 1；大文件同样支持分段读取）。',
+            description: '起始行号（正整数，从 1 开始）。',
             default: 1,
             minimum: 1,
           },
           maxLines: {
             type: 'number',
-            description: '最大读取行数（正整数、默认 200，最多 2000）；预览最多 128 KiB，长行截断会明确标记。',
+            description: '最大行数（正整数）；预览最多 128 KiB，长行截断会标记。',
             default: 200,
             minimum: 1,
             maximum: 2000,
           },
           encoding: {
             type: 'string',
-            description: '省略则自动探测 BOM/UTF-8/GBK；显式 utf-8、gbk、utf-16le 优先。无 BOM UTF-16LE 请显式指定；binary 仅返回元数据。',
+            description: '省略则自动探测 BOM/UTF-8/GBK；无 BOM 的 UTF-16LE 须显式指定；binary 仅返回元数据。',
             enum: ['utf-8', 'gbk', 'utf-16le', 'binary'],
           },
         },
@@ -143,19 +143,19 @@ export function a9ToolSpecs(mode: PermissionMode = PermissionMode.FULL_ACCESS, o
     {
       schemaVersion: '2.0',
       name: 'ask_user',
-      description: '向用户提出一个有界问题并暂停本轮，等待回答后由模型重新规划。只补充信息，不批准任何文件、命令、Git 或网络操作。',
+      description: '向用户提一个问题并暂停本轮，回答后重新规划。回答只补充信息，不批准文件、命令、Git 或网络操作。',
       approvalLevel: ApprovalLevel.READ_ONLY,
       capability: 'agent_control.ask_user',
       inputSchema: {
         properties: {
           prompt: {
             type: 'string',
-            description: '要向用户展示的问题；最多 2000 字符。',
+            description: '要展示给用户的问题。',
             maxLength: 2000,
           },
           options: {
             type: 'string[]',
-            description: '可选回答项，最多 6 项、每项最多 200 字符；用户始终可以自由填写回答。',
+            description: '可选回答项；用户仍可自由填写。',
             items: 'string',
             maxItems: 6,
             maxLength: 200,
@@ -195,10 +195,10 @@ export function a9ToolSpecs(mode: PermissionMode = PermissionMode.FULL_ACCESS, o
     });
     if (mode === PermissionMode.FULL_ACCESS) readOnlyTools.push({
       schemaVersion: '2.0', name: 'document_write_copy', approvalLevel: writeLevel, capability: 'workspace.write',
-      description: '创建新的 DOCX/XLSX 副本，拒绝覆盖。content 是 schemaVersion:1 的 JSON。DOCX: {schemaVersion:1,format:"docx",blocks:[{type:"paragraph",text:"正文"},{type:"heading",level:1,text:"标题"},{type:"table",rows:[["单元格"]]}]}；DOCX 表格单元格只接受字符串，数字也写成字符串，如 "17"。XLSX: {schemaVersion:1,format:"xlsx",sheets:[{name:"Sheet1",rows:[["文本",12,true,null]]}]}。修改本模块文档时提供 sourcePath 与 document_read/inspect 返回的 sha256，再给完整替换内容；不承诺原稿版式保真。',
+      description: '创建新 DOCX/XLSX 副本，拒绝覆盖。content 为 JSON：DOCX {schemaVersion:1,format:"docx",blocks:[{type:"paragraph",text}|{type:"heading",level,text}|{type:"table",rows:[[string]]}]}，单元格只接受字符串，数字也写成字符串，如 "17"；XLSX {schemaVersion:1,format:"xlsx",sheets:[{name,rows:[[string|number|boolean|null]]}]}。修改本模块生成的文档须给 sourcePath 与 document_read/inspect 返回的 sha256，并提供完整内容；不保证原版式。',
       inputSchema: { properties: {
         path: { type: 'string', description: '工作区内尚不存在的输出路径，父目录须存在。', maxLength: 4096 },
-        content: { type: 'string', description: 'schemaVersion:1 的结构化 JSON 内容，最多256 KiB。', maxLength: 262144 },
+        content: { type: 'string', description: '结构化 JSON 内容，格式见工具说明。', maxLength: 262144 },
         sourcePath: { type: 'string', description: '可选原件路径，仅允许本模块生成的受支持子集。', maxLength: 4096 },
         sourceSha256: { type: 'string', description: '原件的 SHA-256；与 sourcePath 一起提供。', maxLength: 64 },
       }, required: ['path', 'content'], additionalProperties: false },
