@@ -34,6 +34,85 @@ function requireModule(relativeName) {
   return require(candidate);
 }
 
+/**
+ * B3：把常见网络/模型调用错误映射为“错误原因 + 下一步操作”的中文指引。
+ *
+ * 只依据错误文本归类（Core 只把 `err.message` 带到界面层）；Gateway 会在消息中保留
+ * HTTP 状态、Node 错误码与 TLS 码。顺序即优先级：先具体（状态码/证书码），后宽泛（超时、截断）。
+ * 返回 null 表示没有可靠归类，调用方沿用原始错误文本。
+ */
+const MODEL_FAILURE_GUIDANCE = [
+  { code: 'A9_ERR_PROXY_AUTH', test: /\bstatus 407\b|Proxy Authentication Required|PROXY_AUTH/i,
+    title: '代理服务器要求身份验证（HTTP 407）',
+    advice: '在“企业网络”中核对代理主机与端口；代理需要账号密码时，请向 IT 获取并配置代理凭据，或改用无需认证的代理。' },
+  { code: 'A9_ERR_AUTH', test: /\bstatus 401\b|AUTH_INVALID_CREDENTIALS|invalid[_ ]api[_ ]key|incorrect api key|(?<!status\s+[2-9]\d\d[^\n]*)\bunauthorized\b/i,
+    title: 'API Key 无效或已过期（HTTP 401）',
+    advice: '请在“模型设置”中重新输入有效的 API Key，并确认它属于当前 Base URL 对应的服务、未被撤销且账户未欠费。' },
+  { code: 'A9_ERR_FORBIDDEN', test: /\bstatus 403\b/i,
+    title: '没有访问该模型或接口的权限（HTTP 403）',
+    advice: '请确认 API Key 已开通所选模型的权限，并检查服务端的 IP 白名单或企业网关策略。' },
+  { code: 'A9_ERR_RATE_LIMIT', test: /\bstatus 429\b|rate.?limit/i,
+    title: '请求过于频繁或额度已用尽（HTTP 429）',
+    advice: '请稍后重试；若持续出现，请检查账户额度、并发限制，或联系服务提供方提高配额。' },
+  { code: 'A9_ERR_NOT_FOUND', test: /\bstatus 404\b|model_not_found|model .{0,60}does not exist/i,
+    title: '找不到模型或接口地址（HTTP 404）',
+    advice: '请核对“模型 ID”；Base URL 可填到 /v1，或者直接填完整的 …/chat/completions 地址（例如智谱 GLM 的 /v4 路径）。' },
+  { code: 'A9_ERR_SERVER', test: /\bstatus 5\d\d\b/i,
+    title: '模型服务暂时不可用（HTTP 5xx）',
+    advice: '这是服务端故障，请稍后重试；持续失败时请联系服务提供方或检查内网推理服务状态。' },
+  { code: 'A9_ERR_TLS_EXPIRED', test: /CERT_HAS_EXPIRED|certificate has expired|CERT_NOT_YET_VALID|certificate is not yet valid/i,
+    title: '服务器证书已过期或尚未生效',
+    advice: '先检查本机系统日期、时间和时区是否正确（Windows 7 电脑电池失效后常见）；日期无误则请联系服务管理员更新证书。本产品不允许关闭证书校验。' },
+  { code: 'A9_ERR_TLS_UNTRUSTED', test: /DEPTH_ZERO_SELF_SIGNED_CERT|SELF_SIGNED_CERT_IN_CHAIN|self[- ]signed certificate|UNABLE_TO_VERIFY_LEAF_SIGNATURE|UNABLE_TO_GET_ISSUER_CERT|unable to verify the (?:first|leaf) certificate|unable to get local issuer certificate/i,
+    title: '无法验证服务器证书（自签名证书或企业根证书未受信任）',
+    advice: '请在“企业网络 → CA bundle 路径”中配置企业根 CA（PEM 格式）；如经企业代理，请向 IT 获取代理使用的根证书。本产品不允许关闭证书校验。' },
+  { code: 'A9_ERR_TLS_HOSTNAME', test: /ERR_TLS_CERT_ALTNAME_INVALID|does not match certificate|Hostname\/IP does not match/i,
+    title: '服务器证书与访问地址不匹配',
+    advice: '请使用证书中登记的域名访问（避免直接填 IP 或别名），或联系管理员为该地址签发证书。' },
+  { code: 'A9_ERR_DNS', test: /ENOTFOUND|EAI_AGAIN|getaddrinfo/i,
+    title: '无法解析模型服务的域名（ENOTFOUND）',
+    advice: '请检查 Base URL 拼写、本机网络与 DNS；内网服务请确认已连接公司网络/VPN，必要时改用服务器 IP 或在“企业网络”中配置代理。' },
+  { code: 'A9_ERR_REFUSED', test: /ECONNREFUSED|connection refused/i,
+    title: '模型服务拒绝了连接（ECONNREFUSED）',
+    advice: '请确认服务已启动、端口正确，并检查本机防火墙与代理设置。' },
+  { code: 'A9_ERR_IDLE_TIMEOUT', test: /No SSE data received for (\d+)ms/i,
+    title: (match) => `模型长时间没有返回数据（空闲超时 ${Math.round(Number(match[1]) / 1000)} 秒）`,
+    advice: '模型可能仍在推理（CPU 推理或深度思考较慢）。可在“模型设置 → 高级设置”调大“空闲超时”（60～1800 秒），或降低思考强度、改用更快的模型。' },
+  { code: 'A9_ERR_TOTAL_TIMEOUT', test: /Total timeout of (\d+)ms/i,
+    title: (match) => `单次请求总耗时超过上限（${Math.round(Number(match[1]) / 1000)} 秒）`,
+    advice: '可在“模型设置 → 高级设置”调大“总超时”（60～1800 秒），或缩短输入、降低思考强度后重试。' },
+  { code: 'A9_ERR_TIMEOUT', test: /ETIMEDOUT|ESOCKETTIMEDOUT|CONNECTION_TIMEOUT|(?<!status\s+[2-9]\d\d[^\n]*)\btimed out\b/i,
+    title: '连接模型服务超时（ETIMEDOUT）',
+    advice: '请检查网络连通性、防火墙与代理设置，并确认 Base URL 可从本机访问；网络较慢时可在“高级设置”调大超时。' },
+  { code: 'A9_ERR_STREAM_TRUNCATED', test: /(?<!status\s+5\d\d[^\n]*)(?:stream ended without a finish_reason|Gateway stream (?:emitted|returned)|Malformed SSE|socket hang up|ECONNRESET|ECONNABORTED|premature close|aborted|EPIPE)/i,
+    title: '模型响应在传输中途被截断或中断',
+    advice: '通常是网络波动，或网关/代理提前断开了流式连接。请重试一次；若频繁出现，请检查代理对长连接（SSE）的超时设置，或调大“空闲超时”。' },
+];
+
+function describeModelFailure(rawMessage) {
+  const text = String(rawMessage == null ? '' : rawMessage);
+  for (const rule of MODEL_FAILURE_GUIDANCE) {
+    const match = rule.test.exec(text);
+    if (!match) continue;
+    return {
+      code: rule.code,
+      title: typeof rule.title === 'function' ? rule.title(match) : rule.title,
+      advice: rule.advice,
+    };
+  }
+  return null;
+}
+
+/** 界面文案：中文原因与下一步在前；原始英文错误放在“原始错误：”之后，渲染层把它折叠到详情里。 */
+const MODEL_FAILURE_DETAIL_MARKER = '\n\n原始错误：';
+function presentModelFailureText(rawMessage, guidance = describeModelFailure(rawMessage)) {
+  const raw = String(rawMessage == null ? '' : rawMessage);
+  if (!guidance) return raw;
+  return `${guidance.title}\n下一步：${guidance.advice}${MODEL_FAILURE_DETAIL_MARKER}${raw}`;
+}
+
+const MODEL_INVOCATION_FAILED_PREFIX = 'Model invocation failed: ';
+
 function loadModules() {
   return {
     core: requireModule('core/dist'),
@@ -179,6 +258,28 @@ function createA9AgentRuntime(options) {
     return createDiagnosticsRuntime(persistenceOutcome);
   }
   const persistence = persistenceOutcome.manager;
+
+  /**
+   * B8：非致命失败（状态观察者、关闭阶段、后台句柄接管）进入持久化诊断缓冲（随快照的
+   * persistenceDiagnostics 展示），同时发出带稳定错误码的 warning；经脱敏并限长，绝不抛出。
+   */
+  function recordRuntimeDiagnostic(code, error) {
+    const errno = error && typeof error.code === 'string' ? `${error.code}: ` : '';
+    let detail;
+    try {
+      detail = redactSecrets(`${errno}${error && error.message ? error.message : String(error)}`).slice(0, 240);
+    } catch (_redactionNotReady) {
+      // 状态观察者可能在构造期（秘密脱敏状态尚未初始化）就触发；此时不能输出可能含秘密的原文。
+      detail = `${errno}（脱敏尚未就绪，已隐藏错误消息）`;
+    }
+    try {
+      if (typeof persistence.addDiagnostic === 'function') persistence.addDiagnostic({ code, detail });
+    } catch (diagnosticError) {
+      process.emitWarning(`${code}: 诊断缓冲写入失败（${String(diagnosticError && diagnosticError.message).slice(0, 80)}）`,
+        { type: 'A9RuntimeWarning', code: 'A9_DIAGNOSTIC_RECORD_FAILED' });
+    }
+    process.emitWarning(`${code}: ${detail}`, { type: 'A9RuntimeWarning', code });
+  }
 
   function getWorkdirInfo(options = {}) {
     const workdir = persistence.getConversationMetadata(a9SessionId).workdir;
@@ -423,9 +524,12 @@ function createA9AgentRuntime(options) {
       try {
         const result = config.agentStatusObserver({ from: previous, to: next, resync, legal: resync || agentStatusModel.canTransition(previous, next) });
         if (result && typeof result.catch === 'function') {
-          result.catch(() => { /* observers must not change runtime behavior */ });
+          result.catch((error) => recordRuntimeDiagnostic('A9_STATUS_OBSERVER_FAILED', error));
         }
-      } catch (_error) { /* observers must not change runtime behavior */ }
+      } catch (error) {
+        // 观察者不得改变运行时行为，但其失败必须可见。
+        recordRuntimeDiagnostic('A9_STATUS_OBSERVER_FAILED', error);
+      }
     }
   }
   function statusForConversationActivity(activity) {
@@ -667,6 +771,13 @@ function createA9AgentRuntime(options) {
   const PROVIDER_CONFIG_SCHEMA_VERSION = 1;
   const DEFAULT_CONTEXT_BUDGET_CHARS = 400_000;
   const DEFAULT_COMPOSER_MAX_CHARS = 128_000;
+  // B2/B3：模型上下文窗口（Token）与 Provider 总/空闲超时均为可选 Provider 设置；缺省沿用内置默认。
+  const CONTEXT_WINDOW_TOKENS_MIN = 8_000;
+  const CONTEXT_WINDOW_TOKENS_MAX = 2_000_000;
+  const validContextWindowTokens = (value) => Number.isSafeInteger(value)
+    && value >= CONTEXT_WINDOW_TOKENS_MIN && value <= CONTEXT_WINDOW_TOKENS_MAX;
+  const validProviderTimeoutMs = (value) => modules.gateway.isValidProviderTimeoutMs(value);
+  const providerTimeoutRangeText = () => `${modules.gateway.PROVIDER_TIMEOUT_MIN_MS / 1000}～${modules.gateway.PROVIDER_TIMEOUT_MAX_MS / 1000} 秒`;
   const providerConfigPath = path.join(dataRoot, 'a9-provider-config.v1.json');
   function activeComposerMaxChars() {
     return providerConfig?.composerMaxChars ?? DEFAULT_COMPOSER_MAX_CHARS;
@@ -905,6 +1016,19 @@ function createA9AgentRuntime(options) {
       }
       if (doc.composerMaxChars !== undefined && (!Number.isSafeInteger(doc.composerMaxChars)
         || doc.composerMaxChars < 1_000 || doc.composerMaxChars > 1_000_000)) doc.composerMaxChars = 128_000;
+      // 已保存的可选设置无效时回到内置默认并留下诊断，不阻止启动（它们不影响凭据或 endpoint 边界）。
+      for (const [key, valid, label] of [
+        ['contextWindowTokens', validContextWindowTokens, `${CONTEXT_WINDOW_TOKENS_MIN}～${CONTEXT_WINDOW_TOKENS_MAX} Token`],
+        ['requestTimeoutMs', validProviderTimeoutMs, providerTimeoutRangeText()],
+        ['idleTimeoutMs', validProviderTimeoutMs, providerTimeoutRangeText()],
+      ]) {
+        if (doc[key] !== undefined && !valid(doc[key])) {
+          providerDiagnostics = providerDiagnostics || {
+            code: 'A9_PROVIDER_SETTING_INVALID', detail: `已保存的 ${key} 无效（应为 ${label}），已使用默认值`,
+          };
+          delete doc[key];
+        }
+      }
       if (doc.thinkingEnabled !== undefined && typeof doc.thinkingEnabled !== 'boolean') throw Object.assign(new Error('A9_PROVIDER_CONFIG_INVALID: thinkingEnabled'), { code: 'A9_PROVIDER_CONFIG_INVALID' });
       if (doc.reasoningEffort !== undefined && !['low', 'medium', 'high'].includes(doc.reasoningEffort)) throw Object.assign(new Error('A9_PROVIDER_CONFIG_INVALID: reasoningEffort'), { code: 'A9_PROVIDER_CONFIG_INVALID' });
       return doc;
@@ -968,6 +1092,9 @@ function createA9AgentRuntime(options) {
       ...(providerConfig.thinkingEnabled !== undefined ? { thinkingEnabled: providerConfig.thinkingEnabled } : {}),
       ...(providerConfig.reasoningEffort ? { reasoningEffort: providerConfig.reasoningEffort } : {}),
       ...(proxy ? { proxyConfig: proxy } : {}),
+      // B3：正式请求使用用户配置的总/空闲超时（60～1800 秒）；缺省保持网关默认 300 秒 / 120 秒。
+      ...(!probeMode && providerConfig.requestTimeoutMs ? { totalTimeoutMs: providerConfig.requestTimeoutMs } : {}),
+      ...(!probeMode && providerConfig.idleTimeoutMs ? { noDataTimeoutMs: providerConfig.idleTimeoutMs } : {}),
       ...(probeMode ? {
         // 探测使用短超时/低重试：不可达服务快速分类，不阻塞保存流程。
         timeoutMs: 5_000,
@@ -996,6 +1123,9 @@ function createA9AgentRuntime(options) {
       customHeaderNames: doc.customHeaderNames || [],
       contextBudgetChars: doc.contextBudgetChars ?? DEFAULT_CONTEXT_BUDGET_CHARS,
       composerMaxChars: doc.composerMaxChars ?? 128_000,
+      ...(doc.contextWindowTokens !== undefined ? { contextWindowTokens: doc.contextWindowTokens } : {}),
+      ...(doc.requestTimeoutMs !== undefined ? { requestTimeoutMs: doc.requestTimeoutMs } : {}),
+      ...(doc.idleTimeoutMs !== undefined ? { idleTimeoutMs: doc.idleTimeoutMs } : {}),
       ...(doc.thinkingEnabled !== undefined ? { thinkingEnabled: doc.thinkingEnabled } : {}),
       ...(doc.reasoningEffort ? { reasoningEffort: doc.reasoningEffort } : {}),
       ...(doc.caBundle ? { caBundle: doc.caBundle } : {}),
@@ -1543,7 +1673,10 @@ function createA9AgentRuntime(options) {
           cleanupRequired: fact.cleanupRequired === true,
           ...(persistence.getManagedOwnership(fact.handleId) || {}),
         }));
-      } catch (_err) { /* 重复句柄保持现有管理器事实 */ }
+      } catch (error) {
+        // 重复句柄保持现有管理器事实；其他失败说明恢复事实未被接管，需要诊断。
+        if (!/后台进程句柄已存在/.test(String(error && error.message))) recordRuntimeDiagnostic('A9_MANAGED_HANDLE_ADOPT_FAILED', error);
+      }
     }
   }
 
@@ -1785,6 +1918,7 @@ function createA9AgentRuntime(options) {
         }),
         externalChangePort: workspaceService,
         contextBudgetChars: providerConfig?.contextBudgetChars ?? DEFAULT_CONTEXT_BUDGET_CHARS,
+        ...(providerConfig?.contextWindowTokens ? { contextWindowTokens: providerConfig.contextWindowTokens } : {}),
         thinkingEnabled: providerConfig?.thinkingEnabled,
         reasoningEffort: providerConfig?.reasoningEffort,
         redactText: redactSecrets,
@@ -1818,7 +1952,10 @@ function createA9AgentRuntime(options) {
             conversationId: a9SessionId, taskId: activeLifecycle && activeLifecycle.taskId,
             turnId: event.turnId,
           } : {};
-          const safeEvent = { ...event, data: { ...redactForProjection(event.data), ...outputIdentity } };
+          const failureGuidance = event.type === 'turn_failed' && event.data && typeof event.data.error === 'string'
+            ? describeModelFailure(event.data.error) : null;
+          const safeEvent = { ...event, data: { ...redactForProjection(event.data), ...outputIdentity,
+            ...(failureGuidance ? { guidance: failureGuidance } : {}) } };
           // F5：turn_started 携带 turnId，立即写入 active turn/run（不等 Turn 结束）。
           if (event.type === 'turn_started' && activeLifecycle && !activeLifecycle.turnId) {
             const runId = `run-${event.turnId}`;
@@ -2171,6 +2308,21 @@ function createA9AgentRuntime(options) {
       if (!Number.isSafeInteger(value) || value < 1_000 || value > 1_000_000) throw Object.assign(new Error('A9_PROVIDER_CONFIG_INVALID: composerMaxChars 必须是 1000～1000000 的整数'), { code: 'A9_PROVIDER_CONFIG_INVALID' });
       composerMaxChars = value;
     }
+    // B2/B3：null 表示恢复默认；省略表示保留当前值。
+    const optionalSetting = (key, valid, rangeText, current) => {
+      if (!hasInput(key)) return current;
+      if (values[key] === null) return undefined;
+      if (!valid(values[key])) {
+        throw Object.assign(new Error(`A9_PROVIDER_CONFIG_INVALID: ${key} 必须是 ${rangeText} 的整数，或 null 恢复默认`), { code: 'A9_PROVIDER_CONFIG_INVALID' });
+      }
+      return values[key];
+    };
+    const contextWindowTokens = optionalSetting('contextWindowTokens', validContextWindowTokens,
+      `${CONTEXT_WINDOW_TOKENS_MIN}～${CONTEXT_WINDOW_TOKENS_MAX}`, providerConfig?.contextWindowTokens);
+    const requestTimeoutMs = optionalSetting('requestTimeoutMs', validProviderTimeoutMs,
+      `${modules.gateway.PROVIDER_TIMEOUT_MIN_MS}～${modules.gateway.PROVIDER_TIMEOUT_MAX_MS} 毫秒（${providerTimeoutRangeText()}）`, providerConfig?.requestTimeoutMs);
+    const idleTimeoutMs = optionalSetting('idleTimeoutMs', validProviderTimeoutMs,
+      `${modules.gateway.PROVIDER_TIMEOUT_MIN_MS}～${modules.gateway.PROVIDER_TIMEOUT_MAX_MS} 毫秒（${providerTimeoutRangeText()}）`, providerConfig?.idleTimeoutMs);
     let thinkingEnabled = providerConfig?.thinkingEnabled;
     if (hasInput('thinkingEnabled')) {
       if (values.thinkingEnabled === null) thinkingEnabled = undefined;
@@ -2274,6 +2426,9 @@ function createA9AgentRuntime(options) {
       customHeaderNames,
       contextBudgetChars: retainedContextBudgetChars,
       composerMaxChars,
+      ...(contextWindowTokens !== undefined ? { contextWindowTokens } : {}),
+      ...(requestTimeoutMs !== undefined ? { requestTimeoutMs } : {}),
+      ...(idleTimeoutMs !== undefined ? { idleTimeoutMs } : {}),
       ...(thinkingEnabled !== undefined ? { thinkingEnabled } : {}),
       ...(reasoningEffort ? { reasoningEffort } : {}),
       ...(caBundle ? { caBundle } : {}),
@@ -2343,6 +2498,9 @@ function createA9AgentRuntime(options) {
       imageInputEnabled: providerConfig.imageInputEnabled,
       contextBudgetChars: providerConfig.contextBudgetChars,
       composerMaxChars: providerConfig.composerMaxChars,
+      ...(providerConfig.contextWindowTokens !== undefined ? { contextWindowTokens: providerConfig.contextWindowTokens } : {}),
+      ...(providerConfig.requestTimeoutMs !== undefined ? { requestTimeoutMs: providerConfig.requestTimeoutMs } : {}),
+      ...(providerConfig.idleTimeoutMs !== undefined ? { idleTimeoutMs: providerConfig.idleTimeoutMs } : {}),
       ...(providerConfig.thinkingEnabled !== undefined ? { thinkingEnabled: providerConfig.thinkingEnabled } : {}),
       ...(providerConfig.reasoningEffort ? { reasoningEffort: providerConfig.reasoningEffort } : {}),
       ...(providerConfig.caBundle ? { caBundle: providerConfig.caBundle } : {}),
@@ -2428,19 +2586,25 @@ function createA9AgentRuntime(options) {
     } catch (_error) { return failed('读取失败'); }
   }
 
+  /** B3：探测失败时附带中文“原因 + 下一步”；原始错误仍保留在 error 字段（经脱敏）。 */
+  function withFailureGuidance(result) {
+    const guidance = result.error ? describeModelFailure(result.error) : null;
+    return guidance ? { ...result, guidance } : result;
+  }
+
   async function classifyProviderWithProbe() {
     if (!providerConfig) return { classification: 'unavailable', checkedAt: new Date().toISOString(), error: 'provider not built' };
     try {
       const probe = await buildProviderInstance(true).probeCapability();
-      return {
+      return withFailureGuidance({
         classification: probe.ok && probe.hasToolCalling ? 'tool_calling' : probe.ok ? 'chat_only' : 'unavailable',
         checkedAt: new Date().toISOString(),
         latencyMs: probe.latencyMs,
         hasStreaming: probe.hasStreaming,
         ...(probe.error ? { error: redactSecrets(probe.error) } : {}),
-      };
+      });
     } catch (err) {
-      return { classification: 'unavailable', checkedAt: new Date().toISOString(), error: redactSecrets(err.message) };
+      return withFailureGuidance({ classification: 'unavailable', checkedAt: new Date().toISOString(), error: redactSecrets(err.message) });
     }
   }
 
@@ -2461,6 +2625,13 @@ function createA9AgentRuntime(options) {
     return { turn: 'failed', task: 'failed', run: 'failed' };
   }
 
+  /** B3：模型调用失败的最终消息改写为中文“原因 + 下一步”，原始错误保留在“原始错误：”之后。 */
+  function presentFinalMessage(result) {
+    const message = result.finalMessage || '';
+    if (result.outcome !== 'failed' || !message.startsWith(MODEL_INVOCATION_FAILED_PREFIX)) return message;
+    return presentModelFailureText(message.slice(MODEL_INVOCATION_FAILED_PREFIX.length));
+  }
+
   function checkpointPayloadFor(result, pendingApproval, requestPrompt, pendingQuestion) {
     const safeExternalChanges = redactForProjection(Array.isArray(result.externalChanges) ? result.externalChanges : []);
     return {
@@ -2468,7 +2639,7 @@ function createA9AgentRuntime(options) {
       ...(requestPrompt ? { requestPrompt } : {}),
       outcome: result.outcome,
       verification: result.verification || 'not_applicable',
-      finalMessage: redactSecrets(result.finalMessage || ''),
+      finalMessage: redactSecrets(presentFinalMessage(result)),
       toolCallsExecuted: Number.isFinite(result.toolCallsExecuted) ? result.toolCallsExecuted : 0,
       externalChanges: safeExternalChanges,
       providerContextGeneration,
@@ -2493,6 +2664,8 @@ function createA9AgentRuntime(options) {
 
   /** submit/resume 共用的唯一终态汇点：SQLite、快照和 checkpoint 同步更新。 */
   function persistTurnResult(lifecycle, result) {
+    // B3：调用方随后会把同一个 result 返回给 UI，因此在持久化前就地改写为中文指引（幂等）。
+    if (result.outcome === 'failed') result.finalMessage = presentFinalMessage(result);
     const retryableContinuation = lifecycle.continuation && !['completed', 'completed_with_warnings', 'needs_approval', 'needs_input'].includes(result.outcome);
     const statuses = retryableContinuation ? { task: 'interrupted', turn: 'interrupted', run: 'interrupted' } : statusesForOutcome(result.outcome);
     const pendingApproval = result.outcome === 'needs_approval'
@@ -3321,6 +3494,9 @@ function createA9AgentRuntime(options) {
           model: providerConfig.model,
           contextBudgetChars: providerConfig.contextBudgetChars,
           composerMaxChars: providerConfig.composerMaxChars,
+          ...(providerConfig.contextWindowTokens !== undefined ? { contextWindowTokens: providerConfig.contextWindowTokens } : {}),
+          ...(providerConfig.requestTimeoutMs !== undefined ? { requestTimeoutMs: providerConfig.requestTimeoutMs } : {}),
+          ...(providerConfig.idleTimeoutMs !== undefined ? { idleTimeoutMs: providerConfig.idleTimeoutMs } : {}),
           ...(providerConfig.thinkingEnabled !== undefined ? { thinkingEnabled: providerConfig.thinkingEnabled } : {}),
           ...(providerConfig.reasoningEffort ? { reasoningEffort: providerConfig.reasoningEffort } : {}),
           imageInputEnabled: providerConfig.imageInputEnabled === true,
@@ -3822,7 +3998,8 @@ function createA9AgentRuntime(options) {
         typeof mailEmlAdapter !== 'undefined' && mailEmlAdapter ? Promise.resolve().then(() => mailEmlAdapter.close()) : Promise.resolve(),
       ]);
       // Observe rejection immediately while recovery/cancellation still owns the wait.
-      officeClose.catch(() => {});
+      // 关闭失败由随后的 office_close 阶段向调用方抛出；这里立即观察以免产生未处理拒绝，并留下诊断。
+      officeClose.catch((error) => recordRuntimeDiagnostic('A9_SHUTDOWN_OFFICE_CLOSE_FAILED', error));
       await shutdownWait('checkpoint_recovery', () => checkpointRecoveryReady);
       await shutdownWait('active_task_cancel', async () => {
         if (activeController) {
@@ -4335,4 +4512,4 @@ function createDiagnosticsRuntime(outcome) {
   };
 }
 
-module.exports = { createA9AgentRuntime, openA9RuntimePersistence, buildPersistedTextContext, buildPersistedTextContextFromSummary, normalizeConversationTitle: (...args) => requireModule('state/dist').normalizeConversationTitle(...args), A9_PROTOCOL_VERSION, redactUrlUserinfo };
+module.exports = { createA9AgentRuntime, describeModelFailure, presentModelFailureText, openA9RuntimePersistence, buildPersistedTextContext, buildPersistedTextContextFromSummary, normalizeConversationTitle: (...args) => requireModule('state/dist').normalizeConversationTitle(...args), A9_PROTOCOL_VERSION, redactUrlUserinfo };

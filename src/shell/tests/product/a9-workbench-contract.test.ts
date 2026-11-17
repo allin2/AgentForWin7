@@ -644,6 +644,9 @@ describe('A9 unified desktop workbench contract', () => {
         TERMINAL_OUTCOMES: new Set(['completed', 'failed']),
         OUTCOME_LABELS: { completed: '完成', failed: '失败' },
         clampText: (value: any, limit: number) => String(value == null ? '' : value).slice(0, limit),
+        // B3 的折叠渲染在专门的渲染测试里验证；这里只需要它把文本写进正文节点。
+        DETAIL_MARKER: '\n\n原始错误：',
+        setOutcomeText: (target: any, value: string) => { target.textContent = value; },
         el: (id: string) => nodes.get(id),
         text: (id: string, value: any) => { const target = nodes.get(id); if (target) target.textContent = String(value == null ? '' : value); },
         eventsForTurn: (turnId: string) => state.turnEvents.get(turnId)?.events || [],
@@ -677,7 +680,7 @@ describe('A9 unified desktop workbench contract', () => {
       latestSignatureAfter: fixed.latestSignatureBefore,
     }));
 
-    const oldSideEffect = "    block.outcomeBodyEl.textContent = clampText(message || '任务已返回结果。', NOTE_LIMIT);";
+    const oldSideEffect = "    setOutcomeText(block.outcomeBodyEl, clampText(message || '任务已返回结果。', NOTE_LIMIT));";
     const globalProjection = "    text('a9-turn-outcome', latestProjection\n      ? `${latestProjection.outcome} · ${latestProjection.verification}`\n      : '');";
     expect(rendererFunctions).toContain(oldSideEffect);
     expect(rendererFunctions).toContain(globalProjection);

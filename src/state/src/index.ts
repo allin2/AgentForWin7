@@ -139,3 +139,10 @@ export {
   A9OpenOutcome,
   A9PersistenceManager,
 } from './a9-persistence';
+
+export {
+  CleanupDiagnostic,
+  reportCleanupFailure,
+  getRecentCleanupDiagnostics,
+  clearCleanupDiagnostics,
+} from './cleanup-diagnostics';

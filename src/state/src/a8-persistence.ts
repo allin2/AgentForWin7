@@ -11,6 +11,7 @@ import {
   A8TurnIdentity,
 } from './a8-session-catalog';
 import { SqliteDatabase } from './sqlite-event-ledger';
+import { reportCleanupFailure } from './cleanup-diagnostics';
 
 export const A8_PERSISTENCE_SCHEMA_VERSION = 1 as const;
 export const A8_MAX_PERSISTED_JSON_BYTES = 256 * 1024;
@@ -959,8 +960,15 @@ export class A8MigrationRunner {
       if (error instanceof A8PersistenceError) throw error;
       throw new A8PersistenceError('A8_MIGRATION_FAILED', `A8 migration failed: ${message(error)}`);
     } finally {
-      if (lockFd !== undefined) { try { fs.closeSync(lockFd); } catch (_error) { /* diagnostics only */ } }
-      try { fs.unlinkSync(lockPath); } catch (_error) { /* lock already removed */ }
+      if (lockFd !== undefined) {
+        try { fs.closeSync(lockFd); } catch (error) { reportCleanupFailure('A8_LOCK_CLOSE_FAILED', 'migration.lock_close', error, lockPath); }
+      }
+      try {
+        fs.unlinkSync(lockPath);
+      } catch (error) {
+        // 锁文件已被移除是正常情况；其他失败会让后续迁移误判为“迁移进行中”，必须留下诊断。
+        if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') reportCleanupFailure('A8_LOCK_RELEASE_FAILED', 'migration.lock_unlink', error, lockPath);
+      }
     }
   }
 }
@@ -1089,9 +1097,20 @@ function writeAtomicFile(filePath: string, content: string): void {
 }
 
 function fsyncDirectory(directoryPath: string): void {
-  try { const fd = fs.openSync(directoryPath, 'r'); try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); } } catch (_error) { /* Windows directory fsync is optional; file fsync remains required. */ }
+  try { const fd = fs.openSync(directoryPath, 'r'); try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); } } catch (error) {
+    // Windows 不支持目录 fsync（EPERM/EISDIR/EINVAL/EACCES），文件 fsync 仍是必需的；其余失败才是诊断对象。
+    const code = (error as NodeJS.ErrnoException)?.code;
+    if (code !== 'EPERM' && code !== 'EISDIR' && code !== 'EINVAL' && code !== 'EACCES') {
+      reportCleanupFailure('A8_DIRECTORY_FSYNC_FAILED', 'migration.fsync_directory', error, directoryPath);
+    }
+  }
 }
 
 function safeRemoveDirectory(directoryPath: string): void {
-  try { fs.rmSync(directoryPath, { recursive: true, force: true }); } catch (_error) { /* caller retains failure state */ }
+  try {
+    fs.rmSync(directoryPath, { recursive: true, force: true });
+  } catch (error) {
+    // 调用方保留原失败状态；残留的临时目录需要可见，便于人工清理。
+    reportCleanupFailure('A8_TEMP_CLEANUP_FAILED', 'migration.remove_temp_directory', error, directoryPath);
+  }
 }

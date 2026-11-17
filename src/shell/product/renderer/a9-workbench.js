@@ -43,6 +43,8 @@
   });
   const TAB_IDS = ['files', 'changes', 'activity', 'environment'];
   const NOTE_LIMIT = 16 * 1024;
+  // B3：运行时把中文“原因 + 下一步”放在前面，原始（英文）错误跟在该标记之后，这里折叠为“详情”。
+  const DETAIL_MARKER = '\n\n原始错误：';
   const TOOL_OUTPUT_LIMIT = 8 * 1024;
   const EVENT_GLOBAL_LIMIT = 2000;
   const EVENT_BYTE_LIMIT = 4 * 1024 * 1024;
@@ -183,6 +185,27 @@
       : fallback;
   }
   /** ADR-0114 显示上限：截断必须明示，不静默吞内容。 */
+  /** 渲染含“原始错误：”标记的失败说明：主文案直接显示，原始错误折叠在可展开的详情里。 */
+  function setOutcomeText(container, text) {
+    container.textContent = '';
+    const markerIndex = text.indexOf(DETAIL_MARKER);
+    if (markerIndex < 0) {
+      container.textContent = text;
+      return;
+    }
+    container.appendChild(document.createTextNode(text.slice(0, markerIndex)));
+    const details = document.createElement('details');
+    details.className = 'error-detail';
+    const summary = document.createElement('summary');
+    summary.textContent = '详情（原始错误）';
+    const raw = document.createElement('pre');
+    raw.className = 'error-detail-raw';
+    raw.textContent = text.slice(markerIndex + DETAIL_MARKER.length);
+    details.appendChild(summary);
+    details.appendChild(raw);
+    container.appendChild(details);
+  }
+
   function clampText(value, limit) {
     const content = String(value == null ? '' : value);
     if (content.length <= limit) return content;
@@ -856,7 +879,8 @@
     switch (event.type) {
       case 'turn_started': return '任务开始';
       case 'turn_completed': return `任务${OUTCOME_LABELS[data.outcome] || '结束（结果未确认）'}`;
-      case 'turn_failed': return `任务失败 · ${String(data.error || '').slice(0, 120)}`;
+      case 'turn_failed': return `任务失败 · ${data.guidance && typeof data.guidance.title === 'string'
+        ? data.guidance.title.slice(0, 120) : String(data.error || '').slice(0, 120)}`;
       case 'model_note': return '模型说明';
       case 'model_chunk': return '模型输出（汇总）';
       case 'plan_updated': return '更新计划';
@@ -1221,7 +1245,10 @@
         verificationEvidence = event.data.verificationEvidence || null;
       } else if (event.type === 'turn_failed') {
         outcome = 'failed';
-        message = event.data.error ? `模型调用失败：${event.data.error}` : '';
+        const guidance = event.data.guidance;
+        message = guidance && typeof guidance.title === 'string' && typeof guidance.advice === 'string'
+          ? `${guidance.title}\n下一步：${guidance.advice}${DETAIL_MARKER}${event.data.error}`
+          : event.data.error ? `模型调用失败：${event.data.error}` : '';
       }
     }
     if (!outcome && fact && TERMINAL_OUTCOMES.has(fact.outcome)) {
@@ -1273,7 +1300,7 @@
     const verificationText = verification === 'verified' ? '已验证' : verification === 'unverified' ? '未验证' : '';
     const timeText = fact && fact.updatedAt ? new Date(fact.updatedAt).toLocaleTimeString() : '';
     block.outcomeMetaEl.textContent = [verificationText, timeText].filter(Boolean).join(' · ');
-    block.outcomeBodyEl.textContent = clampText(message || '任务已返回结果。', NOTE_LIMIT);
+    setOutcomeText(block.outcomeBodyEl, clampText(message || '任务已返回结果。', NOTE_LIMIT));
     if (verificationEvidence && verification === 'verified') {
       const evidence = document.createElement('small');
       evidence.className = 'verification-evidence';
@@ -2910,15 +2937,20 @@
       : provider.probe && provider.probe.classification ? `模型不可用：${provider.probe.classification}` : '模型未探测');
     text('a9-provider-key-state', provider.configured ? `key: ${provider.apiKey && provider.apiKey.remembered ? '已由 DPAPI 记住' : '仅当前进程'} (${provider.apiKey && provider.apiKey.source || 'none'})` : 'key: 未配置');
     text('a9-provider-probe-state', provider.probe ? provider.probe.classification : '未探测');
+    const probeGuidance = provider.probe && provider.probe.guidance;
     setFieldError('a9-provider-diagnostics', provider.diagnostics
       ? `${provider.diagnostics.code || 'A9_PROVIDER_DIAGNOSTICS'}: ${provider.diagnostics.detail || 'Provider 需要检查。'}`
-      : '');
+      : probeGuidance && typeof probeGuidance.title === 'string' && typeof probeGuidance.advice === 'string'
+        ? `${probeGuidance.title}。下一步：${probeGuidance.advice}` : '');
     const providerHydratedSignature = JSON.stringify({
       configured: provider.configured === true,
       baseUrl: provider.baseUrl || '',
       model: provider.model || '',
       contextBudgetChars: provider.contextBudgetChars || snapshot.contextWindow && snapshot.contextWindow.budgetChars || 400000,
       composerMaxChars: provider.composerMaxChars || 128000,
+      contextWindowTokens: provider.contextWindowTokens || null,
+      requestTimeoutMs: provider.requestTimeoutMs || null,
+      idleTimeoutMs: provider.idleTimeoutMs || null,
       thinkingEnabled: provider.thinkingEnabled ?? null,
       reasoningEffort: provider.reasoningEffort || '',
       imageInputEnabled: provider.imageInputEnabled === true,
@@ -2933,6 +2965,9 @@
       el('a9-provider-model').value = provider.model || '';
       el('a9-provider-budget').value = String(provider.contextBudgetChars || snapshot.contextWindow && snapshot.contextWindow.budgetChars || 400000);
       el('a9-provider-composer-max').value = String(provider.composerMaxChars || 128000);
+      el('a9-provider-window').value = provider.contextWindowTokens ? String(provider.contextWindowTokens) : '';
+      el('a9-provider-request-timeout').value = provider.requestTimeoutMs ? String(Math.round(provider.requestTimeoutMs / 1000)) : '';
+      el('a9-provider-idle-timeout').value = provider.idleTimeoutMs ? String(Math.round(provider.idleTimeoutMs / 1000)) : '';
       el('a9-provider-thinking').value = provider.thinkingEnabled === undefined
         ? 'auto'
         : provider.thinkingEnabled ? 'enabled' : 'disabled';
@@ -4679,6 +4714,22 @@
       const composerMaxChars = Number(composerText);
       values.composerMaxChars = Number.isFinite(composerMaxChars) ? composerMaxChars : composerText.trim();
     }
+    // B2/B3：可选设置；留空 = 使用默认（已有自定义值时发送 null 以恢复默认）。
+    const optionalNumber = (id, key, scale, current) => {
+      const input = el(id);
+      if (!input) return;
+      if (input.validity && input.validity.badInput) { values[key] = '__BAD_INPUT__'; return; }
+      const text = input.value.trim();
+      if (text) {
+        const number = Number(text);
+        values[key] = Number.isFinite(number) ? Math.round(number * scale) : text;
+      } else if (current !== undefined && current !== null) {
+        values[key] = null;
+      }
+    };
+    optionalNumber('a9-provider-window', 'contextWindowTokens', 1, provider.contextWindowTokens);
+    optionalNumber('a9-provider-request-timeout', 'requestTimeoutMs', 1000, provider.requestTimeoutMs);
+    optionalNumber('a9-provider-idle-timeout', 'idleTimeoutMs', 1000, provider.idleTimeoutMs);
     const thinkingMode = el('a9-provider-thinking').value;
     if (thinkingMode === 'auto') {
       if (provider.thinkingEnabled !== undefined) values.thinkingEnabled = null;
@@ -4735,6 +4786,18 @@
       && (!Number.isSafeInteger(values.composerMaxChars) || values.composerMaxChars < 1000 || values.composerMaxChars > 1000000)) {
       setFieldError('a9-provider-error', '输入框上限必须是 1000～1000000 的整数。');
       return;
+    }
+    const rangeChecks = [
+      ['contextWindowTokens', 8000, 2000000, '模型上下文窗口必须是 8000～2000000 的整数 Token。'],
+      ['requestTimeoutMs', 60000, 1800000, '总超时必须在 60～1800 秒之间。'],
+      ['idleTimeoutMs', 60000, 1800000, '空闲超时必须在 60～1800 秒之间。'],
+    ];
+    for (const [key, min, max, message] of rangeChecks) {
+      if (Object.prototype.hasOwnProperty.call(values, key) && values[key] !== null
+        && (!Number.isSafeInteger(values[key]) || values[key] < min || values[key] > max)) {
+        setFieldError('a9-provider-error', message);
+        return;
+      }
     }
     const headerName = el('a9-provider-header-name').value.trim();
     const headerValue = el('a9-provider-header-value').value;
@@ -5662,8 +5725,8 @@
     outcomeHead.appendChild(outcomeState);
     const outcomeBody = document.createElement('div');
     outcomeBody.className = 'outcome-body';
-    outcomeBody.textContent = fact.finalMessage ? clampText(fact.finalMessage, NOTE_LIMIT)
-      : TERMINAL_OUTCOMES.has(fact.outcome) ? '（没有保存最终答复）' : '（尚未完成，没有最终答复）';
+    setOutcomeText(outcomeBody, fact.finalMessage ? clampText(fact.finalMessage, NOTE_LIMIT)
+      : TERMINAL_OUTCOMES.has(fact.outcome) ? '（没有保存最终答复）' : '（尚未完成，没有最终答复）');
     outcome.appendChild(outcomeHead);
     outcome.appendChild(outcomeBody);
     item.appendChild(request);

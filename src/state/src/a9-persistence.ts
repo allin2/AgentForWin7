@@ -15,6 +15,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import { SqliteDatabase } from './sqlite-event-ledger';
+import { reportCleanupFailure } from './cleanup-diagnostics';
 
 export const A9_SCHEMA_VERSION = 4 as const;
 export const A9_DEFAULT_RETENTION_DAYS = 90;
@@ -30,6 +31,15 @@ export interface A9ConversationInbox {
   settledAt: string | null;
   activeSince: string | null;
   lastVisitedAt: string | null;
+}
+
+/** 清理路径中的 close() 失败不能覆盖主错误，但必须留下结构化诊断。 */
+function closeQuietly(database: SqliteDatabase | undefined, operation: string): void {
+  try {
+    database?.close();
+  } catch (error) {
+    reportCleanupFailure('A9_DB_CLOSE_FAILED', operation, error);
+  }
 }
 
 export interface A9PersistenceDiagnostic {
@@ -201,7 +211,7 @@ export class A9PersistenceManager {
           };
         }
       } catch (err) {
-        try { externalA8Db?.close(); } catch (_closeError) { /* best effort */ }
+        closeQuietly(externalA8Db, 'open.cleanup')
         return {
           status: 'diagnostics',
           error: err instanceof Error ? err.message : String(err),
@@ -218,7 +228,7 @@ export class A9PersistenceManager {
         const probedVersion = readSchemaVersion(probeDb);
         if (probedVersion === A9_SCHEMA_VERSION) classifyA9SchemaV4(probeDb);
         if (probedVersion === undefined && a9BusinessTablesPresent(probeDb)) {
-          try { externalA8Db?.close(); } catch (_closeError) { /* best effort */ }
+          closeQuietly(externalA8Db, 'open.cleanup')
           return {
             status: 'diagnostics',
             error: 'A9 schema metadata is missing while A9 business tables already exist',
@@ -226,7 +236,7 @@ export class A9PersistenceManager {
           };
         }
         if (probedVersion !== undefined && probedVersion > A9_SCHEMA_VERSION) {
-          try { externalA8Db?.close(); } catch (_closeError) { /* best effort */ }
+          closeQuietly(externalA8Db, 'open.cleanup')
           return {
             status: 'schema_refused',
             reason: `数据库 schema 版本 ${probedVersion} 高于本应用支持的 ${A9_SCHEMA_VERSION}；拒绝覆盖，请使用更新版本的应用打开。`,
@@ -234,14 +244,14 @@ export class A9PersistenceManager {
           };
         }
       } catch (err) {
-        try { externalA8Db?.close(); } catch (_closeError) { /* best effort */ }
+        closeQuietly(externalA8Db, 'open.cleanup')
         return {
           status: 'diagnostics',
           error: err instanceof Error ? err.message : String(err),
           hint: 'schema 探测失败，数据库可能损坏；进入受限诊断模式。',
         };
       } finally {
-        try { probeDb?.close(); } catch (_closeError) { /* best effort */ }
+        closeQuietly(probeDb, 'open.cleanup')
       }
     }
 
@@ -249,7 +259,7 @@ export class A9PersistenceManager {
     try {
       db = options.openDatabase(options.databasePath);
     } catch (err) {
-      try { externalA8Db?.close(); } catch (_closeError) { /* best effort */ }
+      closeQuietly(externalA8Db, 'open.cleanup')
       return {
         status: 'diagnostics',
         error: err instanceof Error ? err.message : String(err),
@@ -267,8 +277,8 @@ export class A9PersistenceManager {
         throw new Error('A9 schema metadata is missing while A9 business tables already exist');
       }
     } catch (err) {
-      try { db.close(); } catch (_closeError) { /* best effort */ }
-      try { externalA8Db?.close(); } catch (_closeError) { /* best effort */ }
+      closeQuietly(db, 'open.cleanup')
+      closeQuietly(externalA8Db, 'open.cleanup')
       return {
         status: 'diagnostics',
         error: err instanceof Error ? err.message : String(err),
@@ -277,8 +287,8 @@ export class A9PersistenceManager {
     }
 
     if (existingVersion !== undefined && existingVersion > A9_SCHEMA_VERSION) {
-      try { db.close(); } catch (_closeError) { /* best effort */ }
-      try { externalA8Db?.close(); } catch (_closeError) { /* best effort */ }
+      closeQuietly(db, 'open.cleanup')
+      closeQuietly(externalA8Db, 'open.cleanup')
       return {
         status: 'schema_refused',
         reason: `数据库 schema 版本 ${existingVersion} 高于本应用支持的 ${A9_SCHEMA_VERSION}；拒绝覆盖，请使用更新版本的应用打开。`,
@@ -294,8 +304,8 @@ export class A9PersistenceManager {
     try {
       embeddedA8Data = a8TablesPresent(db);
     } catch (err) {
-      try { db.close(); } catch (_closeError) { /* best effort */ }
-      try { externalA8Db?.close(); } catch (_closeError) { /* best effort */ }
+      closeQuietly(db, 'open.cleanup')
+      closeQuietly(externalA8Db, 'open.cleanup')
       return {
         status: 'diagnostics',
         error: err instanceof Error ? err.message : 'A9_SQLITE_PROBE_FAILED: A8 table probe failed',
@@ -317,8 +327,8 @@ export class A9PersistenceManager {
           throw new Error('A9_SCHEMA_CONCURRENT_MODIFICATION: 数据库在迁移备份期间被其他连接修改。');
         }
       } catch (err) {
-        try { db.close(); } catch (_closeError) { /* best effort */ }
-        try { externalA8Db?.close(); } catch (_closeError) { /* best effort */ }
+        closeQuietly(db, 'open.cleanup')
+        closeQuietly(externalA8Db, 'open.cleanup')
         return {
           status: 'diagnostics',
           error: err instanceof Error ? err.message : String(err),
@@ -346,8 +356,8 @@ export class A9PersistenceManager {
       });
       initializeSchema();
     } catch (err) {
-      try { db.close(); } catch (_closeError) { /* best effort */ }
-      try { externalA8Db?.close(); } catch (_closeError) { /* best effort */ }
+      closeQuietly(db, 'open.cleanup')
+      closeQuietly(externalA8Db, 'open.cleanup')
       return {
         status: 'diagnostics',
         error: err instanceof Error ? err.message : String(err),
@@ -376,7 +386,7 @@ export class A9PersistenceManager {
     }
     for (const diagnostic of openDiagnostics) manager.addDiagnostic(diagnostic);
 
-    try { externalA8Db?.close(); } catch (_closeError) { /* best effort */ }
+    closeQuietly(externalA8Db, 'open.cleanup')
 
     manager.markInterruptionsOnRestart();
     return {
@@ -499,6 +509,15 @@ export class A9PersistenceManager {
         acquired_at TEXT NOT NULL,
         heartbeat_at TEXT NOT NULL
       );
+
+      -- 查询性能索引（H-P1-03）：纯加法、非唯一、BINARY 升序；不属于 v4 必需索引合同，
+      -- 旧库在重开时由 IF NOT EXISTS 补建，表签名与 schema 版本不变。
+      CREATE INDEX IF NOT EXISTS idx_a9_tasks_session_status ON a9_tasks (session_id, status);
+      CREATE INDEX IF NOT EXISTS idx_a9_runs_session_status ON a9_runs (session_id, status);
+      CREATE INDEX IF NOT EXISTS idx_a9_approvals_session_decision ON a9_approvals (session_id, decision);
+      CREATE INDEX IF NOT EXISTS idx_a9_turns_session_task ON a9_turns (session_id, task_id);
+      CREATE INDEX IF NOT EXISTS idx_a9_events_created ON a9_events (created_at);
+      CREATE INDEX IF NOT EXISTS idx_a9_events_session_type ON a9_events (session_id, event_type);
     `);
 
     const now = new Date().toISOString();
@@ -1033,16 +1052,22 @@ export class A9PersistenceManager {
     settledAt: string | null; lastVisitedAt: string | null; lastCompletedAt: string | null; lastActivityAt: string;
   } {
     const inbox = this.getConversationInbox(sessionId);
+    // runs 的三个聚合合并为对 idx_a9_runs_session_status 的单次范围读取；语义与逐项子查询一致。
     const row = this.db.prepare(`
-      SELECT s.created_at,
-        (SELECT MAX(updated_at) FROM a9_runs WHERE session_id = s.session_id AND status = 'completed') AS completed_at,
-        (SELECT MAX(created_at) FROM a9_runs WHERE session_id = s.session_id) AS started_at,
-        (SELECT MAX(updated_at) FROM a9_runs WHERE session_id = s.session_id AND status <> 'active') AS ended_at,
+      SELECT s.created_at, r.completed_at, r.started_at, r.ended_at,
         (SELECT MAX(created_at) FROM a9_approvals WHERE session_id = s.session_id AND decision = 'pending') AS approval_at,
         (SELECT MAX(created_at) FROM a9_events WHERE session_id = s.session_id
           AND event_type IN ('approval_required', 'question_pending')) AS pending_at
-      FROM a9_sessions s WHERE s.session_id = ?
-    `).get(sessionId) as any;
+      FROM a9_sessions s
+      LEFT JOIN (
+        SELECT session_id,
+          MAX(CASE WHEN status = 'completed' THEN updated_at END) AS completed_at,
+          MAX(created_at) AS started_at,
+          MAX(CASE WHEN status <> 'active' THEN updated_at END) AS ended_at
+        FROM a9_runs WHERE session_id = ? GROUP BY session_id
+      ) r ON r.session_id = s.session_id
+      WHERE s.session_id = ?
+    `).get(sessionId, sessionId) as any;
     const activity = [row.started_at, row.ended_at, row.approval_at, row.pending_at,
       inbox.activeSince, inbox.lastVisitedAt].filter((value): value is string => typeof value === 'string' && Number.isFinite(Date.parse(value)));
     activity.sort((left, right) => Date.parse(right) - Date.parse(left));
@@ -2840,7 +2865,7 @@ function backupDatabase(
         throw new Error('迁移备份可读性检查失败：SQLite quick_check 未通过。');
       }
     } finally {
-      try { validationDb?.close(); } catch (_closeError) { /* best effort */ }
+      closeQuietly(validationDb, 'backup.validation_close');
     }
     return {
       path: backupPath,
@@ -2848,7 +2873,12 @@ function backupDatabase(
     };
   } catch (err) {
     // 不把不完整快照暴露为可恢复备份。
-    try { fs.rmSync(backupPath, { force: true }); } catch (_cleanupError) { /* best effort */ }
+    try {
+      fs.rmSync(backupPath, { force: true });
+    } catch (cleanupError) {
+      // 残留的不完整备份不能被当作可恢复备份；留下诊断供人工清理。
+      reportCleanupFailure('A9_BACKUP_CLEANUP_FAILED', 'backup.remove_incomplete', cleanupError, backupPath);
+    }
     throw err;
   }
 }

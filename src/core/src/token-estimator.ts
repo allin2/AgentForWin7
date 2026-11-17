@@ -17,14 +17,27 @@ export function estimateContextTokens(content: string, provided?: number): Token
     }
     return { tokens: provided, source: 'provided' };
   }
+  return { tokens: Math.max(1, estimateConservativeTokens(content)), source: 'conservative_utf8' };
+}
+
+/**
+ * `estimateContextTokens` 的无供给值路径：单次遍历 UTF-16 码元，按 UTF-8 字节计数，
+ * 不为每个非 ASCII 字符调用 Buffer，适合在每次请求前对整段历史估算。
+ * 孤立代理项与 Buffer.byteLength 一致，按 U+FFFD 的 3 字节计；空串为 0（下限 1 由 estimateContextTokens 施加）。
+ */
+export function estimateConservativeTokens(content: string): number {
   let asciiChars = 0;
   let nonAsciiBytes = 0;
-  for (const character of content) {
-    if (character.codePointAt(0)! <= 0x7f) asciiChars += 1;
-    else nonAsciiBytes += Buffer.byteLength(character, 'utf8');
+  const length = content.length;
+  for (let index = 0; index < length; index += 1) {
+    const unit = content.charCodeAt(index);
+    if (unit <= 0x7f) asciiChars += 1;
+    else if (unit <= 0x7ff) nonAsciiBytes += 2;
+    else if (unit >= 0xd800 && unit <= 0xdbff && index + 1 < length
+      && (content.charCodeAt(index + 1) & 0xfc00) === 0xdc00) {
+      nonAsciiBytes += 4;
+      index += 1;
+    } else nonAsciiBytes += 3;
   }
-  return {
-    tokens: Math.max(1, Math.ceil(asciiChars / 4) + nonAsciiBytes),
-    source: 'conservative_utf8',
-  };
+  return Math.ceil(asciiChars / 4) + nonAsciiBytes;
 }

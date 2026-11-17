@@ -40,13 +40,15 @@ import {
   validateA9QuestionInput,
   validateA9QuestionReply,
 } from './a9-question';
-import { assembleWithinBudget } from './a9-context-budget';
+import { assembleWithinBudget, estimateToolSchemaTokens, isContextOverflowError } from './a9-context-budget';
 
 const DEFAULT_CONTEXT_BUDGET_CHARS = 400_000;
-function isContextOverflowError(error: any): boolean {
-  return (error?.statusCode === 400 || error?.statusCode === 413)
-    && /context_length_exceeded|maximum context length|too many tokens|prompt is too long/i.test(String(error?.message || ''));
-}
+/** 未配置模型窗口时的保守假设（128k 是主流模型的下限窗口）。 */
+const DEFAULT_CONTEXT_WINDOW_TOKENS = 128_000;
+const MIN_CONTEXT_WINDOW_TOKENS = 8_000;
+const MAX_CONTEXT_WINDOW_TOKENS = 2_000_000;
+/** 窗口中留给模型输出、分词器偏差与协议开销的比例；其余作为输入 Token 预算。 */
+const CONTEXT_WINDOW_INPUT_RATIO = 0.85;
 
 // ENOTDIR: a path component is a file, so the exact target cannot exist (same fact as ENOENT).
 function isAbsentPathError(error: any): boolean {
@@ -327,6 +329,11 @@ export interface A9AgentLoopConfig {
   loadProjectInstructions?: () => ProjectInstructionResult;
   loadSkillCatalog?: () => SkillCatalog;
   contextBudgetChars?: number;
+  /**
+   * Provider 模型的上下文窗口（Token）。输入预算 = 窗口 × 85%，其中先扣除随请求发送的工具定义；
+   * 与 contextBudgetChars 同时生效，任一超限即裁剪。缺省按 128000 估算，范围 8000～2000000。
+   */
+  contextWindowTokens?: number;
   thinkingEnabled?: boolean;
   reasoningEffort?: 'low' | 'medium' | 'high';
   environmentFacts?: string | (() => string);
@@ -578,10 +585,37 @@ export class A9AgentLoop {
       ? value! : DEFAULT_CONTEXT_BUDGET_CHARS;
   }
 
-  private assembleRequest(budgetChars: number) {
+  private contextBudgetTokens(): number {
+    const value = this.config.contextWindowTokens;
+    const window = Number.isSafeInteger(value) && value! >= MIN_CONTEXT_WINDOW_TOKENS && value! <= MAX_CONTEXT_WINDOW_TOKENS
+      ? value! : DEFAULT_CONTEXT_WINDOW_TOKENS;
+    return Math.floor(window * CONTEXT_WINDOW_INPUT_RATIO);
+  }
+
+  private cachedToolSchemaTokens: number | undefined;
+  /** 工具定义随每次请求发送，其 Token 成本必须计入预算；工具集在构造后不再变化，估算一次即可。 */
+  private toolSchemaTokens(): number {
+    if (this.cachedToolSchemaTokens === undefined) {
+      this.cachedToolSchemaTokens = estimateToolSchemaTokens(this.modelToolDefinitions());
+    }
+    return this.cachedToolSchemaTokens;
+  }
+
+  private modelToolDefinitions() {
+    return this.toolRegistry.list().map((t) => ({
+      name: t.name,
+      description: t.description,
+      parameters: t.inputSchema as unknown as Record<string, unknown>,
+    }));
+  }
+
+  /** scale=1 为完整预算；溢出重试使用 0.5（字符与 Token 预算同时折半，工具定义成本不变）。 */
+  private assembleRequest(scale = 1) {
     const firstNonSystem = this.conversationHistory.findIndex((message) => message.role !== 'system');
     return assembleWithinBudget(this.conversationHistory, {
-      budgetChars,
+      budgetChars: Math.floor(this.contextBudgetChars() * scale),
+      budgetTokens: Math.floor(this.contextBudgetTokens() * scale),
+      toolSchemaTokens: this.toolSchemaTokens(),
       fixedPrefixCount: firstNonSystem < 0 ? this.conversationHistory.length : firstNonSystem,
     });
   }
@@ -745,7 +779,7 @@ export class A9AgentLoop {
         },
         skills: { status: skillCatalog.status, discovered: skillCatalog.entries.length,
           skipped: skillCatalog.skipped, truncated: skillCatalog.truncated },
-        context: this.assembleRequest(this.contextBudgetChars()).stats,
+        context: this.assembleRequest().stats,
       },
     });
 
@@ -1021,12 +1055,7 @@ export class A9AgentLoop {
       toolCallsExecuted = queueResult.toolCallsExecuted;
     }
 
-    const specs = this.toolRegistry.list();
-    const openAITools = specs.map((t) => ({
-      name: t.name,
-      description: t.description,
-      parameters: t.inputSchema as unknown as Record<string, unknown>,
-    }));
+    const openAITools = this.modelToolDefinitions();
 
     while (stepCount < maxSteps) {
       if (signal?.aborted) {
@@ -1066,12 +1095,15 @@ export class A9AgentLoop {
 
       let chunkBytesThisResponse = 0;
       try {
-        const send = (budgetChars: number) => {
-          const assembled = this.assembleRequest(budgetChars);
+        const send = (scale: number) => {
+          const assembled = this.assembleRequest(scale);
           if (assembled.budgetExceeded) {
             const error = new Error('输入上下文超过预算，请缩短当前输入或项目说明后重试');
-            Object.assign(error, { code: 'A9_CONTEXT_BUDGET_EXCEEDED', budgetChars,
-              estimatedChars: assembled.stats.estimatedChars });
+            Object.assign(error, { code: 'A9_CONTEXT_BUDGET_EXCEEDED', budgetChars: assembled.stats.budgetChars,
+              estimatedChars: assembled.stats.estimatedChars,
+              ...(assembled.stats.budgetTokens !== undefined ? {
+                budgetTokens: assembled.stats.budgetTokens, estimatedTokens: assembled.stats.estimatedTokens,
+                toolSchemaTokens: assembled.stats.toolSchemaTokens } : {}) });
             throw error;
           }
           return this.config.provider.sendStreamRequest(
@@ -1103,18 +1135,22 @@ export class A9AgentLoop {
           );
         };
         try {
-          response = await send(this.contextBudgetChars());
+          response = await send(1);
         } catch (firstError: any) {
           if (!isContextOverflowError(firstError) || signal?.aborted) throw firstError;
           try {
-            response = await send(Math.floor(this.contextBudgetChars() / 2));
+            response = await send(0.5);
           } catch (retryError: any) {
             if (signal?.aborted) throw retryError;
             const error = new Error('对话过长，已尝试压缩仍超出模型上限');
             (error as any).contextOverflowRetryFailed = true;
+            (error as any).retryError = retryError;
             if (retryError?.code === 'A9_CONTEXT_BUDGET_EXCEEDED') {
               Object.assign(error, { code: retryError.code, budgetChars: retryError.budgetChars,
-                estimatedChars: retryError.estimatedChars });
+                estimatedChars: retryError.estimatedChars,
+                ...(retryError.budgetTokens !== undefined ? {
+                  budgetTokens: retryError.budgetTokens, estimatedTokens: retryError.estimatedTokens,
+                  toolSchemaTokens: retryError.toolSchemaTokens } : {}) });
             }
             throw error;
           }
@@ -1136,7 +1172,10 @@ export class A9AgentLoop {
           turnId,
           timestamp: new Date().toISOString(),
           data: { error: err.message, ...(err.code === 'A9_CONTEXT_BUDGET_EXCEEDED'
-            ? { code: err.code, budgetChars: err.budgetChars, estimatedChars: err.estimatedChars } : {}) },
+            ? { code: err.code, budgetChars: err.budgetChars, estimatedChars: err.estimatedChars,
+              ...(err.budgetTokens !== undefined ? { budgetTokens: err.budgetTokens,
+                estimatedTokens: err.estimatedTokens, toolSchemaTokens: err.toolSchemaTokens } : {}) } : {}),
+            ...(err.retryError?.message ? { retryError: err.retryError.message } : {}) },
         });
         return this.finalize(turnId, {
           turnId,

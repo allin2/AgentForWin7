@@ -10,6 +10,18 @@ const MAX_FILE_BYTES = 64 * 1024;
 const MAX_CIPHERTEXT_BYTES = 32 * 1024;
 const MAX_API_KEY_CHARS = 8192;
 
+/** 删除临时文件；失败时返回结构化诊断（仅错误码与操作名，不含内容）并发出带码 warning。 */
+function removeTemporaryFile(temporaryPath) {
+  try {
+    if (fs.existsSync(temporaryPath)) fs.unlinkSync(temporaryPath);
+    return null;
+  } catch (error) {
+    const failure = { code: 'A9_CREDENTIAL_TEMP_CLEANUP_FAILED', operation: 'credential.remove_temporary_file', errno: error && typeof error.code === 'string' ? error.code : 'UNKNOWN' };
+    process.emitWarning(`${failure.code}: ${failure.errno}`, { type: 'A9CleanupWarning', code: failure.code });
+    return failure;
+  }
+}
+
 function createDpapiCredentialVault(options) {
   const config = options || {};
   const safeStorage = config.safeStorage;
@@ -70,8 +82,12 @@ function createDpapiCredentialVault(options) {
       fs.writeFileSync(temporaryPath, serialized, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
       fs.renameSync(temporaryPath, filePath);
     } catch (_error) {
-      try { if (fs.existsSync(temporaryPath)) fs.unlinkSync(temporaryPath); } catch (_cleanupError) { /* ciphertext-only best effort */ }
-      throw vaultError('CREDENTIAL_STORE_WRITE_FAILED', '无法原子保存 DPAPI 密文。', '检查当前用户的 userData 写入权限后重试；本次凭据仍只在内存。');
+      // 残留的只会是 DPAPI 密文临时文件；清理失败要让调用方和诊断看到，而不是丢弃。
+      const cleanupFailure = removeTemporaryFile(temporaryPath);
+      throw Object.assign(
+        vaultError('CREDENTIAL_STORE_WRITE_FAILED', '无法原子保存 DPAPI 密文。', '检查当前用户的 userData 写入权限后重试；本次凭据仍只在内存。'),
+        cleanupFailure ? { cleanupFailure } : {},
+      );
     }
     readRecord();
     return getStatus();

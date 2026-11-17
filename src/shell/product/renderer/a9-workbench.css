@@ -382,6 +382,9 @@ summary:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--focus
 .outcome-head strong { color: var(--text-secondary); font-size: 12px; font-weight: 600; letter-spacing: .02em; text-transform: uppercase; }
 .outcome-head span { font: 11px var(--font-mono); }
 .outcome-body { line-height: 1.75; padding: 6px 16px 16px; color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere; }
+.error-detail { margin-top: 10px; }
+.error-detail summary { cursor: pointer; opacity: .8; }
+.error-detail-raw { margin: 6px 0 0; font-size: 12px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; opacity: .85; }
 .verification-evidence { display: block; margin-top: 6px; color: var(--muted); font-size: 11px; }
 .legacy-note { margin: 0; padding: 2px 4px; color: var(--muted); font-size: 12px; }
 

@@ -149,8 +149,21 @@ export interface ProviderCapabilityProbeResult {
   error?: string;
 }
 
-const DEFAULT_TOTAL_TIMEOUT_MS = 300_000;
-const DEFAULT_NO_DATA_TIMEOUT_MS = 120_000;
+export const DEFAULT_TOTAL_TIMEOUT_MS = 300_000;
+export const DEFAULT_NO_DATA_TIMEOUT_MS = 120_000;
+/**
+ * 用户可在 Provider 设置中调整总超时与空闲（无数据）超时的合理范围：
+ * 下限避免把正常首包等待误判为失败，上限避免请求永久悬挂。
+ * 范围只约束“用户配置入口”；构造 OpenAICompatibleProvider 时的显式毫秒值（测试、探测）不受限。
+ */
+export const PROVIDER_TIMEOUT_MIN_MS = 60_000;
+export const PROVIDER_TIMEOUT_MAX_MS = 1_800_000;
+
+/** 用户配置的 Provider 超时（毫秒）是否落在 60s～1800s 范围内的整数。 */
+export function isValidProviderTimeoutMs(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value)
+    && value >= PROVIDER_TIMEOUT_MIN_MS && value <= PROVIDER_TIMEOUT_MAX_MS;
+}
 
 /**
  * OpenAI-compatible function parameters must be an object JSON Schema. Core's
@@ -791,7 +804,10 @@ export class OpenAICompatibleProvider {
 
       const onReqError = (err: any) => {
         if (interruptHttpError) { interruptHttpError(); return; }
-        const gwErr = new GatewayError(ErrorCode.GATEWAY_UNREACHABLE, `Network request failed: ${this.redact(err.message)}`);
+        // 证书类错误的 message 不含错误码（如 "certificate has expired"）；附上 code 便于界面层精确归类。
+        const detail = this.redact(String(err.message ?? ''));
+        const codeSuffix = typeof err.code === 'string' && err.code && !detail.includes(err.code) ? ` (${err.code})` : '';
+        const gwErr = new GatewayError(ErrorCode.GATEWAY_UNREACHABLE, `Network request failed: ${detail}${codeSuffix}`);
         (gwErr as any).networkCode = err.code ?? 'NETWORK_ERROR';
         settle(gwErr);
       };

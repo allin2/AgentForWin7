@@ -5655,3 +5655,12 @@ Claude P2-1、P2-3 已补测试，P2-4 已修复；P2-2 按裁决保留为 K7。
 - 背景：旧版 artifactBindingVersion 1 读取器会忽略未知 pairedTransfers 字段；降级打开新工作区时，可能绕过配对撤销保护并删除唯一目标副本。
 - 决定：只在带配对转移标记的 checkpoint 使用 artifactBindingVersion 2；现有普通 checkpoint 继续使用 1。新读取器支持 1，且仅在严格验证配对字段时接受 2；配对字段与版本必须一致。旧读取器因未知绑定版本拒绝恢复，不进行自动降级或移除标记。
 - 边界：不重写历史 checkpoint 或冻结候选。TransferReceipt 仍为 v1。旧版能否读取其他普通 checkpoint 与新版本能否读取历史普通 checkpoint 分别验证，不将拒读写成恢复 PASS。
+
+## ADR-0339 体检 Phase B：SQLite 性能索引、Provider 窗口/超时设置与错误指引
+
+- 状态：Accepted（2026-11-17 UTC，负责人下达的体检 Phase B 实施任务范围；开发机证据，Win7 实机为 NOT_PERFORMED）。
+- 决定（持久化）：A9 数据库新增 6 个非唯一、BINARY 升序的性能索引（tasks/runs 按 session_id+status，approvals 按 session_id+decision，turns 按 session_id+task_id，events 按 created_at 与 session_id+event_type），由 createSchema 的 IF NOT EXISTS 在每次打开时补建。索引不属于 v4 必需索引合同：表签名、列合同和 schema 版本均不变，缺少这些索引的既有 v4 库照常打开并被补建；canonical v4 校验已有“安全的额外显式索引”容忍规则，当前代码打开已补建索引的库通过；依 git 历史确认（提交 d28c1b9，2026-09-03 起引入），v0.3.0-alpha.1 至 alpha.6 等全部已发布版本均包含该安全额外索引容忍规则，降级读取具备向后兼容性（非实机证据，基于历史源码分析）。WIN7-19 历史 profile 仍要求精确的显式索引集合，补建发生在其修复为 canonical 之后。不迁移数据、不改变保留策略。
+- 决定（Provider 设置）：Provider 配置增加三个可选字段：contextWindowTokens（8000～2000000，缺省按 128000）、requestTimeoutMs 与 idleTimeoutMs（均为 60000～1800000 毫秒，缺省仍为 300 秒与 120 秒）。省略表示保留，null 表示恢复默认；越界在保存时以 A9_PROVIDER_CONFIG_INVALID 拒绝，已保存的越界值回到默认并留下 A9_PROVIDER_SETTING_INVALID 诊断。范围只约束用户配置入口，网关类构造时的显式毫秒值（探测、测试）不受限。Schema IPC 的 provider.configure 允许这三个键，主版本不变，旧配置文件无需迁移。
+- 决定（上下文预算）：输入预算由字符预算与 Token 预算同时约束，任一超限即裁剪。Token 预算为窗口的 85%，按 token-estimator 的保守 UTF-8 口径估算，并先扣除随请求发送的工具定义；字符预算语义不变。溢出判定识别 HTTP 413、HTTP 400/422 加上英文与中文厂商表述，命中后沿用既有“折半预算重试一次”链路。默认窗口按 128000 估算会使中文长对话比旧版更早裁剪旧轮次，这是有意的行为变化。
+- 决定（错误指引）：界面层把 401、403、404、407、429、5xx、域名未解析、连接拒绝、证书过期、自签或不受信任证书、证书主机名不符、连接/空闲/总超时、流式截断映射为中文“原因 + 下一步”，原始错误保留在“原始错误：”之后并在界面折叠展示。失败 Turn 的最终消息写入的是中文文案；原始英文错误随文案保存。
+- 边界：不关闭、不弱化 TLS 校验；指引文案不得建议关闭证书校验。清理路径（关闭数据库、删除临时/备份/锁文件、关闭工作区时的办公组件、状态观察者）的失败改为结构化诊断（稳定错误码、限长、脱敏），不再静默吞掉。

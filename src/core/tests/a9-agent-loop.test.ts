@@ -457,7 +457,8 @@ describe('A9-21 M2 C-1..C-5: turn output budget and truncation', () => {
       workspaceService: mockWorkspace,
       runner: mockRunner,
       permissionMode: PermissionMode.FULL_ACCESS,
-      ...(contextBudgetChars ? { contextBudgetChars } : {}),
+      // B2：Token 预算与字符预算同时生效；这些输出字节压力用例需要两者都放宽到上限。
+      ...(contextBudgetChars ? { contextBudgetChars, contextWindowTokens: 2_000_000 } : {}),
       ...(onEvent ? { onEvent } : {}),
     });
   }

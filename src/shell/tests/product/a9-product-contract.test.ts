@@ -84,6 +84,13 @@ function convertSessionsToWin719SchemaV4(databasePath: string): void {
   const db = new Database(databasePath);
   (db as any).pragma('journal_mode = DELETE');
   db.exec(`
+    -- WIN7-19 历史 profile 不含 H-P1-03 性能索引。
+    DROP INDEX IF EXISTS idx_a9_tasks_session_status;
+    DROP INDEX IF EXISTS idx_a9_runs_session_status;
+    DROP INDEX IF EXISTS idx_a9_approvals_session_decision;
+    DROP INDEX IF EXISTS idx_a9_turns_session_task;
+    DROP INDEX IF EXISTS idx_a9_events_created;
+    DROP INDEX IF EXISTS idx_a9_events_session_type;
     DROP INDEX idx_a9_sessions_workspace;
     ALTER TABLE a9_sessions RENAME TO a9_sessions_canonical;
     CREATE TABLE a9_sessions (

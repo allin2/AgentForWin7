@@ -342,3 +342,4 @@
 | ADR-0336 | A9-70 办公纯 JS 依赖闭包准入 | Accepted |
 | ADR-0337 | A9-70 整理确认卡选中清单修订 | Accepted |
 | ADR-0338 | A9-70 配对 checkpoint 的旧版拒读标记 | Accepted |
+| ADR-0339 | 体检 Phase B：SQLite 性能索引、Provider 窗口/超时设置与错误指引 | Accepted |

@@ -65,8 +65,17 @@ function createActiveWorkspaceStore(options) {
       fs.writeFileSync(temporaryPath, serialized, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
       fs.renameSync(temporaryPath, filePath);
     } catch (_error) {
-      try { if (fs.existsSync(temporaryPath)) fs.unlinkSync(temporaryPath); } catch (_cleanupError) { /* best effort */ }
-      throw storeError('A9_ACTIVE_WORKSPACE_STORE_WRITE_FAILED', '无法原子保存活动工作区记录。');
+      let cleanupFailure = null;
+      try {
+        if (fs.existsSync(temporaryPath)) fs.unlinkSync(temporaryPath);
+      } catch (cleanupError) {
+        // 残留临时文件不影响主错误，但必须可见：附在抛出的错误上并发出带码 warning。
+        cleanupFailure = { code: 'A9_ACTIVE_WORKSPACE_TEMP_CLEANUP_FAILED', operation: 'active_workspace.remove_temporary_file',
+          errno: cleanupError && typeof cleanupError.code === 'string' ? cleanupError.code : 'UNKNOWN' };
+        process.emitWarning(`${cleanupFailure.code}: ${cleanupFailure.errno}`, { type: 'A9CleanupWarning', code: cleanupFailure.code });
+      }
+      throw Object.assign(storeError('A9_ACTIVE_WORKSPACE_STORE_WRITE_FAILED', '无法原子保存活动工作区记录。'),
+        cleanupFailure ? { cleanupFailure } : {});
     }
     return load();
   }

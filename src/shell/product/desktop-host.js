@@ -1074,7 +1074,13 @@ function createDesktopHost(options) {
         // the single active-plan slot for the next independent task.
         task.write.preparer.remove(plan.planId);
         if (task.write.tokenId) {
-          try { broker.revokeToken(task.write.tokenId); } catch (_error) { /* audit state is already fail-closed */ }
+          try {
+            broker.revokeToken(task.write.tokenId);
+          } catch (error) {
+            // 审计状态已 fail-closed；撤销失败仍须留下诊断，便于确认令牌是否残留。
+            process.emitWarning(`A9_WRITE_TOKEN_REVOKE_FAILED: ${error && typeof error.code === 'string' ? error.code : 'UNKNOWN'}`,
+              { type: 'A9CleanupWarning', code: 'A9_WRITE_TOKEN_REVOKE_FAILED' });
+          }
           task.write.tokenId = null;
         }
         const failure = !result.success && Array.isArray(result.operations)
