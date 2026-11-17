@@ -4,10 +4,10 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { TextDecoder } = require('util');
+const { Worker } = require('worker_threads');
 const parseMime = require('../office-lite/node_modules/emailjs-mime-parser').default;
 const codec = require('../office-lite/node_modules/emailjs-mime-codec');
 
-const MAX_EML_FILES = 500;
 const MAX_EML_BYTES = 16 * 1024 * 1024;
 const MAX_BODY_CHARS = 64 * 1024;
 const SUPPORTED_CHARSETS = new Set([
@@ -178,6 +178,7 @@ function decodePartFromRaw(node) {
     disposition,
     charset,
     filename,
+    cte: rawCte || '7bit',
     bytes: bodyBytes,
   };
 }
@@ -238,6 +239,9 @@ function parseEmlBuffer(buffer, relativePath) {
       || !/^text\/(?:plain|html)$/i.test(decoded.contentType);
 
     if (isAttachment) {
+      if (decoded.cte !== 'base64' && decoded.cte !== 'quoted-printable') {
+        throw fail('A9_OFFICE_MAIL_CTE_UNSUPPORTED', `attachment requires base64 or quoted-printable, got ${decoded.cte}`);
+      }
       attCounter += 1;
       const filename = decoded.filename || `attachment-${attCounter}.bin`;
       attachments.push({
@@ -287,80 +291,74 @@ function emlAvailable() {
   });
 }
 
-function createEmlDirectoryMailAdapter({ workspaceRoot }) {
-  function resolveEmlDir(emlDir = '') {
-    const realRoot = fs.realpathSync(workspaceRoot);
-    const clean = String(emlDir || '').replace(/\/+$/, '');
-    if (clean.length > 4096 || /[\\\x00-\x1f:*?"<>|]/.test(clean) || path.isAbsolute(clean) || path.win32.isAbsolute(clean)) {
-      throw fail('MAIL_PATH_INVALID');
-    }
-    const target = clean ? path.resolve(realRoot, clean) : realRoot;
-    const rel = path.relative(realRoot, target);
-    if (rel === '..' || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) {
-      throw fail('MAIL_PATH_REDIRECTED');
-    }
-    let probe = realRoot;
-    if (rel) {
-      for (const seg of rel.split(path.sep)) {
-        probe = path.join(probe, seg);
-        if (fs.lstatSync(probe).isSymbolicLink()) throw fail('MAIL_PATH_REDIRECTED');
-      }
-    }
-    const resolved = fs.realpathSync(target);
-    const st = fs.lstatSync(resolved);
-    if (!st.isDirectory() || st.isSymbolicLink()) throw fail('MAIL_PATH_INVALID');
-    return { realRoot, resolved };
-  }
+function createEmlDirectoryMailAdapter({
+  workspaceRoot,
+  timeoutMs = 30_000,
+  workerPath,
+  maxOldGenerationSizeMb = 128,
+  maxYoungGenerationSizeMb = 16,
+}) {
+  let active = null;
+  let closed = false;
 
-  function scanEmlFiles(emlDir = '') {
-    const { realRoot, resolved: baseDir } = resolveEmlDir(emlDir);
-    const files = [];
-    const stack = [baseDir];
-    while (stack.length) {
-      const dir = stack.pop();
-      const entries = fs.readdirSync(dir).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
-      const subdirs = [];
-      for (const name of entries) {
-        if (['.git', '.agent_recovery'].includes(name.toLowerCase()) || /^_待清理隔离区_/.test(name)) continue;
-        const abs = path.join(dir, name);
-        const st = fs.lstatSync(abs);
-        if (st.isSymbolicLink()) continue;
-        if (st.isDirectory()) {
-          subdirs.push(abs);
-        } else if (st.isFile() && /\.eml$/i.test(name)) {
-          if (files.length >= MAX_EML_FILES) throw fail('MAIL_EML_FILE_LIMIT');
-          const rel = path.relative(realRoot, abs).replace(/\\/g, '/');
-          files.push({ rel, abs, size: st.size });
-        }
-      }
-      stack.push(...subdirs.reverse());
-    }
-    return files.sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0));
-  }
+  async function runWorker(workerData, signal) {
+    if (closed) throw fail('MAIL_CANCELLED');
+    if (signal?.aborted) throw fail('MAIL_CANCELLED');
+    if (active) throw fail('MAIL_BUSY');
 
-  function resolveSingleEml(messageId, emlDir = '') {
-    const { realRoot, resolved: baseDir } = resolveEmlDir(emlDir);
-    const clean = String(messageId || '');
-    if (!clean || clean.length > 4096 || !/\.eml$/i.test(clean) || /[\\\x00-\x1f:*?"<>|]/.test(clean)
-      || path.isAbsolute(clean) || path.win32.isAbsolute(clean)) {
-      throw fail('MAIL_MESSAGE_NOT_FOUND');
+    const worker = new Worker(workerPath || path.join(__dirname, 'office-mail-worker.js'), {
+      workerData: { ...workerData, workspaceRoot },
+      resourceLimits: { maxOldGenerationSizeMb, maxYoungGenerationSizeMb },
+      env: {},
+    });
+    active = worker;
+
+    try {
+      return await new Promise((resolve, reject) => {
+        let message;
+        let failure;
+        let timedOut = false;
+        const abort = () => {
+          failure = fail('MAIL_CANCELLED');
+          void worker.terminate();
+        };
+        const timer = setTimeout(() => {
+          timedOut = true;
+          void worker.terminate();
+        }, timeoutMs);
+        signal?.addEventListener('abort', abort, { once: true });
+
+        worker.on('message', (value) => {
+          message = value;
+        });
+        worker.on('error', () => {
+          failure = fail('A9_OFFICE_MAIL_WORKER_FAILED');
+        });
+        worker.on('exit', (exitCode) => {
+          clearTimeout(timer);
+          signal?.removeEventListener('abort', abort);
+          if (signal?.aborted || closed) failure = fail('MAIL_CANCELLED');
+          else if (timedOut) failure = fail('A9_OFFICE_MAIL_TIMEOUT');
+          if (failure) return reject(failure);
+          if (exitCode !== 0 || !message) {
+            const code = message && !message.ok && message.error && message.error.code
+              ? message.error.code
+              : 'A9_OFFICE_MAIL_WORKER_FAILED';
+            return reject(fail(code, message && message.error && message.error.message));
+          }
+          if (!message.ok) {
+            return reject(fail((message.error && message.error.code) || 'A9_OFFICE_MAIL_FAILED', message.error && message.error.message));
+          }
+          const result = message.result;
+          if (result && result.bytes && !(result.bytes instanceof Buffer)) {
+            result.bytes = Buffer.from(result.bytes);
+          }
+          resolve(result);
+        });
+      });
+    } finally {
+      if (active === worker) active = null;
     }
-    const abs = path.resolve(realRoot, clean);
-    const relFromBase = path.relative(baseDir, abs);
-    if (relFromBase === '..' || relFromBase.startsWith(`..${path.sep}`) || path.isAbsolute(relFromBase)) {
-      throw fail('MAIL_PATH_REDIRECTED');
-    }
-    let probe = realRoot;
-    for (const seg of path.relative(realRoot, abs).split(path.sep)) {
-      probe = path.join(probe, seg);
-      if (!fs.existsSync(probe) || fs.lstatSync(probe).isSymbolicLink()) {
-        throw fail('MAIL_MESSAGE_NOT_FOUND');
-      }
-    }
-    const st = fs.lstatSync(abs);
-    if (!st.isFile() || st.isSymbolicLink()) throw fail('MAIL_MESSAGE_NOT_FOUND');
-    if (st.size > MAX_EML_BYTES) throw fail('A9_OFFICE_MAIL_BYTE_LIMIT');
-    return { abs, rel: path.relative(realRoot, abs).replace(/\\/g, '/') };
   }
 
   return {
@@ -368,90 +366,36 @@ function createEmlDirectoryMailAdapter({ workspaceRoot }) {
     sourceId: 'eml',
     kind: 'eml_directory',
     evidenceClass: 'LOCAL_EML_EXPORT',
-    async listFolders(options = {}) {
-      const files = scanEmlFiles(options.emlDir || '');
-      const counts = new Map();
-      for (const f of files) {
-        const folder = path.posix.dirname(f.rel) === '.' ? '根目录' : path.posix.dirname(f.rel);
-        counts.set(folder, (counts.get(folder) || 0) + 1);
-      }
-      return {
-        schemaVersion: 1,
-        sourceId: 'eml',
-        kind: 'eml_directory',
-        evidenceClass: 'LOCAL_EML_EXPORT',
-        isSurrogate: false,
-        folders: [...counts.entries()].map(([name, messageCount]) => ({ folderId: name, name, messageCount })),
-      };
+    listFolders(options = {}, signal) {
+      return runWorker({ action: 'listFolders', emlDir: options.emlDir || '' }, signal);
     },
-    async listMessages(options = {}) {
-      const files = scanEmlFiles(options.emlDir || '');
-      const folderFilter = options.folder ? String(options.folder) : '';
-      const filtered = folderFilter
-        ? files.filter(f => (path.posix.dirname(f.rel) === '.' ? '根目录' : path.posix.dirname(f.rel)) === folderFilter)
-        : files;
-      const offset = Math.max(0, Number.parseInt(String(options.cursor || '0'), 10) || 0);
-      const limit = Math.min(50, Math.max(1, Number(options.limit || 20)));
-      const slice = filtered.slice(offset, offset + limit);
-      const messages = slice.map((f) => {
-        const parsed = parseEmlBuffer(fs.readFileSync(f.abs), f.rel);
-        return {
-          messageId: parsed.messageId,
-          folder: parsed.folder,
-          subject: parsed.subject,
-          from: parsed.from,
-          to: parsed.to,
-          date: parsed.date,
-          attachmentCount: parsed.attachments.length,
-          snippet: parsed.textBody.slice(0, 160),
-          sourcePath: parsed.sourcePath,
-        };
-      });
-      const nextOffset = offset + slice.length;
-      return {
-        schemaVersion: 1,
-        sourceId: 'eml',
-        kind: 'eml_directory',
-        evidenceClass: 'LOCAL_EML_EXPORT',
-        isSurrogate: false,
-        folder: folderFilter || '*',
-        total: filtered.length,
-        cursor: offset,
-        nextCursor: nextOffset < filtered.length ? String(nextOffset) : null,
-        hasMore: nextOffset < filtered.length,
-        messages,
-      };
+    listMessages(options = {}, signal) {
+      return runWorker({
+        action: 'listMessages',
+        emlDir: options.emlDir || '',
+        folder: options.folder || '',
+        cursor: options.cursor || '0',
+        limit: options.limit || 20,
+      }, signal);
     },
-    async readMessage(messageId, options = {}) {
-      const resolved = resolveSingleEml(messageId, options.emlDir || '');
-      const parsed = parseEmlBuffer(fs.readFileSync(resolved.abs), resolved.rel);
-      return {
-        messageId: parsed.messageId,
-        folder: parsed.folder,
-        subject: parsed.subject,
-        from: parsed.from,
-        to: parsed.to,
-        ...(parsed.cc ? { cc: parsed.cc } : {}),
-        date: parsed.date,
-        charset: parsed.charset,
-        textBody: parsed.textBody,
-        ...(parsed.htmlBody ? { htmlBody: parsed.htmlBody } : {}),
-        attachments: parsed.attachments.map(({ bytes: _b, ...meta }) => meta),
-        sourcePath: parsed.sourcePath,
-      };
+    readMessage(messageId, options = {}, signal) {
+      return runWorker({
+        action: 'readMessage',
+        messageId,
+        emlDir: options.emlDir || '',
+      }, signal);
     },
-    async readAttachmentBytes(messageId, attachmentId, options = {}) {
-      const resolved = resolveSingleEml(messageId, options.emlDir || '');
-      const parsed = parseEmlBuffer(fs.readFileSync(resolved.abs), resolved.rel);
-      const att = parsed.attachments.find(a => a.attachmentId === attachmentId);
-      if (!att) throw fail('MAIL_ATTACHMENT_NOT_FOUND');
-      return {
-        attachmentId: att.attachmentId,
-        filename: att.filename,
-        contentType: att.contentType,
-        bytes: att.bytes,
-        sha256: att.sha256,
-      };
+    readAttachmentBytes(messageId, attachmentId, options = {}, signal) {
+      return runWorker({
+        action: 'readAttachmentBytes',
+        messageId,
+        attachmentId,
+        emlDir: options.emlDir || '',
+      }, signal);
+    },
+    async close() {
+      closed = true;
+      if (active) await active.terminate();
     },
   };
 }

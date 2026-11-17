@@ -713,44 +713,46 @@ export class OfficeTemplateService {
     absent(normalOut.absolute, guard);
     absent(boundaryOut.absolute, guard);
 
-    let dataBoundAtSample = false;
-    let boundRecords: Array<Record<string, unknown>> | undefined;
-    let dataPath: string | undefined;
-    let dataFileSha256: string | undefined;
-    let dataSha256: string;
-
-    if (input.records !== undefined || input.dataPath !== undefined) {
-      const loaded = this.loadRecordsInput(input.records, input.dataPath);
-      dataBoundAtSample = true;
-      boundRecords = loaded.records;
-      dataPath = loaded.dataPath;
-      dataFileSha256 = loaded.dataFileSha256;
-      const seenOut = new Set<string>([
-        templateFile.path.toLowerCase(),
-        normalOut.relative.toLowerCase(),
-        boundaryOut.relative.toLowerCase(),
-      ]);
-      loaded.records.forEach((rec, idx) => {
-        mapRecord(inspected.fields, mapping, rec);
-        const target = expandOutputPath(outputRule, rec, idx);
-        const resolvedOut = this.resolveOutputDocx(target);
-        if (seenOut.has(resolvedOut.relative.toLowerCase())) fail('TEMPLATE_OUTPUT_CONFLICT');
-        seenOut.add(resolvedOut.relative.toLowerCase());
-        const outGuard = guard.with([captureNearestAnchor(path.dirname(resolvedOut.absolute))]);
-        absent(resolvedOut.absolute, outGuard);
-      });
-      dataSha256 = digest(canonicalJson({
-        normalRecord: input.normalRecord,
-        boundaryRecord: input.boundaryRecord,
-        records: loaded.records,
-        ...(dataPath ? { dataPath, dataFileSha256 } : {}),
-      }));
-    } else {
-      dataSha256 = digest(canonicalJson({
-        normalRecord: input.normalRecord,
-        boundaryRecord: input.boundaryRecord,
-      }));
+    if (input.records === undefined && input.dataPath === undefined) fail('TEMPLATE_DATA_REQUIRED');
+    const loaded = this.loadRecordsInput(input.records, input.dataPath);
+    const dataBoundAtSample = true;
+    const boundRecords = loaded.records;
+    const dataPath = loaded.dataPath;
+    const dataFileSha256 = loaded.dataFileSha256;
+    const seenOut = new Set<string>([
+      templateFile.path.toLowerCase(),
+      normalOut.relative.toLowerCase(),
+      boundaryOut.relative.toLowerCase(),
+    ]);
+    const sampleScalarMax = new Map<string, number>();
+    for (const f of inspected.fields) {
+      if (f.kind !== 'scalar') continue;
+      const nLen = String(readSourcePath(normalMapped, f.name) ?? '').length;
+      const bLen = String(readSourcePath(boundaryMapped, f.name) ?? '').length;
+      sampleScalarMax.set(f.name, Math.max(nLen, bLen));
     }
+    loaded.records.forEach((rec, idx) => {
+      const mappedRec = mapRecord(inspected.fields, mapping, rec);
+      for (const f of inspected.fields) {
+        if (f.kind !== 'scalar') continue;
+        const valLen = String(readSourcePath(mappedRec, f.name) ?? '').length;
+        if (valLen > (sampleScalarMax.get(f.name) ?? 0)) {
+          fail('TEMPLATE_BOUNDARY_UNDERSIZED');
+        }
+      }
+      const target = expandOutputPath(outputRule, rec, idx);
+      const resolvedOut = this.resolveOutputDocx(target);
+      if (seenOut.has(resolvedOut.relative.toLowerCase())) fail('TEMPLATE_OUTPUT_CONFLICT');
+      seenOut.add(resolvedOut.relative.toLowerCase());
+      const outGuard = guard.with([captureNearestAnchor(path.dirname(resolvedOut.absolute))]);
+      absent(resolvedOut.absolute, outGuard);
+    });
+    const dataSha256 = digest(canonicalJson({
+      normalRecord: input.normalRecord,
+      boundaryRecord: input.boundaryRecord,
+      records: loaded.records,
+      ...(dataPath ? { dataPath, dataFileSha256 } : {}),
+    }));
 
     const plan = freeze<TemplateSamplePlan>({
       schemaVersion: 1,
@@ -1162,58 +1164,53 @@ export class OfficeTemplateService {
     if (!sample.confirmedInViewer) fail('TEMPLATE_SAMPLE_NOT_CONFIRMED');
 
     if (input.templatePath !== undefined && relativeName(input.templatePath, false) !== sample.templatePath) {
+      sample.confirmedInViewer = false;
       fail('TEMPLATE_BINDING_CHANGED');
     }
     if (input.templateSha256 !== undefined && input.templateSha256 !== sample.templateSha256) {
+      sample.confirmedInViewer = false;
       fail('TEMPLATE_BINDING_CHANGED');
     }
     if (input.outputRule !== undefined) {
       const normalizedRule = validateOutputRule(input.outputRule);
-      if (canonicalJson(normalizedRule) !== canonicalJson(sample.outputRule)) fail('TEMPLATE_BINDING_CHANGED');
+      if (canonicalJson(normalizedRule) !== canonicalJson(sample.outputRule)) {
+        sample.confirmedInViewer = false;
+        fail('TEMPLATE_BINDING_CHANGED');
+      }
     }
 
     const { fields } = await this.verifySampleStillValid(sample, signal);
 
     if (input.mapping !== undefined) {
       const normalizedMapping = validateAndNormalizeMapping(fields, input.mapping);
-      if (canonicalJson(normalizedMapping) !== canonicalJson(sample.mapping)) fail('TEMPLATE_BINDING_CHANGED');
-    }
-
-    let records: Array<Record<string, unknown>>;
-    let batchDataSha256 = sample.dataSha256;
-    if (sample.dataBoundAtSample) {
-      if (input.dataPath !== undefined && relativeName(input.dataPath, false) !== sample.dataPath) {
-        fail('TEMPLATE_BINDING_CHANGED');
-      }
-      if (input.records !== undefined) {
-        const loaded = this.loadRecordsInput(input.records, undefined);
-        if (canonicalJson(loaded.records) !== canonicalJson(sample.boundRecords)) {
-          sample.confirmedInViewer = false;
-          fail('TEMPLATE_BINDING_CHANGED');
-        }
-      }
-      if (sample.dataPath) {
-        const freshData = this.loadRecordsInput(undefined, sample.dataPath);
-        if (freshData.dataFileSha256 !== sample.dataFileSha256) {
-          sample.confirmedInViewer = false;
-          fail('TEMPLATE_DATA_DRIFT');
-        }
-        records = freshData.records;
-      } else {
-        records = sample.boundRecords!;
-      }
-    } else {
-      const loaded = this.loadRecordsInput(input.records, input.dataPath);
-      records = loaded.records;
-      batchDataSha256 = digest(canonicalJson({
-        sampleDataSha256: sample.dataSha256,
-        records: loaded.records,
-        ...(loaded.dataPath ? { dataPath: loaded.dataPath, dataFileSha256: loaded.dataFileSha256 } : {}),
-      }));
-      if (sample.boundBatchDataSha256 && batchDataSha256 !== sample.boundBatchDataSha256) {
+      if (canonicalJson(normalizedMapping) !== canonicalJson(sample.mapping)) {
         sample.confirmedInViewer = false;
         fail('TEMPLATE_BINDING_CHANGED');
       }
+    }
+
+    let records: Array<Record<string, unknown>>;
+    const batchDataSha256 = sample.dataSha256;
+    if (input.dataPath !== undefined && relativeName(input.dataPath, false) !== sample.dataPath) {
+      sample.confirmedInViewer = false;
+      fail('TEMPLATE_BINDING_CHANGED');
+    }
+    if (input.records !== undefined) {
+      const loaded = this.loadRecordsInput(input.records, undefined);
+      if (canonicalJson(loaded.records) !== canonicalJson(sample.boundRecords)) {
+        sample.confirmedInViewer = false;
+        fail('TEMPLATE_BINDING_CHANGED');
+      }
+    }
+    if (sample.dataPath) {
+      const freshData = this.loadRecordsInput(undefined, sample.dataPath);
+      if (freshData.dataFileSha256 !== sample.dataFileSha256) {
+        sample.confirmedInViewer = false;
+        fail('TEMPLATE_DATA_DRIFT');
+      }
+      records = freshData.records;
+    } else {
+      records = sample.boundRecords!;
     }
 
     const rootAnchor = captureAnchor(this.root);

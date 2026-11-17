@@ -23,10 +23,13 @@ export const OFFICE_MAIL_LIMITS = Object.freeze({
 });
 
 const DANGEROUS_EXTENSIONS = new Set([
-  '.exe', '.bat', '.cmd', '.com', '.msi', '.msp', '.scr', '.pif', '.vbs', '.vbe',
-  '.js', '.jse', '.wsf', '.wsh', '.ps1', '.psm1', '.psd1', '.hta', '.cpl', '.reg',
-  '.dll', '.sys', '.drv', '.ocx', '.lnk', '.url', '.jar', '.sh', '.bash', '.zsh',
-  '.py', '.pyc', '.rb', '.pl', '.php', '.asp', '.aspx', '.chm', '.inf', '.scf',
+  '.exe', '.bat', '.cmd', '.com', '.msi', '.msp', '.scr', '.pif', '.vbs', '.vbe', '.vb',
+  '.js', '.jse', '.wsf', '.wsh', '.ws', '.wsc', '.sct', '.ps1', '.psm1', '.psd1', '.hta',
+  '.cpl', '.reg', '.dll', '.sys', '.drv', '.ocx', '.lnk', '.url', '.jar', '.sh', '.bash', '.zsh',
+  '.py', '.pyc', '.rb', '.pl', '.php', '.asp', '.aspx', '.chm', '.inf', '.scf', '.msc',
+  '.gadget', '.application', '.xbap', '.hlp', '.mht', '.mhtml', '.htm', '.html', '.svg', '.xll',
+  '.docm', '.xlsm', '.pptm', '.dotm', '.xlam', '.potm', '.ppam', '.sldm',
+  '.iso', '.img', '.vhd', '.vhdx', '.settingcontent-ms',
 ]);
 
 export class OfficeMailError extends Error {
@@ -1020,10 +1023,28 @@ export class OfficeMailService {
         try {
           guard.check(t.abs);
           const cur = fileStat(t.abs, guard);
-          if (cur.dev === t.id.dev && cur.ino === t.id.ino) fs.unlinkSync(t.abs);
-          await this.checkpoint.recordPostMutationAsync(turnId, t.rel, 'delete', { guard });
-        } catch (_ignored) {
+          if (cur.dev !== t.id.dev || cur.ino !== t.id.ino) {
+            fail('MAIL_TEMP_IDENTITY_CHANGED');
+          }
+          fs.unlinkSync(t.abs);
+          try {
+            await this.checkpoint.recordPostMutationAsync(turnId, t.rel, 'delete', { guard });
+          } catch (persistErr) {
+            recovery = 'unknown';
+            checkpointStatus = 'persistence_failed';
+            persistenceError = persistenceError || (persistErr instanceof Error ? persistErr.message : String(persistErr));
+            if (status === 'completed') {
+              status = 'partial';
+              code = 'MAIL_CHECKPOINT_PERSIST_FAILED';
+            }
+          }
+        } catch (cleanupErr) {
           recovery = 'unknown';
+          const cleanupCode = errorCode(cleanupErr);
+          if (status === 'completed') {
+            status = 'partial';
+            code = cleanupCode;
+          }
         }
       }
       this.active = false;

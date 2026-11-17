@@ -866,6 +866,11 @@ summary:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--focus
 .office-skills-bar { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 10px; margin-top: 14px; }
 .office-skills-bar button { min-height: 36px; padding: 0 12px; border: 1px solid var(--line-strong); border-radius: var(--r-sm); background: var(--panel); color: var(--text-secondary); font-size: var(--fs-label); }
 .office-skills-bar button:hover:not(:disabled) { border-color: var(--accent); color: var(--text); }
+.office-skills-confirm { margin-top: 10px; padding: 10px 14px; border: 1px solid var(--line-strong); border-radius: var(--r-sm); background: var(--panel); text-align: left; }
+.office-skills-targets { margin: 6px 0 8px; padding-left: 18px; font: 12px/1.5 var(--font-mono); color: var(--text-secondary); }
+.office-skills-confirm-actions { display: flex; gap: 8px; }
+.office-skills-confirm-actions button { min-height: 32px; padding: 0 12px; border-radius: var(--r-sm); font-size: var(--fs-label); }
+.approval-surrogate { margin: 4px 0; padding: 4px 8px; border: 1px solid var(--amber-line); border-radius: var(--r-sm); background: var(--amberbg); color: var(--amber); font-size: var(--fs-label); font-weight: 600; }
 .approval-selection { margin: 8px 0; padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--panel); }
 .approval-selection-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; font-size: var(--fs-label); }
 .approval-selection-list { margin: 0; padding: 0; list-style: none; max-height: 180px; overflow: auto; display: grid; gap: 4px; }

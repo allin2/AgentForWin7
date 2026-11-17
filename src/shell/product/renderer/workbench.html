@@ -151,6 +151,14 @@
             <button id="a9-office-install-skills" type="button" class="secondary" disabled>安装内置办公技能</button>
             <span id="a9-office-skills-status" class="quiet" role="status" aria-live="polite"></span>
           </div>
+          <div id="a9-office-skills-confirm" class="office-skills-confirm" hidden>
+            <p class="quiet">确认向当前工作区写入以下未存在的技能文件（绝不覆盖已有文件）：</p>
+            <ul id="a9-office-skills-targets" class="office-skills-targets"></ul>
+            <div class="office-skills-confirm-actions">
+              <button id="a9-office-skills-confirm-btn" type="button" class="primary">确认写入以上技能文件</button>
+              <button id="a9-office-skills-cancel-btn" type="button" class="secondary">取消</button>
+            </div>
+          </div>
         </section>
         <p id="context-window-note" class="context-window-note" hidden></p>
         <div id="a9-task-stream" class="task-stream"></div>
@@ -164,7 +172,7 @@
         <section id="a9-question-host" class="a9-question-host" hidden aria-live="polite" aria-label="待回答的问题"></section>
         <section id="a9-approval-card" class="approval-dock" hidden aria-live="polite" aria-labelledby="a9-approval-heading">
           <div class="approval-marker" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3l9 16H3zM12 9v4M12 16h.01"/></svg></div>
-          <div class="approval-copy"><div class="approval-heading"><span>需要批准</span><strong id="a9-approval-tool">-</strong></div><h2 id="a9-approval-heading">需要你的确认</h2><p id="a9-approval-summary"></p><div id="a9-approval-selection" class="approval-selection" hidden><div class="approval-selection-head"><strong>批量整理清单勾选</strong><span id="a9-approval-selection-count" class="quiet"></span></div><ul id="a9-approval-selection-list" class="approval-selection-list"></ul><div class="approval-selection-actions"><button id="a9-approval-select-apply" type="button" class="secondary">按勾选更新审批清单</button><span id="a9-approval-selection-note" class="quiet" role="status" aria-live="polite"></span></div></div><p id="a9-approval-git" class="approval-binding"></p><p id="a9-approval-id" class="approval-id"></p><p id="a9-approval-error" class="field-error" role="alert" hidden></p></div>
+          <div class="approval-copy"><div class="approval-heading"><span>需要批准</span><strong id="a9-approval-tool">-</strong></div><h2 id="a9-approval-heading">需要你的确认</h2><p id="a9-approval-surrogate" class="approval-surrogate" hidden></p><p id="a9-approval-summary"></p><div id="a9-approval-selection" class="approval-selection" hidden><div class="approval-selection-head"><strong>批量整理清单勾选</strong><span id="a9-approval-selection-count" class="quiet"></span></div><ul id="a9-approval-selection-list" class="approval-selection-list"></ul><div class="approval-selection-actions"><button id="a9-approval-select-apply" type="button" class="secondary">按勾选更新审批清单</button><span id="a9-approval-selection-note" class="quiet" role="status" aria-live="polite"></span></div></div><p id="a9-approval-git" class="approval-binding"></p><p id="a9-approval-id" class="approval-id"></p><p id="a9-approval-error" class="field-error" role="alert" hidden></p></div>
           <div class="approval-actions"><button id="a9-approval-deny" type="button" class="danger">拒绝</button><button id="a9-approval-approve" type="button" class="primary">批准此操作</button></div>
         </section>
         <div id="live-status" class="live-status" role="status" hidden>

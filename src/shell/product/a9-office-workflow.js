@@ -52,8 +52,9 @@ const HELP = Object.freeze({
       boundaryOutputPath: '样张/边界样张.docx',
       outputRule: { directory: '批量输出', filenamePattern: '{name}_{index}.docx' },
       viewerEnvironment: 'Microsoft Word / WPS Office',
+      records: [{ name: '张三' }],
     },
-    note: '可选传 records 或 dataPath（JSON 数组路径）以在样张阶段即绑定批量数据；输出样张后须由操作员在指定查看环境确认，才允许批量输出。',
+    note: '必须同时绑定 records 或 dataPath（JSON 数组路径），且边界样张须覆盖批量数据的最大标量长度；输出样张后须由操作员在指定查看环境确认，才允许批量输出。',
   },
   batch_render_templates: {
     request: { sampleId: '已确认的 sampleId', records: [{ name: '张三' }] },

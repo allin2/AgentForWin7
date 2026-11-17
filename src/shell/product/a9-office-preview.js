@@ -52,22 +52,22 @@ function validatePreviewHtmlTarget(workspaceRoot, relativePath) {
 }
 
 function createRestrictedHtmlPreviewManager({ BrowserWindow, session, allowTestScriptEval = false } = {}) {
-  const allowedUrls = new Set();
   const windows = new Set();
-  const installedSessions = new WeakSet();
+  let partitionCounter = 0;
 
-  function getPreviewSession() {
-    const ses = session.fromPartition(PREVIEW_PARTITION, { cache: false });
-    if (!installedSessions.has(ses)) {
-      installedSessions.add(ses);
-      ses.setPermissionRequestHandler((_wc, _permission, callback) => callback(false));
-      if (typeof ses.setPermissionCheckHandler === 'function') {
-        ses.setPermissionCheckHandler(() => false);
-      }
-      ses.webRequest.onBeforeRequest((details, callback) => {
-        callback({ cancel: !allowedUrls.has(details.url) });
-      });
+  function createPreviewSessionForTarget(targetUrl) {
+    partitionCounter += 1;
+    const ses = session.fromPartition(`${PREVIEW_PARTITION}-${partitionCounter}`, { cache: false });
+    ses.setPermissionRequestHandler((_wc, _permission, callback) => callback(false));
+    if (typeof ses.setPermissionCheckHandler === 'function') {
+      ses.setPermissionCheckHandler(() => false);
     }
+    ses.on('will-download', (event) => {
+      event.preventDefault();
+    });
+    ses.webRequest.onBeforeRequest((details, callback) => {
+      callback({ cancel: details.url !== targetUrl });
+    });
     return ses;
   }
 
@@ -85,8 +85,7 @@ function createRestrictedHtmlPreviewManager({ BrowserWindow, session, allowTestS
       };
     }
 
-    const ses = getPreviewSession();
-    allowedUrls.add(target.fileUrl);
+    const ses = createPreviewSessionForTarget(target.fileUrl);
 
     const previewWin = new BrowserWindow({
       width: 1080,
@@ -124,14 +123,12 @@ function createRestrictedHtmlPreviewManager({ BrowserWindow, session, allowTestS
     });
     previewWin.on('closed', () => {
       windows.delete(previewWin);
-      allowedUrls.delete(target.fileUrl);
     });
 
     try {
       await previewWin.loadFile(target.absolute);
     } catch (err) {
       windows.delete(previewWin);
-      allowedUrls.delete(target.fileUrl);
       try { if (!previewWin.isDestroyed()) previewWin.destroy(); } catch (_ignored) {}
       throw err;
     }
@@ -157,7 +154,6 @@ function createRestrictedHtmlPreviewManager({ BrowserWindow, session, allowTestS
       } catch (_ignored) { /* best-effort */ }
     }
     windows.clear();
-    allowedUrls.clear();
   }
 
   return { open, closeAll, getWindows, previewCsp: PREVIEW_CSP };

@@ -136,6 +136,22 @@ describe('A9-70 P5 real Runtime/Core/EML MIME/TextDecoder chain', () => {
       Buffer.from([0x81, 0x00]).toString('base64'),
     ].join('\r\n'), 'latin1');
     expect(() => parseEmlBuffer(badGbkEml, 'eml/bad.eml')).toThrow(expect.objectContaining({ code: 'A9_OFFICE_MAIL_ENCODING_ERROR' }));
+
+    // Non-base64/QP raw 8bit attachment must be refused so line-ending normalization cannot silently alter bytes.
+    const raw8BitAtt = Buffer.from([
+      'From: a@b.local',
+      'Subject: raw8',
+      'Content-Type: multipart/mixed; boundary="r8"',
+      '',
+      '--r8',
+      'Content-Type: application/octet-stream',
+      'Content-Disposition: attachment; filename="raw.bin"',
+      'Content-Transfer-Encoding: 8bit',
+      '',
+      'hello\r\nworld',
+      '--r8--',
+    ].join('\r\n'), 'latin1');
+    expect(() => parseEmlBuffer(raw8BitAtt, 'eml/raw8.eml')).toThrow(expect.objectContaining({ code: 'A9_OFFICE_MAIL_CTE_UNSUPPORTED' }));
   });
 
   it('Read Only exposes mail reads/plan only; Full Access reads EML, extracts safe attachments byte-for-byte, blocks scripts and undoes cleanly', async () => {

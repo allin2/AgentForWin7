@@ -119,6 +119,31 @@ describe('OfficeTemplateService P3 contract', () => {
       viewerEnvironment: 'WPS Office',
     })).rejects.toMatchObject({ code: 'TEMPLATE_MAPPING_INVALID' });
 
+    await expect(f.service.planTemplateSample(identity1, {
+      templatePath: f.tplRel,
+      templateSha256: f.tplSha,
+      mapping,
+      normalRecord,
+      boundaryRecord: { customer: '短', items: [], hasNotes: false },
+      normalOutputPath: '样张/普通.docx',
+      boundaryOutputPath: '样张/边界.docx',
+      outputRule,
+      viewerEnvironment: 'WPS Office',
+      records: [{ customer: '比边界样张更长的批量数据字段', items: [], hasNotes: false }],
+    })).rejects.toMatchObject({ code: 'TEMPLATE_BOUNDARY_UNDERSIZED' });
+
+    await expect(f.service.planTemplateSample(identity1, {
+      templatePath: f.tplRel,
+      templateSha256: f.tplSha,
+      mapping,
+      normalRecord,
+      boundaryRecord,
+      normalOutputPath: '样张/普通.docx',
+      boundaryOutputPath: '样张/边界.docx',
+      outputRule,
+      viewerEnvironment: 'WPS Office',
+    })).rejects.toMatchObject({ code: 'TEMPLATE_DATA_REQUIRED' });
+
     const records = [
       { customer: '甲公司', items: [{ title: 'A' }], hasNotes: true },
       { customer: '乙公司', items: [{ title: 'B' }, { title: 'C' }], hasNotes: false },
@@ -168,11 +193,22 @@ describe('OfficeTemplateService P3 contract', () => {
     });
     expect(confirmed.confirmedInViewer).toBe(true);
 
-    // Changing mapping, outputRule, or bound data after sample confirmation must fail.
+    // Changing mapping, outputRule, or bound data after sample confirmation must fail and require re-confirmation.
     await expect(f.service.planTemplateBatch(identity2, {
       sampleId: sampleRes.sampleId,
       outputRule: { directory: '批量输出', filenamePattern: '改名_{index}.docx' },
     })).rejects.toMatchObject({ code: 'TEMPLATE_BINDING_CHANGED' });
+    await expect(f.service.planTemplateBatch(identity2, { sampleId: sampleRes.sampleId })).rejects.toMatchObject({
+      code: 'TEMPLATE_SAMPLE_NOT_CONFIRMED',
+    });
+    await f.service.confirmTemplateSample({
+      workspaceId: identity1.workspaceId,
+      conversationId: identity1.conversationId,
+      sampleId: sampleRes.sampleId,
+      viewerEnvironment: 'WPS Office',
+      normalSampleSha256: sampleRes.normalSampleSha256!,
+      boundarySampleSha256: sampleRes.boundarySampleSha256!,
+    });
     await expect(f.service.planTemplateBatch(identity2, {
       sampleId: sampleRes.sampleId,
       records: [{ customer: '改数据', items: [], hasNotes: false }],
@@ -270,11 +306,12 @@ describe('OfficeTemplateService P3 contract', () => {
       templateSha256: f.tplSha,
       mapping: { 客户: 'customer', 行: 'rows' },
       normalRecord: { customer: '甲', rows: [{ 名称: '条目1' }] },
-      boundaryRecord: { customer: '乙', rows: [] },
+      boundaryRecord: { customer: '乙边界超长字段', rows: [] },
       normalOutputPath: '样张/s1.docx',
       boundaryOutputPath: '样张/s2.docx',
       outputRule: { directory: '输出A', filenamePattern: '{customer}_{index}.docx' },
       viewerEnvironment: 'WPS Office',
+      records: [{ customer: '第一批', rows: [{ 名称: 'A' }] }],
     });
     const sampleRes = await f.service.executeTemplateSample({ planId: samplePlan.planId, identity: identity1, approvalId: 'ui-authorized' });
     await f.service.confirmTemplateSample({

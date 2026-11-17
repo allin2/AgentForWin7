@@ -144,7 +144,7 @@ function exclusionReason(
   if (segments.some(s => /^_待清理隔离区_/.test(s))) return 'excluded_quarantine';
   const base = path.posix.basename(norm);
   if (/^~\$/.test(base) || /^\.~lock\./i.test(base)) return 'excluded_office_lock';
-  if (/^\.a9-(?:archive|batch|transfer)-/i.test(base) || /^\.office-.*\.tmp$/i.test(base) || /\.tmp-\d+-[0-9a-f]+$/i.test(base)) {
+  if (/^\.a9-(?:archive|batch|transfer|tpl|rep|mail|skl)-/i.test(base) || /^\.office-.*\.tmp$/i.test(base) || /\.tmp-\d+-[0-9a-f]+$/i.test(base)) {
     return 'excluded_temp';
   }
   return undefined;
@@ -165,7 +165,7 @@ function relativeName(value: string, output = false, allowRoot = false): string 
   }
   if (output) {
     if (segments.some(s => ['.git', '.agent_recovery'].includes(s.toLowerCase()) || /^~\$/.test(s)
-      || /^_待清理隔离区_/.test(s) || /^\.a9-(?:archive|batch|transfer)-/i.test(s))) {
+      || /^_待清理隔离区_/.test(s) || /^\.a9-(?:archive|batch|transfer|tpl|rep|mail|skl)-/i.test(s))) {
       fail('ARCHIVE_PATH_INVALID');
     }
   }
@@ -612,6 +612,7 @@ export class OfficeArchiveService {
       limitations: [
         'ZIP32_ONLY_NO_ZIP64',
         'WINDOWS_EXPLORER_NOT_VERIFIED',
+        'WIN7_EXPLORER_WITHOUT_KB2704299_MAY_GARBLE_UTF8_NAMES',
         'WINDOWS_HIDDEN_ATTRIBUTE_NOT_AVAILABLE',
         'TRUSTED_WORKSPACE_PATH_RACES_NOT_ATOMIC',
       ],

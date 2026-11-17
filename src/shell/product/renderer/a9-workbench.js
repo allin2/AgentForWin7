@@ -4123,6 +4123,7 @@
   function renderOfficeSkills(snapshot) {
     const button = el('a9-office-install-skills');
     const status = el('a9-office-skills-status');
+    const confirmBox = el('a9-office-skills-confirm');
     if (!button || !status) return;
     const skills = snapshot && Array.isArray(snapshot.builtinOfficeSkills) ? snapshot.builtinOfficeSkills : [];
     const total = skills.length;
@@ -4130,25 +4131,62 @@
     if (!snapshot || snapshot.status !== 'ready') {
       button.disabled = true;
       button.textContent = '安装内置办公技能';
+      if (confirmBox) confirmBox.hidden = true;
       if (!state.officeSkillsBusy) status.textContent = '';
       return;
     }
     if (total > 0 && installed === total) {
       button.disabled = true;
       button.textContent = `内置办公技能已安装 (${installed}/${total})`;
+      if (confirmBox) confirmBox.hidden = true;
       if (!state.officeSkillsBusy) status.textContent = '已在 .agents/skills/ 就绪；不覆盖已有技能文件。';
       return;
     }
     if (snapshot.mode !== 'full_access') {
       button.disabled = true;
       button.textContent = '安装内置办公技能';
+      if (confirmBox) confirmBox.hidden = true;
       if (!state.officeSkillsBusy) status.textContent = '需 Full Access 权限才可写入工作区技能目录。';
       return;
     }
     button.disabled = state.officeSkillsBusy || state.running;
     button.textContent = installed > 0 ? `安装剩余内置办公技能 (${installed}/${total})` : '安装内置办公技能';
+    if (confirmBox && !confirmBox.hidden && confirmBox.dataset.workspaceRoot !== String(snapshot.workspaceRoot || '')) {
+      confirmBox.hidden = true;
+      delete confirmBox.dataset.workspaceRoot;
+    }
     if (!state.officeSkillsBusy && !status.textContent) {
-      status.textContent = '将 3 份只读/套打/邮箱指南复制到 .agents/skills/（不覆盖已有文件）。';
+      status.textContent = '先预览将写入的 .agents/skills/ 目标路径再确认安装（不覆盖已有文件）。';
+    }
+  }
+
+  function openOfficeSkillsConfirm() {
+    if (state.browse && browseBlocked('安装内置办公技能')) return;
+    const snapshot = state.snapshot;
+    const box = el('a9-office-skills-confirm');
+    const list = el('a9-office-skills-targets');
+    const status = el('a9-office-skills-status');
+    if (!box || !list || !snapshot) return;
+    const pending = (snapshot.builtinOfficeSkills || []).filter(s => !s.installed);
+    if (!pending.length) return;
+    list.textContent = '';
+    pending.forEach((s) => {
+      const li = document.createElement('li');
+      li.textContent = `${s.targetPath} — ${s.description}`;
+      list.appendChild(li);
+    });
+    box.dataset.workspaceRoot = String(snapshot.workspaceRoot || '');
+    box.hidden = false;
+    if (status) status.textContent = `待确认写入 ${pending.length} 个技能文件。`;
+    const confirmBtn = el('a9-office-skills-confirm-btn');
+    if (confirmBtn && typeof confirmBtn.focus === 'function') confirmBtn.focus();
+  }
+
+  function closeOfficeSkillsConfirm() {
+    const box = el('a9-office-skills-confirm');
+    if (box) {
+      box.hidden = true;
+      delete box.dataset.workspaceRoot;
     }
   }
 
@@ -4156,9 +4194,11 @@
     if (state.browse && browseBlocked('安装内置办公技能')) return null;
     if (state.officeSkillsBusy || typeof a9.installOfficeSkills !== 'function') return null;
     const button = el('a9-office-install-skills');
+    const confirmBtn = el('a9-office-skills-confirm-btn');
     const status = el('a9-office-skills-status');
     state.officeSkillsBusy = true;
     if (button) button.disabled = true;
+    if (confirmBtn) confirmBtn.disabled = true;
     if (status) status.textContent = '正在安装内置办公技能…';
     try {
       const response = await a9.installOfficeSkills();
@@ -4166,9 +4206,10 @@
         if (status) status.textContent = errorMessage(response, '安装失败；若工作区已存在同名技能文件，已拒绝覆盖。');
         return response;
       }
+      closeOfficeSkillsConfirm();
       const count = response.result && Array.isArray(response.result.installed)
         ? response.result.installed.filter(i => i.status === 'succeeded').length : 0;
-      if (status) status.textContent = `已安装 ${count} 份内置办公技能至 .agents/skills/（可在“改动”中撤销）。`;
+      if (status) status.textContent = `已安装 ${count} 份内置办公技能至 .agents/skills/（可在“改动”中查看与撤销）。`;
       await refreshSnapshot();
       return response;
     } catch (error) {
@@ -4176,6 +4217,7 @@
       return null;
     } finally {
       state.officeSkillsBusy = false;
+      if (confirmBtn) confirmBtn.disabled = false;
       if (state.snapshot) renderOfficeSkills(state.snapshot);
     }
   }
@@ -4275,6 +4317,7 @@
   function renderApproval(snapshot) {
     const card = el('a9-approval-card');
     const pending = snapshot.pendingApproval;
+    const surrogateEl = el('a9-approval-surrogate');
     card.hidden = !pending;
     if (!pending) {
       delete card.dataset.approvalId;
@@ -4282,6 +4325,7 @@
       delete card.dataset.conversationId;
       delete card.dataset.taskId;
       delete card.dataset.turnId;
+      if (surrogateEl) { surrogateEl.hidden = true; surrogateEl.textContent = ''; }
       renderApprovalSelection(null);
       setFieldError('a9-approval-error', '');
       setApprovalBusy(false);
@@ -4295,6 +4339,13 @@
     card.dataset.turnId = pending.turnId;
     text('a9-approval-tool', pending.toolName || 'operation');
     text('a9-approval-summary', pending.summary || '高影响操作需要确认。');
+    if (surrogateEl) {
+      const isSurrogate = /"evidenceClass"\s*:\s*"SURROGATE"|\bSURROGATE\b/.test(String(pending.summary || ''));
+      surrogateEl.hidden = !isSurrogate;
+      surrogateEl.textContent = isSurrogate
+        ? '提示：此操作基于 Mock 模拟邮箱数据（SURROGATE），不代表真实邮箱连接或正式证据。'
+        : '';
+    }
     text('a9-approval-id', `approval: ${pending.approvalId}`);
     const git = pending.gitBinding;
     text('a9-approval-git', git
@@ -5882,8 +5933,14 @@
             ? (changes.files || []).filter(file => !file.undone && file.action === 'create' && /\.html?$/i.test(file.path))
             : [];
           htmlFiles.forEach((file) => {
-            button(`受限预览 HTML：${file.path}`, () => {
-              if (typeof a9.previewHtmlReport === 'function') void a9.previewHtmlReport(file.path);
+            button(`受限预览 HTML：${file.path}`, async () => {
+              if (typeof a9.previewHtmlReport !== 'function') return;
+              try {
+                const resp = await a9.previewHtmlReport(file.path);
+                if (!resp || resp.ok !== true) showGlobalError(errorMessage(resp, 'HTML 受限预览打开失败。'));
+              } catch (err) {
+                showGlobalError(errorMessage(err, 'HTML 受限预览打开失败。'));
+              }
             });
           });
           card.syncDeliveryActions = () => { diff.disabled = undo.disabled = !canAct(); };
@@ -6104,7 +6161,9 @@
     el('a9-approval-approve').addEventListener('click', () => { void decideApproval('approved'); });
     el('a9-approval-deny').addEventListener('click', () => { void decideApproval('denied'); });
     if (el('a9-approval-select-apply')) el('a9-approval-select-apply').addEventListener('click', () => { void applyOfficeSelection(); });
-    if (el('a9-office-install-skills')) el('a9-office-install-skills').addEventListener('click', () => { void installOfficeSkills(); });
+    if (el('a9-office-install-skills')) el('a9-office-install-skills').addEventListener('click', openOfficeSkillsConfirm);
+    if (el('a9-office-skills-confirm-btn')) el('a9-office-skills-confirm-btn').addEventListener('click', () => { void installOfficeSkills(); });
+    if (el('a9-office-skills-cancel-btn')) el('a9-office-skills-cancel-btn').addEventListener('click', closeOfficeSkillsConfirm);
     el('a9-git-refresh').addEventListener('click', () => { void refreshGit(); });
     el('workspace-refresh').addEventListener('click', () => { void refreshWorkspace(state.explorerPath); });
     el('changes-refresh').addEventListener('click', () => { void refreshSnapshot(); });

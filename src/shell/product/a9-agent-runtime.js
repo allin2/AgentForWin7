@@ -228,7 +228,16 @@ function createA9AgentRuntime(options) {
       close: () => (reportWorkerPort ? reportWorkerPort.close() : Promise.resolve()),
     };
     const officeMailEmlAdapter = mailModule.emlAvailable()
-      ? mailModule.createEmlDirectoryMailAdapter({ workspaceRoot })
+      ? {
+        schemaVersion: 1,
+        sourceId: 'eml',
+        kind: 'eml_directory',
+        evidenceClass: 'LOCAL_EML_EXPORT',
+        listFolders: (opts, sig) => getMailEmlAdapter().listFolders(opts, sig),
+        listMessages: (opts, sig) => getMailEmlAdapter().listMessages(opts, sig),
+        readMessage: (id, opts, sig) => getMailEmlAdapter().readMessage(id, opts, sig),
+        readAttachmentBytes: (id, attId, opts, sig) => getMailEmlAdapter().readAttachmentBytes(id, attId, opts, sig),
+      }
       : undefined;
     const service = new modules.workspace.A9WorkspaceService(workspaceRoot, {
       ...options,
@@ -343,6 +352,7 @@ function createA9AgentRuntime(options) {
   let archiveWorkerPort = null;
   let templateWorkerPort = null;
   let reportWorkerPort = null;
+  let mailEmlAdapter = null;
   const templateSampleStore = new Map();
   const officeModule = require('./a9-office-service');
   const archiveModule = require('./a9-office-archive');
@@ -350,6 +360,13 @@ function createA9AgentRuntime(options) {
   const reportModule = require('./a9-office-report');
   const previewModule = require('./a9-office-preview');
   const mailModule = require('./a9-office-mail');
+  function getMailEmlAdapter() {
+    if (!mailEmlAdapter) {
+      if (!mailModule.emlAvailable()) throw Object.assign(new Error('MAIL_EML_ADAPTER_UNAVAILABLE'), { code: 'MAIL_EML_ADAPTER_UNAVAILABLE' });
+      mailEmlAdapter = mailModule.createEmlDirectoryMailAdapter({ workspaceRoot });
+    }
+    return mailEmlAdapter;
+  }
   function getArchiveWorkerPort() {
     if (!archiveWorkerPort) {
       if (!archiveModule.yazlAvailable()) throw Object.assign(new Error('ARCHIVE_WORKER_UNAVAILABLE'), { code: 'ARCHIVE_WORKER_UNAVAILABLE' });
@@ -3743,6 +3760,7 @@ function createA9AgentRuntime(options) {
       && !(typeof archiveWorkerPort !== 'undefined' && archiveWorkerPort)
       && !(typeof templateWorkerPort !== 'undefined' && templateWorkerPort)
       && !(typeof reportWorkerPort !== 'undefined' && reportWorkerPort)
+      && !(typeof mailEmlAdapter !== 'undefined' && mailEmlAdapter)
       && !activeController && !(options.cancelPending && (currentPendingApproval || currentPendingQuestion)) && manager.getActiveCount() === 0) {
       // 保留既有无负载关闭语义：无需等待时同步释放锁，紧接着切换/重开
       // 同一工作区不会短暂误报 A9_WORKSPACE_LOCKED。
@@ -3760,6 +3778,7 @@ function createA9AgentRuntime(options) {
         typeof archiveWorkerPort !== 'undefined' && archiveWorkerPort ? Promise.resolve().then(() => archiveWorkerPort.close()) : Promise.resolve(),
         typeof templateWorkerPort !== 'undefined' && templateWorkerPort ? Promise.resolve().then(() => templateWorkerPort.close()) : Promise.resolve(),
         typeof reportWorkerPort !== 'undefined' && reportWorkerPort ? Promise.resolve().then(() => reportWorkerPort.close()) : Promise.resolve(),
+        typeof mailEmlAdapter !== 'undefined' && mailEmlAdapter ? Promise.resolve().then(() => mailEmlAdapter.close()) : Promise.resolve(),
       ]);
       // Observe rejection immediately while recovery/cancellation still owns the wait.
       officeClose.catch(() => {});
@@ -3928,18 +3947,36 @@ function createA9AgentRuntime(options) {
         throw Object.assign(new Error('A9_OFFICE_UNAVAILABLE'), { code: 'A9_OFFICE_UNAVAILABLE' });
       }
       const uiTurnId = `ui-skills-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
+      const uiTaskId = `task-${uiTurnId}`;
       const idObj = { workspaceId: shellWorkspaceKey, conversationId: a9SessionId, turnId: uiTurnId };
       const plan = await service.planInstallOfficeSkills(idObj, input.skillNames !== undefined ? { skillNames: input.skillNames } : {});
       const binding = await service.prepareInstallOfficeSkills(plan.planId, idObj);
       const approvalId = `ui-skills-apr-${crypto.randomBytes(8).toString('hex')}`;
       const result = await officeAuthority.run({ approvalId, bindingSha256: binding.bindingSha256 }, () =>
         service.executeInstallOfficeSkills({ planId: plan.planId, identity: idObj, approvalId }));
+      if ((result.installed || []).some(item => item.status === 'succeeded')) {
+        const finalStatus = result.status === 'completed' ? 'completed' : 'failed';
+        persistence.upsertTask(uiTaskId, a9SessionId, finalStatus);
+        persistence.upsertTurn(uiTurnId, uiTaskId, a9SessionId, finalStatus, {
+          turnId: uiTurnId,
+          outcome: finalStatus,
+          finalMessage: '安装内置办公技能',
+          totalSteps: 0,
+          toolCallsExecuted: 1,
+        });
+        persistence.saveCheckpoint({
+          turnId: uiTurnId,
+          sessionId: a9SessionId,
+          payload: { turnId: uiTurnId, outcome: finalStatus, verification: 'not_applicable' },
+        });
+      }
       persistence.recordToolEvent(a9SessionId, null, 'office.skills_installed', {
+        turnId: uiTurnId,
         status: result.status,
         code: result.code,
         installed: result.installed,
       });
-      return { ok: result.status === 'completed', result };
+      return { ok: result.status === 'completed', turnId: uiTurnId, result };
     }),
     resumeApproval: input => {
       if (input && input.decision === 'denied') pauseQueue();
@@ -4136,8 +4173,8 @@ function createSqliteUnavailableRuntime(reason) {
     configureShell() { throw new Error('ELECTRON_SQLITE_UNAVAILABLE'); },
     async continueTask() { return { ok: false, error: { code: 'ELECTRON_SQLITE_UNAVAILABLE' } }; },
     dismissRecovered() { return { ok: false, error: { code: 'ELECTRON_SQLITE_UNAVAILABLE' } }; },
-    selectOfficeActions() { return Promise.reject(Object.assign(new Error('ELECTRON_SQLITE_UNAVAILABLE'), { code: 'ELECTRON_SQLITE_UNAVAILABLE' })); },
-    confirmTemplateSample() { return Promise.reject(Object.assign(new Error('ELECTRON_SQLITE_UNAVAILABLE'), { code: 'ELECTRON_SQLITE_UNAVAILABLE' })); },
+    selectOfficeActions() { return { ok: false, error: { code: 'ELECTRON_SQLITE_UNAVAILABLE' } }; },
+    confirmTemplateSample() { return { ok: false, error: { code: 'ELECTRON_SQLITE_UNAVAILABLE' } }; },
     previewHtmlReport() { return { ok: false, error: { code: 'ELECTRON_SQLITE_UNAVAILABLE' } }; },
     installOfficeSkills() { return { ok: false, error: { code: 'ELECTRON_SQLITE_UNAVAILABLE' } }; },
     updateQueue() { return { ok: false, error: { code: 'A9_QUEUE_UNAVAILABLE' } }; },
@@ -4201,8 +4238,8 @@ function createDiagnosticsRuntime(outcome) {
     configureShell() { throw new Error('A9_DIAGNOSTICS_MODE'); },
     async continueTask() { return { ok: false, error: { code: 'A9_DIAGNOSTICS_MODE' } }; },
     dismissRecovered() { return { ok: false, error: { code: 'A9_DIAGNOSTICS_MODE' } }; },
-    selectOfficeActions() { return Promise.reject(Object.assign(new Error('A9_DIAGNOSTICS_MODE'), { code: 'A9_DIAGNOSTICS_MODE' })); },
-    confirmTemplateSample() { return Promise.reject(Object.assign(new Error('A9_DIAGNOSTICS_MODE'), { code: 'A9_DIAGNOSTICS_MODE' })); },
+    selectOfficeActions() { return { ok: false, error: { code: 'A9_DIAGNOSTICS_MODE' } }; },
+    confirmTemplateSample() { return { ok: false, error: { code: 'A9_DIAGNOSTICS_MODE' } }; },
     previewHtmlReport() { return { ok: false, error: { code: 'A9_DIAGNOSTICS_MODE' } }; },
     installOfficeSkills() { return { ok: false, error: { code: 'A9_DIAGNOSTICS_MODE' } }; },
     updateQueue() { return { ok: false, error: { code: 'A9_QUEUE_UNAVAILABLE' } }; },

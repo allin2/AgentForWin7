@@ -75,6 +75,7 @@ describe('OfficeMailService P5 contract', () => {
   it('rejects dangerous attachment names, scripts, traversal and overwrites; extracts safe attachments byte-for-byte with undo', async () => {
     for (const bad of [
       'run.bat', 'setup.exe', 'payload.ps1', 'macro.vbs', 'index.js', 'report.pdf.exe',
+      'doc.docm', 'sheet.xlsm', 'app.hta', 'vector.svg', 'page.html', 'disk.iso', 'snap.msc', 'scr.ws', 'link.lnk',
       '../escape.txt', 'sub/dir.txt', 'a\\b.txt', 'CON.txt', 'trailing.', 'space ', '.git',
     ]) {
       expect(classifyAttachmentFilename(bad).ok).toBe(false);

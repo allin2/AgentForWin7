@@ -53,6 +53,10 @@ describe('OfficeSkillsService P6 contract', () => {
     await expect(service.planInstallOfficeSkills({ ...identity, turnId: 'turn-2' }))
       .rejects.toMatchObject({ code: 'SKILLS_TARGET_EXISTS' });
 
+    // Diff / review reports only the 3 SKILL.md files (no transient .a9-skl-*.tmp noise).
+    const review = service.getCheckpointManager().getTurnReview(identity.turnId)!;
+    expect(review.files.map(f => f.path).sort()).toEqual(BUILTIN_OFFICE_SKILLS.map((s: any) => s.targetPath).sort());
+
     // Undo cleanly removes installed files.
     const undo = service.getCheckpointManager().undoTurn(identity.turnId);
     expect(undo.errors).toEqual([]);

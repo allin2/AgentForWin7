@@ -122,6 +122,7 @@ describe('A9-70 P6 UI, skills installer & full product closure', () => {
     expect(res.ok).toBe(true);
     expect(res.result.status).toBe('completed');
     expect(res.result.installed).toHaveLength(3);
+    expect(typeof res.turnId).toBe('string');
 
     // Core loadSkillCatalog picks up all 3 skills immediately.
     const catalog = loadSkillCatalog(f.workspaceRoot, { containsSensitiveData: () => false });
@@ -132,11 +133,21 @@ describe('A9-70 P6 UI, skills installer & full product closure', () => {
 
     const snapAfter = f.runtime.getSnapshot();
     expect(snapAfter.builtinOfficeSkills.every((s: any) => s.installed === true)).toBe(true);
+    expect(snapAfter.checkpoints.some((c: any) => c.turnId === res.turnId)).toBe(true);
 
     // Refuses overwrite on repeat call.
     const repeat = await f.ipc()({}, { schemaVersion: 9, scope, action: 'a9.office.installSkills', payload: { confirmed: true } });
     expect(repeat.ok).toBe(false);
     expect(repeat.error.code).toBe('SKILLS_TARGET_EXISTS');
+
+    // Registered UI checkpoint supports real IPC diff & undoTurn cleanly!
+    const diffRes = await f.ipc()({}, { schemaVersion: 9, scope, action: 'a9.diff.get', payload: { turnId: res.turnId } });
+    expect(diffRes.ok).toBe(true);
+    expect(diffRes.review.files).toHaveLength(3);
+    const undoRes = await f.ipc()({}, { schemaVersion: 9, scope, action: 'a9.checkpoint.undoTurn', payload: { turnId: res.turnId } });
+    expect(undoRes.ok).toBe(true);
+    expect(undoRes.outcome.errors).toEqual([]);
+    expect(f.runtime.getSnapshot().builtinOfficeSkills.every((s: any) => s.installed === false)).toBe(true);
     await f.close();
   });
 
@@ -218,16 +229,19 @@ describe('A9-70 P6 UI, skills installer & full product closure', () => {
       querySelector() { return null; }
       getClientRects() { return [{}]; }
     }
-    const idRe = /id="([^"]+)"/g;
+    const tagRe = /<([a-z0-9-]+)\b([^>]*\bid="([^"]+)"[^>]*)>/gi;
     let m: RegExpExecArray | null;
-    while ((m = idRe.exec(html)) !== null) {
-      const n = new FakeNode();
-      n.attributes.id = m[1];
-      nodes.set(m[1], n);
+    while ((m = tagRe.exec(html)) !== null) {
+      const n = new FakeNode(m[1].toLowerCase());
+      n.attributes.id = m[3];
+      if (/(?:^|\s)hidden(?:\s|=|$)/i.test(m[2])) n.hidden = true;
+      if (/(?:^|\s)disabled(?:\s|=|$)/i.test(m[2])) n.disabled = true;
+      nodes.set(m[3], n);
     }
 
     const selectOfficeActions = jest.fn(async () => ({ ok: true }));
     const confirmTemplateSample = jest.fn(async () => ({ ok: true, confirmedInViewer: true }));
+    const installOfficeSkills = jest.fn(async () => ({ ok: true, result: { status: 'completed', installed: [{ name: 'office-file-organize', status: 'succeeded' }] } }));
     let currentSnap: any = {
       schemaVersion: 1,
       status: 'ready',
@@ -246,7 +260,7 @@ describe('A9-70 P6 UI, skills installer & full product closure', () => {
         taskId: 'task-1',
         turnId: 'turn-1',
         toolName: 'batch_organize',
-        summary: 'plan summary',
+        summary: 'plan summary ("evidenceClass": "SURROGATE")',
         officeSelection: {
           schemaVersion: 1,
           planId: 'plan-1',
@@ -276,6 +290,7 @@ describe('A9-70 P6 UI, skills installer & full product closure', () => {
       queryEvents: async () => ({ ok: true, events: [], hasMore: false }),
       selectOfficeActions,
       confirmTemplateSample,
+      installOfficeSkills,
       listCheckpoints: async () => ({ ok: true, checkpoints: [], total: 0 }),
     };
 
@@ -340,5 +355,19 @@ describe('A9-70 P6 UI, skills installer & full product closure', () => {
       normalSampleSha256: '4'.repeat(64),
       boundarySampleSha256: '5'.repeat(64),
     });
+
+    // Verify SURROGATE badge displays when approval summary marks SURROGATE.
+    expect(nodes.get('a9-approval-surrogate')!.hidden).toBe(false);
+    expect(nodes.get('a9-approval-surrogate')!.textContent).toContain('SURROGATE');
+
+    // Verify built-in skills installer shows target paths first and only installs after explicit confirm click.
+    expect(nodes.get('a9-office-skills-confirm')!.hidden).toBe(true);
+    nodes.get('a9-office-install-skills')!.fire('click');
+    expect(nodes.get('a9-office-skills-confirm')!.hidden).toBe(false);
+    expect(nodes.get('a9-office-skills-targets')!.textContent).toContain('.agents/skills/office-file-organize/SKILL.md');
+    expect(installOfficeSkills).not.toHaveBeenCalled();
+    nodes.get('a9-office-skills-confirm-btn')!.fire('click');
+    await new Promise(r => setTimeout(r, 20));
+    expect(installOfficeSkills).toHaveBeenCalledTimes(1);
   });
 });

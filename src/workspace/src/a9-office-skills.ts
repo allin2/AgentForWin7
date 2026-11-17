@@ -373,11 +373,10 @@ export class OfficeSkillsService {
 
       guard = this.checkpoint.createIoGuard(stored.items.map(i => i.targetAbs)).with([() => { stored.guard.assertAnchors(); return undefined; }]);
       for (const item of stored.items) {
+        absent(item.targetAbs, guard);
         const tempAbs = path.join(path.dirname(item.targetAbs), `.a9-skl-${crypto.randomBytes(8).toString('hex')}.tmp`);
         if (tempAbs.length > OFFICE_SKILLS_LIMITS.outputPathChars) fail('SKILLS_PATH_TOO_LONG');
         const tempRel = path.relative(this.root, tempAbs).replace(/\\/g, '/');
-        await this.checkpoint.recordPreMutationAsync(turnId, item.skill.targetPath, { guard, signal });
-        await this.checkpoint.recordPreMutationAsync(turnId, tempRel, { guard, signal });
         guard.ensureDirectory(path.dirname(item.targetAbs));
         guard = guard.with([captureAnchor(path.dirname(item.targetAbs))]);
         guard.check(tempAbs);
@@ -386,12 +385,12 @@ export class OfficeSkillsService {
         let id: FileIdentity;
         try {
           id = fileIdentity(fs.fstatSync(fd));
+          temps.push({ abs: tempAbs, rel: tempRel, id, item });
           fs.writeSync(fd, bytes, 0, bytes.length, 0);
           fs.fsyncSync(fd);
         } finally {
           fs.closeSync(fd);
         }
-        temps.push({ abs: tempAbs, rel: tempRel, id, item });
       }
 
       if (signal?.aborted) {
@@ -408,6 +407,26 @@ export class OfficeSkillsService {
         let okCount = 0;
         for (let i = 0; i < temps.length; i++) {
           const t = temps[i];
+          if (signal?.aborted) {
+            code = 'SKILLS_CANCELLED';
+            status = okCount > 0 ? 'partial' : 'cancelled';
+            for (let j = i; j < installed.length; j++) installed[j].status = 'cancelled';
+            break;
+          }
+          try {
+            absent(t.item.targetAbs, guard);
+          } catch (existsErr) {
+            if (errorCode(existsErr) === 'SKILLS_TARGET_EXISTS') {
+              code = 'SKILLS_TARGET_EXISTS';
+              status = okCount > 0 ? 'partial' : 'failed';
+              break;
+            }
+            throw existsErr;
+          }
+          await this.checkpoint.recordPreMutationAsync(turnId, t.item.skill.targetPath, { guard, signal });
+          guard.assertAnchors();
+          const st = fileStat(t.abs, guard);
+          if (st.dev !== t.id.dev || st.ino !== t.id.ino) fail('SKILLS_TEMP_IDENTITY_CHANGED');
           guard.check(t.abs);
           guard.check(t.item.targetAbs);
           try {
@@ -464,10 +483,17 @@ export class OfficeSkillsService {
         try {
           guard.check(t.abs);
           const cur = fileStat(t.abs, guard);
-          if (cur.dev === t.id.dev && cur.ino === t.id.ino) fs.unlinkSync(t.abs);
-          await this.checkpoint.recordPostMutationAsync(turnId, t.rel, 'delete', { guard });
-        } catch (_ignored) {
+          if (cur.dev !== t.id.dev || cur.ino !== t.id.ino) {
+            fail('SKILLS_TEMP_IDENTITY_CHANGED');
+          }
+          fs.unlinkSync(t.abs);
+        } catch (cleanupErr) {
           recovery = 'unknown';
+          const cleanupCode = errorCode(cleanupErr);
+          if (status === 'completed') {
+            status = 'partial';
+            code = cleanupCode;
+          }
         }
       }
       this.active = false;
