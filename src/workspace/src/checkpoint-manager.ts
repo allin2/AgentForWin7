@@ -1566,7 +1566,7 @@ export class CheckpointManager {
     turnId: string,
     targetPath: string,
     action: 'create' | 'modify' | 'delete',
-    options: { guard?: IoGuard } = {},
+    options: { guard?: IoGuard; fileHash?: string; skipNewBlob?: boolean } = {},
   ): Promise<void> {
     const absPath = path.resolve(this.workspaceRoot, targetPath);
     const guard = options.guard ?? this.createIoGuard([absPath]);
@@ -1582,7 +1582,10 @@ export class CheckpointManager {
       }
     }
     guard.assertAnchors();
-    this.recordPostMutation(turnId, targetPath, action);
+    this.recordPostMutation(turnId, targetPath, action, {
+      ...(options.fileHash !== undefined ? { fileHash: options.fileHash } : {}),
+      ...(options.skipNewBlob !== undefined ? { skipNewBlob: options.skipNewBlob } : {}),
+    });
   }
 
   /**
@@ -1592,7 +1595,7 @@ export class CheckpointManager {
     turnId: string,
     targetPath: string,
     action: 'create' | 'modify' | 'delete',
-    precomputed: { directoryTreeHash?: string } = {},
+    precomputed: { directoryTreeHash?: string; fileHash?: string; skipNewBlob?: boolean } = {},
   ): void {
     this.assertNotSensitive(targetPath, 'checkpoint mutation path');
     const checkpoint = this.startTurn(turnId);
@@ -1621,14 +1624,21 @@ export class CheckpointManager {
       existing.newBlobPath = undefined;
       existing.newTreeHash = undefined;
     } else if (fs.existsSync(absPath) && fs.statSync(absPath).isFile()) {
-      const content = fs.readFileSync(absPath);
-      existing.newHash = this.hashBytes(content);
-      // New content is needed only for Diff. If it contains a known secret,
-      // retain the post-state hash for safe undo but never copy plaintext into
-      // recovery storage.
-      existing.newBlobPath = this.containsSensitiveData(content)
-        ? undefined
-        : this.storeBoundFile(content, turnId, targetPath, 'new');
+      if (precomputed.skipNewBlob === true) {
+        existing.newHash = precomputed.fileHash && /^[a-f0-9]{64}$/.test(precomputed.fileHash)
+          ? precomputed.fileHash
+          : this.hashFile(absPath);
+        existing.newBlobPath = undefined;
+      } else {
+        const content = fs.readFileSync(absPath);
+        existing.newHash = this.hashBytes(content);
+        // New content is needed only for Diff. If it contains a known secret,
+        // retain the post-state hash for safe undo but never copy plaintext into
+        // recovery storage.
+        existing.newBlobPath = this.containsSensitiveData(content)
+          ? undefined
+          : this.storeBoundFile(content, turnId, targetPath, 'new');
+      }
       existing.newTreeHash = undefined;
       existing.isDirectory = false;
       existing.newKind = 'file';

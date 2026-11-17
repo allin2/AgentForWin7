@@ -35,15 +35,30 @@ const HELP = Object.freeze({
     kinds: ['move', 'rename', 'quarantine_duplicate', 'skip_conflict'],
     note: 'quarantine_duplicate 必须指定 duplicateOf，只确认相同字节且有业务依据的副本；不按文件名自动删旧稿。' },
   batch_organize: { request: { planId: '上一步返回的 planId', selectedActionIds: ['a001'] } },
-  limits: { actions: 100, fileBytes: 16777216, planBytes: 131072, pathCharacters: 240 },
+  archive_plan: {
+    request: { sources: ['目录或文件.txt'], destination: '归档/交接包.zip', manifestPath: '归档/交接清单.md' },
+    note: 'manifestPath 可选；始终排除输出自身、临时文件、.git、恢复目录、Office 锁文件与重解析路径。首批限制 ZIP32。',
+  },
+  archive_create_zip: { request: { planId: 'archive_plan 返回的 planId' } },
+  limits: {
+    actions: 100,
+    fileBytes: 16777216,
+    planBytes: 131072,
+    pathCharacters: 240,
+    archiveMaxFiles: 2000,
+    archiveFileBytes: 67108864,
+    archiveTotalBytes: 134217728,
+    archiveFormat: 'ZIP32',
+  },
 });
 function createOfficeWorkflow({ service, identity, authority, containsSensitiveData, assertAvailable,
-  workspaceModule, transferWorkspaces, withTransferReservation }) {
+  workspaceModule, transferWorkspaces, withTransferReservation, archiveAvailable }) {
   const transfers = workspaceModule?.OfficeTransferService && transferWorkspaces && withTransferReservation
     ? new workspaceModule.OfficeTransferService(transferWorkspaces, { async consume(id, binding) {
       await authority.port.consume(id, { bindingSha256: binding.digest }); return true;
     } }) : null;
   const transferTools = transfers ? ['transfer_plan', 'transfer_reconcile', 'transfer_undo_plan', 'transfer_execute', 'transfer_undo'] : [];
+  const archiveTools = archiveAvailable && typeof service.planArchive === 'function' ? ['archive_plan', 'archive_create_zip'] : [];
   function transferIdentity(turnId) { const who = identity(turnId); return { conversationId: who.conversationId, turnId: who.turnId }; }
   function transferBinding(input, turnId) { return transfers.getApprovalBinding(input.planId, transferIdentity(turnId)); }
   function transferSummary(binding) {
@@ -51,6 +66,29 @@ function createOfficeWorkflow({ service, identity, authority, containsSensitiveD
       sourceWorkspace: binding.sourceRoot.real, source: binding.source.relativePath,
       targetWorkspace: binding.targetRoot.real, destination: binding.target.relativePath,
       sourceSha256: binding.sourceSha256, identity: binding.identity }, null, 2);
+  }
+  function archiveSummary(binding) {
+    const header = {
+      workspace: binding.workspaceRoot,
+      identity: binding.identity,
+      planId: binding.planId,
+      destination: binding.destination,
+      ...(binding.manifestPath ? { manifestPath: binding.manifestPath } : {}),
+      zipFormat: binding.zipFormat,
+      entryCount: binding.entryCount,
+      totalSourceBytes: binding.totalSourceBytes,
+    };
+    const entries = [];
+    for (const entry of binding.entries) {
+      const candidate = JSON.stringify({ ...header, entries: [...entries, entry], omittedEntries: binding.entries.length - entries.length - 1 }, null, 2);
+      if (Buffer.byteLength(candidate, 'utf8') > 64 * 1024) break;
+      entries.push(entry);
+    }
+    return JSON.stringify({
+      ...header,
+      entries,
+      ...(entries.length < binding.entries.length ? { omittedEntries: binding.entries.length - entries.length } : {}),
+    }, null, 2);
   }
   function check() { assertAvailable?.(); }
   function request(name, args) {
@@ -71,7 +109,23 @@ function createOfficeWorkflow({ service, identity, authority, containsSensitiveD
         if ([action.source, action.destination, action.duplicateOf].some(p => p !== undefined && containsSensitiveData?.(p))) fail('A9_OFFICE_SENSITIVE_PATH');
       }
     } else if (name === 'batch_organize') object(input, ['planId', 'selectedActionIds'], ['planId', 'selectedActionIds']);
-    else fail('A9_OFFICE_UNAVAILABLE');
+    else if (name === 'archive_plan' && archiveTools.length) {
+      object(input, ['sources', 'destination', 'manifestPath', 'maxFiles', 'maxFileBytes', 'maxTotalBytes'], ['sources', 'destination']);
+      if (!Array.isArray(input.sources) || !input.sources.length || input.sources.length > 100
+        || typeof input.destination !== 'string'
+        || (input.manifestPath !== undefined && typeof input.manifestPath !== 'string')) {
+        fail('A9_OFFICE_REQUEST_INVALID');
+      }
+      for (const s of input.sources) {
+        if (typeof s !== 'string' || containsSensitiveData?.(s)) fail('A9_OFFICE_SENSITIVE_PATH');
+      }
+      if (containsSensitiveData?.(input.destination) || (input.manifestPath !== undefined && containsSensitiveData?.(input.manifestPath))) {
+        fail('A9_OFFICE_SENSITIVE_PATH');
+      }
+    } else if (name === 'archive_create_zip' && archiveTools.length) {
+      object(input, ['planId'], ['planId']);
+      if (typeof input.planId !== 'string' || !input.planId || input.planId.length > 128) fail('A9_OFFICE_REQUEST_INVALID');
+    } else fail('A9_OFFICE_UNAVAILABLE');
     if (input.path !== undefined && containsSensitiveData?.(input.path)) fail('A9_OFFICE_SENSITIVE_PATH');
     return input;
   }
@@ -79,7 +133,7 @@ function createOfficeWorkflow({ service, identity, authority, containsSensitiveD
     return { planId: input.planId, selectedActionIds: input.selectedActionIds, identity: identity(turnId), signal };
   }
   return {
-    supportedTools: ['office_workflow_help', 'workspace_scan_metadata', 'batch_organize_plan', 'batch_organize', ...transferTools],
+    supportedTools: ['office_workflow_help', 'workspace_scan_metadata', 'batch_organize_plan', 'batch_organize', ...transferTools, ...archiveTools],
     async read(name, args, turnId, signal) {
       const input = request(name, args);
       if (name === 'office_workflow_help') return { ...HELP, ...(transfers ? {
@@ -106,6 +160,7 @@ function createOfficeWorkflow({ service, identity, authority, containsSensitiveD
         return service.scanMetadata(path, { ...options, signal });
       }
       if (name === 'batch_organize_plan') return service.planOrganize(identity(turnId), input.actions, signal);
+      if (name === 'archive_plan') return service.planArchive(identity(turnId), input, signal);
       fail('A9_OFFICE_UNAVAILABLE');
     },
     async prepare(name, args, turnId) {
@@ -115,6 +170,11 @@ function createOfficeWorkflow({ service, identity, authority, containsSensitiveD
         if (binding.source.workspaceId !== identity(turnId).workspaceId ||
             binding.purpose !== (name === 'transfer_execute' ? 'move' : 'undo')) fail('A9_OFFICE_SCOPE_STALE');
         return { bindingSha256: binding.digest, summary: transferSummary(binding) };
+      }
+      if (name === 'archive_create_zip') {
+        const binding = await service.prepareArchive(input.planId, identity(turnId));
+        check();
+        return { bindingSha256: binding.bindingSha256, summary: archiveSummary(binding) };
       }
       if (name !== 'batch_organize') fail('A9_OFFICE_UNAVAILABLE');
       const binding = await service.prepareOrganize(executionOptions(input, turnId));
@@ -135,6 +195,17 @@ function createOfficeWorkflow({ service, identity, authority, containsSensitiveD
           name === 'transfer_execute'
             ? transfers.execute(input.planId, transferIdentity(turnId), grant.approvalId, signal)
             : transfers.executeUndo(input.planId, transferIdentity(turnId), grant.approvalId, signal)));
+      }
+      if (name === 'archive_create_zip') {
+        const fresh = await service.prepareArchive(input.planId, identity(turnId), signal);
+        check();
+        if (fresh.bindingSha256 !== grant?.bindingSha256) fail('A9_OFFICE_APPROVAL_STALE');
+        return authority.run(grant, () => service.executeArchive({
+          planId: input.planId,
+          identity: identity(turnId),
+          approvalId: grant.approvalId,
+          signal,
+        }));
       }
       if (name !== 'batch_organize') fail('A9_OFFICE_UNAVAILABLE');
       const fresh = await service.prepareOrganize(executionOptions(input, turnId, signal));

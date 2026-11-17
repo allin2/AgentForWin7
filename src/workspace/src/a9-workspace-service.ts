@@ -41,6 +41,11 @@ import { copyTreeAsync, removeTreeAsync } from './async-tree';
 import { IoGuard, captureNearestAnchor, identityChanged, samePath } from './directory-identity';
 import { OfficeBatchService, OfficeBatchApprovalPort, OfficeBatchIdentity, OfficeScanOptions,
   OfficeOrganizeActionInput, OfficeBatchExecuteOptions, OfficeMetadataScan, OfficeOrganizePlan, OfficeBatchResult } from './a9-office-batch';
+import {
+  OfficeArchiveService, OfficeArchiveApprovalPort, OfficeZipWorkerPort,
+  OfficeArchivePlanInput, OfficeArchivePlan, OfficeArchiveApprovalBinding,
+  OfficeArchiveExecuteOptions, OfficeArchiveResult,
+} from './a9-office-archive';
 
 export interface A9ListResult {
   path: string;
@@ -226,6 +231,7 @@ export class A9WorkspaceService {
   private readonly ignoreFilter: IgnoreFilter;
   private readonly checkpointManager: CheckpointManager;
   private readonly officeBatch: OfficeBatchService;
+  private readonly officeArchive: OfficeArchiveService;
   private readonly baselines = new Map<string, BaselineFact>();
   private readonly containsSensitiveData: (value: string | Buffer) => boolean;
   private readonly containsSensitiveFeedbackData: (value: string | Buffer) => boolean;
@@ -254,7 +260,9 @@ export class A9WorkspaceService {
     workspaceRoot: string,
     options: { containsSensitiveData?: (value: string | Buffer) => boolean;
       containsSensitiveFeedbackData?: (value: string | Buffer) => boolean;
-      officeBatchApproval?: OfficeBatchApprovalPort } = {},
+      officeBatchApproval?: OfficeBatchApprovalPort;
+      officeArchiveApproval?: OfficeArchiveApprovalPort;
+      officeArchiveWorker?: OfficeZipWorkerPort } = {},
   ) {
     // 规范化工作区根本身（macOS /var → /private/var、junction 等），
     // 否则 realpathSync 的文件会得到跨前缀的 ../../ 相对路径。
@@ -303,6 +311,13 @@ export class A9WorkspaceService {
     this.ignoreFilter = createWorkspaceIgnoreFilter(canonicalRoot);
     this.checkpointManager = new CheckpointManager(canonicalRoot, undefined, this.containsSensitiveData);
     this.officeBatch = new OfficeBatchService(canonicalRoot, this.checkpointManager, value => this.resolvePath(value), options.officeBatchApproval);
+    this.officeArchive = new OfficeArchiveService(
+      canonicalRoot,
+      this.checkpointManager,
+      value => this.resolvePath(value),
+      options.officeArchiveApproval ?? (options.officeBatchApproval as unknown as OfficeArchiveApprovalPort | undefined),
+      options.officeArchiveWorker,
+    );
     if (fs.existsSync(this.checkpointManager.getRecoveryRoot())) {
       this.checkpointManager.ensureRecoveryIgnore();
     }
@@ -329,6 +344,19 @@ export class A9WorkspaceService {
 
   prepareOrganize(options: Omit<OfficeBatchExecuteOptions, 'approvalId'>): ReturnType<OfficeBatchService['prepare']> {
     return this.officeBatch.prepare(options);
+  }
+
+  /** A9-70 P2: read-only ZIP32 source manifest & output plan; no writes. */
+  planArchive(identity: OfficeBatchIdentity, input: OfficeArchivePlanInput, signal?: AbortSignal): Promise<OfficeArchivePlan> {
+    return this.officeArchive.plan(identity, input, signal);
+  }
+
+  prepareArchive(planId: string, identity: OfficeBatchIdentity, signal?: AbortSignal): Promise<OfficeArchiveApprovalBinding> {
+    return this.officeArchive.prepare(planId, identity, signal);
+  }
+
+  executeArchive(options: OfficeArchiveExecuteOptions): Promise<OfficeArchiveResult> {
+    return this.officeArchive.execute(options);
   }
 
   // -------------------------------------------------------------------------

@@ -213,7 +213,15 @@ function createA9AgentRuntime(options) {
     if (!validation.valid) throw Object.assign(new Error(validation.error), { code: validation.error.split(':')[0] });
   }
   function guardedWorkspaceService(options) {
-    const service = new modules.workspace.A9WorkspaceService(workspaceRoot, { ...options, officeBatchApproval: officeAuthority.port });
+    const officeArchiveWorker = {
+      createZip: (input, signal) => getArchiveWorkerPort().createZip(input, signal),
+      close: () => (archiveWorkerPort ? archiveWorkerPort.close() : Promise.resolve()),
+    };
+    const service = new modules.workspace.A9WorkspaceService(workspaceRoot, {
+      ...options,
+      officeBatchApproval: officeAuthority.port,
+      ...(archiveModule.yazlAvailable() ? { officeArchiveWorker } : {}),
+    });
     return new Proxy(service, { get(target, property) {
       const value = target[property];
       if (typeof value !== 'function') return value;
@@ -316,7 +324,16 @@ function createA9AgentRuntime(options) {
   let loop = null;
   let imageService = null;
   let officeService = null;
+  let archiveWorkerPort = null;
   const officeModule = require('./a9-office-service');
+  const archiveModule = require('./a9-office-archive');
+  function getArchiveWorkerPort() {
+    if (!archiveWorkerPort) {
+      if (!archiveModule.yazlAvailable()) throw Object.assign(new Error('ARCHIVE_WORKER_UNAVAILABLE'), { code: 'ARCHIVE_WORKER_UNAVAILABLE' });
+      archiveWorkerPort = archiveModule.createArchiveWorkerPort(config.archiveWorkerOptions);
+    }
+    return archiveWorkerPort;
+  }
   function getOfficeService() {
     if (!officeService) officeService = officeModule.createOfficeService({
       workspaceRoot, workspace: modules.workspace, workspaceService: {
@@ -1706,6 +1723,7 @@ function createA9AgentRuntime(options) {
           containsSensitiveData: containsSensitiveProjectInstructionData, assertAvailable,
           workspaceModule: modules.workspace, transferWorkspaces: config.transferWorkspaces,
           withTransferReservation: config.withTransferReservation,
+          archiveAvailable: archiveModule.yazlAvailable(),
         }) } : {}),
         runner: runnerAdapter,
         managedProcesses: {
@@ -3671,7 +3689,7 @@ function createA9AgentRuntime(options) {
         workspaceLockReleased = true;
       }
     };
-    if (!checkpointRecoveryPending && pendingStateOperations.size === 0 && !officeService
+    if (!checkpointRecoveryPending && pendingStateOperations.size === 0 && !officeService && !archiveWorkerPort
       && !activeController && !(options.cancelPending && (currentPendingApproval || currentPendingQuestion)) && manager.getActiveCount() === 0) {
       // 保留既有无负载关闭语义：无需等待时同步释放锁，紧接着切换/重开
       // 同一工作区不会短暂误报 A9_WORKSPACE_LOCKED。
@@ -3684,7 +3702,10 @@ function createA9AgentRuntime(options) {
       // reconciliation. Close/rebind cannot release that ownership early.
       // Defer peripheral invocation until the shared promise is cached.
       await Promise.resolve();
-      const officeClose = officeService ? Promise.resolve().then(() => officeService.close()) : Promise.resolve();
+      const officeClose = Promise.all([
+        officeService ? Promise.resolve().then(() => officeService.close()) : Promise.resolve(),
+        archiveWorkerPort ? Promise.resolve().then(() => archiveWorkerPort.close()) : Promise.resolve(),
+      ]);
       // Observe rejection immediately while recovery/cancellation still owns the wait.
       officeClose.catch(() => {});
       await shutdownWait('checkpoint_recovery', () => checkpointRecoveryReady);
