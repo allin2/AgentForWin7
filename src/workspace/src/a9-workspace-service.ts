@@ -52,6 +52,11 @@ import {
   TemplateSampleResult, TemplateSampleConfirmation, TemplateBatchPlanInput,
   TemplateBatchPlan, TemplateBatchResult, TemplateApprovalBinding,
 } from './a9-office-template';
+import {
+  OfficeReportService, OfficeReportWorkerPort, OfficeReportApprovalPort,
+  PresentationCreateInput, PresentationPlan, PresentationResult,
+  HtmlReportCreateInput, HtmlReportPlan, HtmlReportResult, ReportApprovalBinding,
+} from './a9-office-report';
 
 export interface A9ListResult {
   path: string;
@@ -239,6 +244,7 @@ export class A9WorkspaceService {
   private readonly officeBatch: OfficeBatchService;
   private readonly officeArchive: OfficeArchiveService;
   private readonly officeTemplate: OfficeTemplateService;
+  private readonly officeReport: OfficeReportService;
   private readonly baselines = new Map<string, BaselineFact>();
   private readonly containsSensitiveData: (value: string | Buffer) => boolean;
   private readonly containsSensitiveFeedbackData: (value: string | Buffer) => boolean;
@@ -272,7 +278,9 @@ export class A9WorkspaceService {
       officeArchiveWorker?: OfficeZipWorkerPort;
       officeTemplateApproval?: OfficeTemplateApprovalPort;
       officeTemplateWorker?: OfficeTemplateWorkerPort;
-      officeTemplateSamples?: Map<string, any> } = {},
+      officeTemplateSamples?: Map<string, any>;
+      officeReportApproval?: OfficeReportApprovalPort;
+      officeReportWorker?: OfficeReportWorkerPort } = {},
   ) {
     // 规范化工作区根本身（macOS /var → /private/var、junction 等），
     // 否则 realpathSync 的文件会得到跨前缀的 ../../ 相对路径。
@@ -335,6 +343,13 @@ export class A9WorkspaceService {
       options.officeTemplateApproval ?? (options.officeBatchApproval as unknown as OfficeTemplateApprovalPort | undefined),
       options.officeTemplateWorker,
       options.officeTemplateSamples,
+    );
+    this.officeReport = new OfficeReportService(
+      canonicalRoot,
+      this.checkpointManager,
+      value => this.resolvePath(value),
+      options.officeReportApproval ?? (options.officeBatchApproval as unknown as OfficeReportApprovalPort | undefined),
+      options.officeReportWorker,
     );
     if (fs.existsSync(this.checkpointManager.getRecoveryRoot())) {
       this.checkpointManager.ensureRecoveryIgnore();
@@ -412,6 +427,31 @@ export class A9WorkspaceService {
 
   executeTemplateBatch(options: { planId: string; identity: OfficeBatchIdentity; approvalId: string; signal?: AbortSignal }): Promise<TemplateBatchResult> {
     return this.officeTemplate.executeBatch(options);
+  }
+
+  /** A9-70 P4: PPTX structured layouts / template fill and escaped offline HTML dashboard. */
+  planPresentation(identity: OfficeBatchIdentity, input: PresentationCreateInput, signal?: AbortSignal): Promise<PresentationPlan> {
+    return this.officeReport.planPresentation(identity, input, signal);
+  }
+
+  preparePresentation(planId: string, identity: OfficeBatchIdentity, signal?: AbortSignal): Promise<ReportApprovalBinding> {
+    return this.officeReport.preparePresentation(planId, identity, signal);
+  }
+
+  executePresentation(options: { planId: string; identity: OfficeBatchIdentity; approvalId: string; signal?: AbortSignal }): Promise<PresentationResult> {
+    return this.officeReport.executePresentation(options);
+  }
+
+  planHtmlReport(identity: OfficeBatchIdentity, input: HtmlReportCreateInput, signal?: AbortSignal): Promise<HtmlReportPlan> {
+    return this.officeReport.planHtmlReport(identity, input, signal);
+  }
+
+  prepareHtmlReport(planId: string, identity: OfficeBatchIdentity, signal?: AbortSignal): Promise<ReportApprovalBinding> {
+    return this.officeReport.prepareHtmlReport(planId, identity, signal);
+  }
+
+  executeHtmlReport(options: { planId: string; identity: OfficeBatchIdentity; approvalId: string; signal?: AbortSignal }): Promise<HtmlReportResult> {
+    return this.officeReport.executeHtmlReport(options);
   }
 
   // -------------------------------------------------------------------------

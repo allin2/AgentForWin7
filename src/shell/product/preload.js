@@ -134,6 +134,7 @@ function createA9Api(scope) {
       approvalId, bindingDigest, selectedActionIds, conversationId, taskId, turnId,
     }),
     confirmTemplateSample: (values) => boundRequest('a9.template.confirmSample', values),
+    previewHtmlReport: (targetPath) => boundRequest('a9.office.previewHtml', { path: targetPath }),
     resumeApproval: (approvalId, decision, bindingDigest, conversationId, taskId, turnId) => boundRequest('a9.turn.resumeApproval', {
       approvalId, decision, bindingDigest, conversationId, taskId, turnId,
     }),

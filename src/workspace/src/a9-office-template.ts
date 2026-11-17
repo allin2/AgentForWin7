@@ -651,9 +651,13 @@ export class OfficeTemplateService {
     if (!this.worker) fail('TEMPLATE_WORKER_UNAVAILABLE');
     cancelled(signal);
     const rel = relativeName(templatePath, false);
-    if (!/\.docx$/i.test(rel)) fail('A9_OFFICE_FORMAT_UNSUPPORTED');
+    const format: 'docx' | 'pptx' = /\.pptx$/i.test(rel)
+      ? 'pptx'
+      : /\.docx$/i.test(rel)
+        ? 'docx'
+        : fail('A9_OFFICE_FORMAT_UNSUPPORTED');
     const file = await readOfficeFile(this.root, rel, signal);
-    const inspected = await this.worker.inspectTemplate(file.buffer, 'docx', signal);
+    const inspected = await this.worker.inspectTemplate(file.buffer, format, signal);
     return {
       ...inspected,
       path: file.path,

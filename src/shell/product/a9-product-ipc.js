@@ -30,6 +30,7 @@ const A9_ACTIONS = Object.freeze({
   TURN_RESUME_APPROVAL: 'a9.turn.resumeApproval',
   OFFICE_SELECT: 'a9.approval.select',
   TEMPLATE_CONFIRM_SAMPLE: 'a9.template.confirmSample',
+  OFFICE_PREVIEW_HTML: 'a9.office.previewHtml',
   QUESTION_REPLY: 'a9.question.reply',
   TURN_STOP: 'a9.turn.stop',
   MANAGED_DISMISS_RECOVERED: 'a9.managed.dismissRecovered',
@@ -397,6 +398,13 @@ function createA9ProductRequestHandler(options) {
             throw Object.assign(new Error('A9_PAYLOAD_INVALID: invalid template sample confirmation'), { code: 'A9_PAYLOAD_INVALID' });
           }
           return await runtime.confirmTemplateSample(payload);
+        }
+        case A9_ACTIONS.OFFICE_PREVIEW_HTML: {
+          exactObject(payload, ['path'], 'A9_PAYLOAD_INVALID');
+          if (typeof payload.path !== 'string' || !payload.path || payload.path.length > 4096) {
+            throw Object.assign(new Error('A9_PAYLOAD_INVALID: invalid html preview path'), { code: 'A9_PAYLOAD_INVALID' });
+          }
+          return await runtime.previewHtmlReport(payload);
         }
         case A9_ACTIONS.TURN_RESUME_APPROVAL: {
           exactObject(payload, ['approvalId', 'decision', 'bindingDigest', 'conversationId', 'taskId', 'turnId'], 'A9_PAYLOAD_INVALID');

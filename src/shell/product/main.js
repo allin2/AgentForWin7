@@ -39,6 +39,7 @@ const { createA9WorkspaceRegistry } = require('./a9-workspace-registry');
 const { loadA9PackageRuntime } = require('./a9-package-runtime');
 const { createActiveWorkspaceStore } = require('./active-workspace-store');
 const { installSessionPolicy, installWindowPolicy } = require('./security-policy');
+const { createRestrictedHtmlPreviewManager } = require('./a9-office-preview');
 const { createDesktopHost } = require('./desktop-host');
 const { createDpapiCredentialVault } = require('./credential-vault');
 const { createProductRunner } = require('./runner-runtime');
@@ -962,6 +963,7 @@ function createMainWindow() {
     })();
   });
   window.on('closed', () => {
+    a9HtmlPreviewManager.closeAll();
     mainWindow = null;
   });
   window.loadFile(rendererEntry).catch((error) => {
@@ -1029,6 +1031,7 @@ registerDiagnosticIpc('product:a8-request', withStartupBarrier(createA8ProductRe
 })));
 
 // A9 Trusted Agent Runtime（A9-06）：Renderer 只经此窄 IPC 访问。
+const a9HtmlPreviewManager = createRestrictedHtmlPreviewManager({ BrowserWindow, session });
 const a9Workspaces = createA9WorkspaceRegistry({
   createRuntime: createWorkspaceRuntime,
   getDocumentsPath: () => app.getPath('documents'),
@@ -1071,6 +1074,7 @@ function workspaceRuntimeOptions() {
     ownerId: `main-${process.pid}`,
     shutdownStageRecorder: stage => flightRecorder.begin('shutdown-stage', { stage }),
     nativeImage,
+    openHtmlPreview: input => a9HtmlPreviewManager.open(input),
     selectShellExecutable: async (kind) => {
       const result = await dialog.showOpenDialog(mainWindow, {
         title: `选择 ${kind} Shell 可执行文件`,
@@ -1204,6 +1208,7 @@ function beginA9ShutdownBeforeQuit(event) {
   a9ShutdownInFlight = (async () => {
     try {
       if (!await executeA9ShutdownChoice('quit') || a9ShutdownComplete) { a9ShutdownInFlight = null; return; }
+      a9HtmlPreviewManager.closeAll();
       a9ShutdownComplete = true;
       app.quit();
     } catch (error) {

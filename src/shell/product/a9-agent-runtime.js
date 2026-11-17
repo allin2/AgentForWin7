@@ -222,11 +222,17 @@ function createA9AgentRuntime(options) {
       renderBatch: (input, signal) => getTemplateWorkerPort().renderBatch(input, signal),
       close: () => (templateWorkerPort ? templateWorkerPort.close() : Promise.resolve()),
     };
+    const officeReportWorker = {
+      createLayoutsPresentation: (input, signal) => getReportWorkerPort().createLayoutsPresentation(input, signal),
+      fillTemplatePresentation: (input, signal) => getReportWorkerPort().fillTemplatePresentation(input, signal),
+      close: () => (reportWorkerPort ? reportWorkerPort.close() : Promise.resolve()),
+    };
     const service = new modules.workspace.A9WorkspaceService(workspaceRoot, {
       ...options,
       officeBatchApproval: officeAuthority.port,
       ...(archiveModule.yazlAvailable() ? { officeArchiveWorker } : {}),
       ...(templateModule.docxtemplaterAvailable() ? { officeTemplateWorker, officeTemplateSamples: templateSampleStore } : {}),
+      ...(reportModule.pptxAvailable() ? { officeReportWorker } : {}),
     });
     return new Proxy(service, { get(target, property) {
       const value = target[property];
@@ -332,10 +338,13 @@ function createA9AgentRuntime(options) {
   let officeService = null;
   let archiveWorkerPort = null;
   let templateWorkerPort = null;
+  let reportWorkerPort = null;
   const templateSampleStore = new Map();
   const officeModule = require('./a9-office-service');
   const archiveModule = require('./a9-office-archive');
   const templateModule = require('./a9-office-template');
+  const reportModule = require('./a9-office-report');
+  const previewModule = require('./a9-office-preview');
   function getArchiveWorkerPort() {
     if (!archiveWorkerPort) {
       if (!archiveModule.yazlAvailable()) throw Object.assign(new Error('ARCHIVE_WORKER_UNAVAILABLE'), { code: 'ARCHIVE_WORKER_UNAVAILABLE' });
@@ -349,6 +358,13 @@ function createA9AgentRuntime(options) {
       templateWorkerPort = templateModule.createTemplateWorkerPort(config.templateWorkerOptions);
     }
     return templateWorkerPort;
+  }
+  function getReportWorkerPort() {
+    if (!reportWorkerPort) {
+      if (!reportModule.pptxAvailable()) throw Object.assign(new Error('REPORT_WORKER_UNAVAILABLE'), { code: 'REPORT_WORKER_UNAVAILABLE' });
+      reportWorkerPort = reportModule.createReportWorkerPort(config.reportWorkerOptions);
+    }
+    return reportWorkerPort;
   }
   function getOfficeService() {
     if (!officeService) officeService = officeModule.createOfficeService({
@@ -1741,6 +1757,7 @@ function createA9AgentRuntime(options) {
           withTransferReservation: config.withTransferReservation,
           archiveAvailable: archiveModule.yazlAvailable(),
           templateAvailable: templateModule.docxtemplaterAvailable(),
+          reportAvailable: reportModule.pptxAvailable(),
         }) } : {}),
         runner: runnerAdapter,
         managedProcesses: {
@@ -3709,7 +3726,7 @@ function createA9AgentRuntime(options) {
         workspaceLockReleased = true;
       }
     };
-    if (!checkpointRecoveryPending && pendingStateOperations.size === 0 && !officeService && !archiveWorkerPort && !templateWorkerPort
+    if (!checkpointRecoveryPending && pendingStateOperations.size === 0 && !officeService && !archiveWorkerPort && !templateWorkerPort && !reportWorkerPort
       && !activeController && !(options.cancelPending && (currentPendingApproval || currentPendingQuestion)) && manager.getActiveCount() === 0) {
       // 保留既有无负载关闭语义：无需等待时同步释放锁，紧接着切换/重开
       // 同一工作区不会短暂误报 A9_WORKSPACE_LOCKED。
@@ -3726,6 +3743,7 @@ function createA9AgentRuntime(options) {
         officeService ? Promise.resolve().then(() => officeService.close()) : Promise.resolve(),
         archiveWorkerPort ? Promise.resolve().then(() => archiveWorkerPort.close()) : Promise.resolve(),
         templateWorkerPort ? Promise.resolve().then(() => templateWorkerPort.close()) : Promise.resolve(),
+        reportWorkerPort ? Promise.resolve().then(() => reportWorkerPort.close()) : Promise.resolve(),
       ]);
       // Observe rejection immediately while recovery/cancellation still owns the wait.
       officeClose.catch(() => {});
@@ -3864,6 +3882,22 @@ function createA9AgentRuntime(options) {
         boundarySampleSha256: res.boundarySampleSha256,
       });
       return res;
+    }),
+    previewHtmlReport: input => trackAsyncStateOperation(async () => {
+      assertOperationScope(a9SessionId);
+      const target = previewModule.validatePreviewHtmlTarget(workspaceRoot, input && input.path);
+      if (typeof config.openHtmlPreview === 'function') {
+        return config.openHtmlPreview({ workspaceRoot, relativePath: target.relative });
+      }
+      return {
+        ok: true,
+        previewed: target.relative,
+        bytes: target.bytes,
+        chromiumVersion: process.versions.chrome || null,
+        restricted: true,
+        csp: previewModule.PREVIEW_CSP,
+        windowOpened: false,
+      };
     }),
     resumeApproval: input => {
       if (input && input.decision === 'denied') pauseQueue();
@@ -4060,6 +4094,9 @@ function createSqliteUnavailableRuntime(reason) {
     configureShell() { throw new Error('ELECTRON_SQLITE_UNAVAILABLE'); },
     async continueTask() { return { ok: false, error: { code: 'ELECTRON_SQLITE_UNAVAILABLE' } }; },
     dismissRecovered() { return { ok: false, error: { code: 'ELECTRON_SQLITE_UNAVAILABLE' } }; },
+    selectOfficeActions() { return Promise.reject(Object.assign(new Error('ELECTRON_SQLITE_UNAVAILABLE'), { code: 'ELECTRON_SQLITE_UNAVAILABLE' })); },
+    confirmTemplateSample() { return Promise.reject(Object.assign(new Error('ELECTRON_SQLITE_UNAVAILABLE'), { code: 'ELECTRON_SQLITE_UNAVAILABLE' })); },
+    previewHtmlReport() { return { ok: false, error: { code: 'ELECTRON_SQLITE_UNAVAILABLE' } }; },
     updateQueue() { return { ok: false, error: { code: 'A9_QUEUE_UNAVAILABLE' } }; },
     async submitTurn() { return { ok: false, error: { code: 'ELECTRON_SQLITE_UNAVAILABLE', message: 'Electron-ABI better-sqlite3 预检失败，A9 持久化不可用。' } }; },
     async resumeApproval() { return { ok: false, error: { code: 'ELECTRON_SQLITE_UNAVAILABLE' } }; },
@@ -4076,6 +4113,7 @@ function createSqliteUnavailableRuntime(reason) {
     visitConversation() { return { ok: false, error: { code: 'ELECTRON_SQLITE_UNAVAILABLE' } }; },
     canLeaveWorkspace() { return { allowed: true, reason: null }; },
     getWorkdirInfo() { return {}; },
+    getTransferWorkspace() { throw Object.assign(new Error('ELECTRON_SQLITE_UNAVAILABLE'), { code: 'ELECTRON_SQLITE_UNAVAILABLE' }); },
     getWorkdirConversationId() { return null; },
     ensureWorkdir() { throw Object.assign(new Error('ELECTRON_SQLITE_UNAVAILABLE'), { code: 'ELECTRON_SQLITE_UNAVAILABLE' }); },
     listWorkspaceDirectory() { return { ok: false, error: { code: 'ELECTRON_SQLITE_UNAVAILABLE' } }; },
@@ -4120,6 +4158,9 @@ function createDiagnosticsRuntime(outcome) {
     configureShell() { throw new Error('A9_DIAGNOSTICS_MODE'); },
     async continueTask() { return { ok: false, error: { code: 'A9_DIAGNOSTICS_MODE' } }; },
     dismissRecovered() { return { ok: false, error: { code: 'A9_DIAGNOSTICS_MODE' } }; },
+    selectOfficeActions() { return Promise.reject(Object.assign(new Error('A9_DIAGNOSTICS_MODE'), { code: 'A9_DIAGNOSTICS_MODE' })); },
+    confirmTemplateSample() { return Promise.reject(Object.assign(new Error('A9_DIAGNOSTICS_MODE'), { code: 'A9_DIAGNOSTICS_MODE' })); },
+    previewHtmlReport() { return { ok: false, error: { code: 'A9_DIAGNOSTICS_MODE' } }; },
     updateQueue() { return { ok: false, error: { code: 'A9_QUEUE_UNAVAILABLE' } }; },
     async submitTurn() { return { ok: false, error: { code: 'A9_DIAGNOSTICS_MODE', message: '数据库受限诊断模式，禁止执行任务。' } }; },
     async resumeApproval() { return { ok: false, error: { code: 'A9_DIAGNOSTICS_MODE' } }; },
@@ -4136,6 +4177,7 @@ function createDiagnosticsRuntime(outcome) {
     visitConversation() { return { ok: false, error: { code: 'A9_DIAGNOSTICS_MODE' } }; },
     canLeaveWorkspace() { return { allowed: true, reason: null }; },
     getWorkdirInfo() { return {}; },
+    getTransferWorkspace() { throw Object.assign(new Error('A9_DIAGNOSTICS_MODE'), { code: 'A9_DIAGNOSTICS_MODE' }); },
     getWorkdirConversationId() { return null; },
     ensureWorkdir() { throw Object.assign(new Error('A9_DIAGNOSTICS_MODE'), { code: 'A9_DIAGNOSTICS_MODE' }); },
     listWorkspaceDirectory() { return { ok: false, error: { code: 'A9_DIAGNOSTICS_MODE' } }; },
