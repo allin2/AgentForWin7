@@ -7,9 +7,9 @@
 历史合同保留原状态与未关闭义务；不构成当前实施授权，也不改判原候选。
 任务书路径保持稳定，不通过移动文件表达生命周期。
 
-本轮健康体检与质量提升（负责人授权“同意，sonnet5.5high 修复，opus5.5high审核”与“允许；并开启phaseb”）：`APPROVED_FOR_IMPLEMENTATION`，实际分支 `main`，基线 `ba7c9de`。
-交付 Phase A 快速修复（A1~A10：代理 TLS 加固、Git 绝对路径与只读白名单、a9-ignore 转义容错、porcelain -z 状态解析、CMD 编码引号修复、HTML 预览 CSP、审批时序、browse 边界、ajv 登记与凭据清除报错，已本地提交 `fda0aee`）及 Phase B 体验与质量提升（B1 SQLite 6 个覆盖索引优化消除全表扫描、B2 Token 上下文预算与国内外主流模型溢出识别、B3 错误中文化排障指引与 Provider 60s~1800s 超时设置、P2-3 a9-ignore 线性时间 glob ReDoS 免疫化、B8 Lint 枚举与空 catch 结构化诊断，见 ADR-0339）。
-必要验证为 7 模块编译、设计安全门、4300+ 全量单元测试；证据仅为开发机（Node 20.17.0），Win7/Win10 实机为 `NOT_PERFORMED`。
+本轮健康体检与质量提升（负责人授权“同意，sonnet5.5high 修复，opus5.5high审核”、“允许；并开启phaseb”及“继续推进phase C”）：`APPROVED_FOR_IMPLEMENTATION`，实际分支 `main`，基线 `ba7c9de`。
+交付 Phase A 快速修复（本地提交 `fda0aee`）、Phase B 体验与质量提升（本地提交 `35678eb`，ADR-0339）以及 Phase C 长期架构优化批次 1（C5 文档瘦身治理、C4 Gateway 网络策略收敛、C6 Win7 SP1 运行时与供应链安全策略规范，ADR-0340）。
+必要验证为 7 模块编译、设计安全门、全量单元测试与文档一致性检查；证据仅为开发机（Node 20.17.0），Win7/Win10 实机为 `NOT_PERFORMED`。
 保护既有未跟踪目录 `scripts/dashboard/`，不新增系统权限，未公开推送。
 
 本轮 A9 Settings 设置项（负责人任务书，基线 0153b394）：`APPROVED_FOR_IMPLEMENTATION`，实际分支 `box/a9-settings`。交付上下文预算、输入框上限、thinking 模式与思考强度设置及其 Provider/Core/Gateway 配置链路；保持 schemaVersion、不改专用 DeepSeek Provider、不新增依赖。必要验证与停止条件见 `A9_SETTINGS_CONTEXT_COMPOSER_THINKING.md`，证据目录为 `outputs/wp-a9-settings/a9-settings/`。

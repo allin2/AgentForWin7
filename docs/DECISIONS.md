@@ -5664,3 +5664,12 @@ Claude P2-1、P2-3 已补测试，P2-4 已修复；P2-2 按裁决保留为 K7。
 - 决定（上下文预算）：输入预算由字符预算与 Token 预算同时约束，任一超限即裁剪。Token 预算为窗口的 85%，按 token-estimator 的保守 UTF-8 口径估算，并先扣除随请求发送的工具定义；字符预算语义不变。溢出判定识别 HTTP 413、HTTP 400/422 加上英文与中文厂商表述，命中后沿用既有“折半预算重试一次”链路。默认窗口按 128000 估算会使中文长对话比旧版更早裁剪旧轮次，这是有意的行为变化。
 - 决定（错误指引）：界面层把 401、403、404、407、429、5xx、域名未解析、连接拒绝、证书过期、自签或不受信任证书、证书主机名不符、连接/空闲/总超时、流式截断映射为中文“原因 + 下一步”，原始错误保留在“原始错误：”之后并在界面折叠展示。失败 Turn 的最终消息写入的是中文文案；原始英文错误随文案保存。
 - 边界：不关闭、不弱化 TLS 校验；指引文案不得建议关闭证书校验。清理路径（关闭数据库、删除临时/备份/锁文件、关闭工作区时的办公组件、状态观察者）的失败改为结构化诊断（稳定错误码、限长、脱敏），不再静默吞掉。
+
+## ADR-0340 体检 Phase C 批次 1：STATUS 瘦身与历史归档、Gateway TLS/超时策略收敛、EOL 运行时与供应链策略
+
+- 状态：Accepted（2026-11-17 UTC，负责人授权继续推进体检 Phase C 批次 1 的 C4、C5、C6；开发机证据，Win10、Win7 实机和正式门 A/B 为 NOT_PERFORMED）。
+- 决定（文档治理，C5）：`docs/STATUS.md` 只保留当前有效基准（`0.3.0-alpha.8` / `WIN7-62`）、进行中的工作授权（Phase C、A9-70）、日常入口、待决定与阻断以及未签发与已知限制声明。已结算任务（A9-68 及更早的交付、ENGINEERING 环境记录、更早试用版与签发候选）的条目，按迁移当日原文逐字移入 `docs/STATUS_LOG.md` 顶部的新增小节，保留原时间点结论、哈希与限制，不改判、不补录、不作为当前授权。此后任务达到 COMPLETE 或被后继取代、且不再是当前基准或进行中工作时，其 STATUS 条目在下一次文档维护中同样迁入 STATUS_LOG；STATUS 不得再逐任务累积历史流水。`docs/status/latest-validation.json` 的 `head_commit` 仍须出现在 STATUS 中（`scripts/check_docs.mjs` 校验）。
+- 决定（Gateway 收敛，C4）：`DeepSeekOpenAIProvider` 保持对外导出、构造参数和方法签名不变，其网络请求继续经共享的 `MockConnection`（重试/总超时/空闲超时）与 `NodeNetworkStack`（TLS 最低 1.2、证书校验恒开、HTTP CONNECT 隧道内再做 TLS 校验）。收敛的是两个 Provider 之间原本各自维护的参数：新增 `provider/network-policy.ts` 的 `resolveProviderTlsConfig`，`OpenAICompatibleProvider` 与 `DeepSeekOpenAIProvider` 都以它合并缺省字段、拒绝关闭校验或低于 TLS 1.2 的配置，并在构造时拒绝不存在的自定义 CA 文件（均为 `TLS_VERIFY_FAILED`）；DeepSeek 的缺省空闲超时与总超时由原先写死的 30 秒与 90 秒改为与 OpenAI-compatible 共享的 `DEFAULT_NO_DATA_TIMEOUT_MS`（120 秒）和 `DEFAULT_TOTAL_TIMEOUT_MS`（300 秒），显式传入的值不变。这是有意的行为变化：该专用切片的缺省等待会变长。
+- 边界（C4）：不关闭、不弱化 TLS 校验；不新增 HTTPS 代理或 socks5 支持（`NodeNetworkStack` 仍只接受 HTTP 代理，与此前一致）；不改变 `OpenAICompatibleProvider` 内联的请求/代理实现，也不合并两套传输栈，该合并属后续独立决定。B9 在仓库中没有独立定义，本批次按“清除 DeepSeek 专用路径中与共享栈漂移的硬编码参数”处理。
+- 决定（运行时与供应链，C6）：在 `docs/WIN7_CONSTRAINTS.md` §6.2 与 `docs/SECURITY.md` §6.1 登记 Electron 22.3.27（Chromium 108 / Node 16.17.1）与 SQLite 3.43.1 在 Win7 SP1 x64 纯 CPU 环境下的 EOL 应对：缩小攻击面而不声称修复、开发机上对固定哈希的公告快照做离线漏洞比对并以固定判定词记录、SQLite 补丁级升级按新依赖登记、目标机不安装/不下载/不自动更新，以及当前只有哈希与 manifest 级完整性、正式代码签名未签发的声明。
+- 边界（C6）：本条只新增规则，不改变 D-009、D-014 的批准状态，不改动 Accepted ADR 正文，不新增依赖或系统权限；离线比对的实际结果与 Win7 实机安全验收为 NOT_PERFORMED。

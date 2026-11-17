@@ -33,6 +33,7 @@ import {
   sanitizeForAudit,
   redactApiKey,
 } from '../security';
+import { resolveProviderTlsConfig } from './network-policy';
 
 // ── Exit Codes (Phase 1/2 compatible) ────────────────────────────────────────
 
@@ -205,8 +206,8 @@ export class GatewayProvider {
       );
     }
 
-    // Validate TLS config (fail-closed)
-    this._tlsConfig = validateTLSConfig(config.tlsConfig ?? defaultTLSConfig());
+    // Validate TLS config (fail-closed, unified via network-policy)
+    this._tlsConfig = resolveProviderTlsConfig(config.tlsConfig);
 
     // Set up credential store
     this._credentialStore = config.credentialStore ?? new InMemoryCredentialStore();

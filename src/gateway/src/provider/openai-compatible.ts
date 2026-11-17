@@ -34,10 +34,8 @@ import {
 } from '../transport';
 import {
   CredentialStore,
-  defaultTLSConfig,
   InMemoryCredentialStore,
   TLSConfig,
-  validateTLSConfig,
 } from '../security';
 import {
   SseParser,
@@ -48,6 +46,7 @@ import {
 } from './sse-parser';
 import type { TruncationInfo } from '../types';
 import { imageContent, ModelImageInput } from './image-input';
+import { resolveProviderTlsConfig } from './network-policy';
 
 /** A9-21 M2 G-1：单响应内容上限（UTF-8 字节）。 */
 const MAX_RESPONSE_CONTENT_BYTES = 1024 * 1024;
@@ -213,13 +212,7 @@ export class OpenAICompatibleProvider {
         'TLS certificate verification cannot be disabled',
       );
     }
-    const tlsConfig = validateTLSConfig({ ...defaultTLSConfig(), ...(config.tlsConfig || {}) });
-    if (tlsConfig.caBundle && !fs.existsSync(tlsConfig.caBundle)) {
-      throw new GatewayError(
-        ErrorCode.TLS_VERIFY_FAILED,
-        `CA bundle does not exist: ${tlsConfig.caBundle}`,
-      );
-    }
+    const tlsConfig = resolveProviderTlsConfig(config.tlsConfig);
     this.config = {
       ...config,
       baseUrl: config.baseUrl.replace(/\/+$/, ''),

@@ -19,11 +19,11 @@ import {
 } from '../transport';
 import {
   CredentialStore,
-  defaultTLSConfig,
   InMemoryCredentialStore,
   TLSConfig,
-  validateTLSConfig,
 } from '../security';
+import { resolveProviderTlsConfig } from './network-policy';
+import { DEFAULT_NO_DATA_TIMEOUT_MS, DEFAULT_TOTAL_TIMEOUT_MS } from './openai-compatible';
 
 export const DEEPSEEK_BASE_URL = 'https://api.deepseek.com';
 export const DEEPSEEK_MODELS = Object.freeze(['deepseek-v4-flash', 'deepseek-v4-pro'] as const);
@@ -104,7 +104,7 @@ export class DeepSeekOpenAIProvider {
     validateDeepSeekBaseUrl(config.baseUrl);
     validateDeepSeekModel(config.model);
     this.config = { ...config, baseUrl: DEEPSEEK_BASE_URL };
-    this.tlsConfig = validateTLSConfig(config.tlsConfig ?? defaultTLSConfig());
+    this.tlsConfig = resolveProviderTlsConfig(config.tlsConfig);
     this.store = config.credentialStore ?? new InMemoryCredentialStore();
   }
 
@@ -270,8 +270,8 @@ export class DeepSeekOpenAIProvider {
     if (this.connection?.state === ConnectionState.CONNECTED) return this.connection;
     const connectionConfig: ConnectionConfig = {
       url: `${DEEPSEEK_BASE_URL}/chat/completions`,
-      timeoutMs: this.config.timeoutMs ?? 30_000,
-      totalTimeoutMs: this.config.totalTimeoutMs ?? 90_000,
+      timeoutMs: this.config.timeoutMs ?? DEFAULT_NO_DATA_TIMEOUT_MS,
+      totalTimeoutMs: this.config.totalTimeoutMs ?? DEFAULT_TOTAL_TIMEOUT_MS,
       maxResponseSizeBytes: 10 * 1024 * 1024,
       retry: this.config.retryConfig ?? DEFAULT_RETRY_CONFIG,
       proxy: this.config.proxyConfig,
