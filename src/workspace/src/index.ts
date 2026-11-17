@@ -9,6 +9,7 @@
 export * from './a9-office-files';
 export * from './a9-office-batch';
 export * from './a9-office-archive';
+export * from './a9-office-template';
 export * from './a9-office-transfer';
 export {
   Encoding,

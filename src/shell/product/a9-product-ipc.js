@@ -29,6 +29,7 @@ const A9_ACTIONS = Object.freeze({
   TASK_CONTINUE: 'a9.task.continue',
   TURN_RESUME_APPROVAL: 'a9.turn.resumeApproval',
   OFFICE_SELECT: 'a9.approval.select',
+  TEMPLATE_CONFIRM_SAMPLE: 'a9.template.confirmSample',
   QUESTION_REPLY: 'a9.question.reply',
   TURN_STOP: 'a9.turn.stop',
   MANAGED_DISMISS_RECOVERED: 'a9.managed.dismissRecovered',
@@ -386,6 +387,16 @@ function createA9ProductRequestHandler(options) {
             throw Object.assign(new Error('A9_OFFICE_SELECTION_INVALID'), { code: 'A9_OFFICE_SELECTION_INVALID' });
           }
           return await runtime.selectOfficeActions(payload);
+        }
+        case A9_ACTIONS.TEMPLATE_CONFIRM_SAMPLE: {
+          exactObject(payload, ['sampleId', 'viewerEnvironment', 'normalSampleSha256', 'boundarySampleSha256'], 'A9_PAYLOAD_INVALID');
+          if (typeof payload.sampleId !== 'string' || !payload.sampleId || payload.sampleId.length > 128
+            || typeof payload.viewerEnvironment !== 'string' || !payload.viewerEnvironment.trim() || payload.viewerEnvironment.length > 128
+            || !/^[a-f0-9]{64}$/.test(String(payload.normalSampleSha256 || ''))
+            || !/^[a-f0-9]{64}$/.test(String(payload.boundarySampleSha256 || ''))) {
+            throw Object.assign(new Error('A9_PAYLOAD_INVALID: invalid template sample confirmation'), { code: 'A9_PAYLOAD_INVALID' });
+          }
+          return await runtime.confirmTemplateSample(payload);
         }
         case A9_ACTIONS.TURN_RESUME_APPROVAL: {
           exactObject(payload, ['approvalId', 'decision', 'bindingDigest', 'conversationId', 'taskId', 'turnId'], 'A9_PAYLOAD_INVALID');

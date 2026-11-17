@@ -217,10 +217,16 @@ function createA9AgentRuntime(options) {
       createZip: (input, signal) => getArchiveWorkerPort().createZip(input, signal),
       close: () => (archiveWorkerPort ? archiveWorkerPort.close() : Promise.resolve()),
     };
+    const officeTemplateWorker = {
+      inspectTemplate: (buffer, format, signal) => getTemplateWorkerPort().inspectTemplate(buffer, format, signal),
+      renderBatch: (input, signal) => getTemplateWorkerPort().renderBatch(input, signal),
+      close: () => (templateWorkerPort ? templateWorkerPort.close() : Promise.resolve()),
+    };
     const service = new modules.workspace.A9WorkspaceService(workspaceRoot, {
       ...options,
       officeBatchApproval: officeAuthority.port,
       ...(archiveModule.yazlAvailable() ? { officeArchiveWorker } : {}),
+      ...(templateModule.docxtemplaterAvailable() ? { officeTemplateWorker, officeTemplateSamples: templateSampleStore } : {}),
     });
     return new Proxy(service, { get(target, property) {
       const value = target[property];
@@ -325,14 +331,24 @@ function createA9AgentRuntime(options) {
   let imageService = null;
   let officeService = null;
   let archiveWorkerPort = null;
+  let templateWorkerPort = null;
+  const templateSampleStore = new Map();
   const officeModule = require('./a9-office-service');
   const archiveModule = require('./a9-office-archive');
+  const templateModule = require('./a9-office-template');
   function getArchiveWorkerPort() {
     if (!archiveWorkerPort) {
       if (!archiveModule.yazlAvailable()) throw Object.assign(new Error('ARCHIVE_WORKER_UNAVAILABLE'), { code: 'ARCHIVE_WORKER_UNAVAILABLE' });
       archiveWorkerPort = archiveModule.createArchiveWorkerPort(config.archiveWorkerOptions);
     }
     return archiveWorkerPort;
+  }
+  function getTemplateWorkerPort() {
+    if (!templateWorkerPort) {
+      if (!templateModule.docxtemplaterAvailable()) throw Object.assign(new Error('TEMPLATE_WORKER_UNAVAILABLE'), { code: 'TEMPLATE_WORKER_UNAVAILABLE' });
+      templateWorkerPort = templateModule.createTemplateWorkerPort(config.templateWorkerOptions);
+    }
+    return templateWorkerPort;
   }
   function getOfficeService() {
     if (!officeService) officeService = officeModule.createOfficeService({
@@ -1724,6 +1740,7 @@ function createA9AgentRuntime(options) {
           workspaceModule: modules.workspace, transferWorkspaces: config.transferWorkspaces,
           withTransferReservation: config.withTransferReservation,
           archiveAvailable: archiveModule.yazlAvailable(),
+          templateAvailable: templateModule.docxtemplaterAvailable(),
         }) } : {}),
         runner: runnerAdapter,
         managedProcesses: {
@@ -3281,6 +3298,9 @@ function createA9AgentRuntime(options) {
       interruptions: persistence.listInterruptions(a9SessionId),
       recoveryTasks: recoveryTaskCards(),
       officeLite: { available: officeModule.officeAvailable(), formats: ['docx', 'xlsx'], fidelity: 'content_only', evidence: 'development_only' },
+      templateSamples: typeof standaloneWorkspaceService.listTemplateSamples === 'function'
+        ? standaloneWorkspaceService.listTemplateSamples(shellWorkspaceKey, a9SessionId)
+        : [],
       managedProcesses,
     };
   }
@@ -3689,7 +3709,7 @@ function createA9AgentRuntime(options) {
         workspaceLockReleased = true;
       }
     };
-    if (!checkpointRecoveryPending && pendingStateOperations.size === 0 && !officeService && !archiveWorkerPort
+    if (!checkpointRecoveryPending && pendingStateOperations.size === 0 && !officeService && !archiveWorkerPort && !templateWorkerPort
       && !activeController && !(options.cancelPending && (currentPendingApproval || currentPendingQuestion)) && manager.getActiveCount() === 0) {
       // 保留既有无负载关闭语义：无需等待时同步释放锁，紧接着切换/重开
       // 同一工作区不会短暂误报 A9_WORKSPACE_LOCKED。
@@ -3705,6 +3725,7 @@ function createA9AgentRuntime(options) {
       const officeClose = Promise.all([
         officeService ? Promise.resolve().then(() => officeService.close()) : Promise.resolve(),
         archiveWorkerPort ? Promise.resolve().then(() => archiveWorkerPort.close()) : Promise.resolve(),
+        templateWorkerPort ? Promise.resolve().then(() => templateWorkerPort.close()) : Promise.resolve(),
       ]);
       // Observe rejection immediately while recovery/cancellation still owns the wait.
       officeClose.catch(() => {});
@@ -3828,6 +3849,22 @@ function createA9AgentRuntime(options) {
     continueTask: input => trackAsyncStateOperation(() => continueTask(input)),
     dismissRecovered,
     selectOfficeActions: input => trackAsyncStateOperation(() => selectOfficeActions(input)),
+    confirmTemplateSample: input => trackAsyncStateOperation(async () => {
+      assertOperationScope(a9SessionId);
+      const res = await workspaceServiceForState().confirmTemplateSample({
+        ...input,
+        workspaceId: shellWorkspaceKey,
+        conversationId: a9SessionId,
+      });
+      persistence.recordToolEvent(a9SessionId, null, 'template.sample_confirmed', {
+        sampleId: res.sampleId,
+        viewerEnvironment: res.viewerEnvironment,
+        templateSha256: res.templateSha256,
+        normalSampleSha256: res.normalSampleSha256,
+        boundarySampleSha256: res.boundarySampleSha256,
+      });
+      return res;
+    }),
     resumeApproval: input => {
       if (input && input.decision === 'denied') pauseQueue();
       return finishQueueOperation(trackAsyncStateOperation(() => resumeApproval(input)));

@@ -13,9 +13,12 @@ function crc32(bytes) {
   return (crc ^ 0xffffffff) >>> 0;
 }
 /** Decode ZIP parts in memory with limits on actual inflation, before an Office library sees them. */
-function readOfficeZip(input) {
+function readOfficeZip(input, options = {}) {
+  const maxBytes = Number.isSafeInteger(options.maxBytes) && options.maxBytes > 0 ? options.maxBytes : MAX_BYTES;
+  const maxEntries = Number.isSafeInteger(options.maxEntries) && options.maxEntries > 0 ? options.maxEntries : 256;
+  const maxInflatedBytes = Number.isSafeInteger(options.maxInflatedBytes) && options.maxInflatedBytes > 0 ? options.maxInflatedBytes : 16 * 1024 * 1024;
   const bytes = Buffer.from(input);
-  if (bytes.length > MAX_BYTES) fail('A9_OFFICE_BYTE_LIMIT');
+  if (bytes.length > maxBytes) fail('A9_OFFICE_BYTE_LIMIT');
   if (bytes.length < 22) fail();
   let end = -1;
   for (let n = bytes.length - 22; n >= Math.max(0, bytes.length - 65557); n--) {
@@ -24,7 +27,7 @@ function readOfficeZip(input) {
   if (end < 0 || bytes.readUInt16LE(end + 4) || bytes.readUInt16LE(end + 6)) fail();
   const count = bytes.readUInt16LE(end + 10);
   const centralSize = bytes.readUInt32LE(end + 12), centralStart = bytes.readUInt32LE(end + 16);
-  if (!count || count > 256) fail('A9_OFFICE_ZIP_LIMIT');
+  if (!count || count > maxEntries) fail('A9_OFFICE_ZIP_LIMIT');
   if (bytes.readUInt16LE(end + 8) !== count || centralStart + centralSize !== end || centralStart === 0xffffffff) fail();
   const parts = new Map(), spans = [];
   let cursor = centralStart, total = 0;
@@ -35,7 +38,7 @@ function readOfficeZip(input) {
     const nameLength = bytes.readUInt16LE(cursor + 28), extra = bytes.readUInt16LE(cursor + 30), comment = bytes.readUInt16LE(cursor + 32);
     const local = bytes.readUInt32LE(cursor + 42);
     if (flags & ~0x080e || flags & 1 || ![0, 8].includes(method) || bytes.readUInt16LE(cursor + 34)) fail();
-    if (compressed === 0xffffffff || size > MAX_BYTES || total + size > 16 * 1024 * 1024) fail('A9_OFFICE_ZIP_LIMIT');
+    if (compressed === 0xffffffff || size > maxBytes || total + size > maxInflatedBytes) fail('A9_OFFICE_ZIP_LIMIT');
     if (cursor + 46 + nameLength + extra + comment > end || local + 30 > centralStart) fail();
     const rawName = bytes.subarray(cursor + 46, cursor + 46 + nameLength);
     let name;
@@ -61,7 +64,7 @@ function readOfficeZip(input) {
     spans.push([local, spanEnd]);
     let decoded;
     try { decoded = method === 0 ? Buffer.from(bytes.subarray(dataStart, dataStart + compressed)) :
-      zlib.inflateRawSync(bytes.subarray(dataStart, dataStart + compressed), { maxOutputLength: Math.min(MAX_BYTES, 16 * 1024 * 1024 - total) }); }
+      zlib.inflateRawSync(bytes.subarray(dataStart, dataStart + compressed), { maxOutputLength: Math.min(maxBytes, maxInflatedBytes - total) }); }
     catch (_) { fail('A9_OFFICE_ZIP_LIMIT_OR_INVALID'); }
     if (decoded.length !== size || crc32(decoded) !== crc) fail();
     total += decoded.length;

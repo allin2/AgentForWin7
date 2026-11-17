@@ -40,6 +40,25 @@ const HELP = Object.freeze({
     note: 'manifestPath 可选；始终排除输出自身、临时文件、.git、恢复目录、Office 锁文件与重解析路径。首批限制 ZIP32。',
   },
   archive_create_zip: { request: { planId: 'archive_plan 返回的 planId' } },
+  template_inspect: { request: { path: '模板/通知模板.docx' } },
+  template_render_sample: {
+    request: {
+      templatePath: '模板/通知模板.docx',
+      templateSha256: 'template_inspect 返回的 templateSha256',
+      mapping: { 客户名称: 'name' },
+      normalRecord: { name: '普通样本' },
+      boundaryRecord: { name: '超长边界样本...' },
+      normalOutputPath: '样张/普通样张.docx',
+      boundaryOutputPath: '样张/边界样张.docx',
+      outputRule: { directory: '批量输出', filenamePattern: '{name}_{index}.docx' },
+      viewerEnvironment: 'Microsoft Word / WPS Office',
+    },
+    note: '可选传 records 或 dataPath（JSON 数组路径）以在样张阶段即绑定批量数据；输出样张后须由操作员在指定查看环境确认，才允许批量输出。',
+  },
+  batch_render_templates: {
+    request: { sampleId: '已确认的 sampleId', records: [{ name: '张三' }] },
+    note: '模板 SHA、映射、输出规则及已绑定数据任一变化必须重新生成并确认样张。',
+  },
   limits: {
     actions: 100,
     fileBytes: 16777216,
@@ -49,16 +68,25 @@ const HELP = Object.freeze({
     archiveFileBytes: 67108864,
     archiveTotalBytes: 134217728,
     archiveFormat: 'ZIP32',
+    templateMaxBytes: 4194304,
+    templateBatchMaxRecords: 200,
   },
 });
 function createOfficeWorkflow({ service, identity, authority, containsSensitiveData, assertAvailable,
-  workspaceModule, transferWorkspaces, withTransferReservation, archiveAvailable }) {
+  workspaceModule, transferWorkspaces, withTransferReservation, archiveAvailable, templateAvailable }) {
   const transfers = workspaceModule?.OfficeTransferService && transferWorkspaces && withTransferReservation
     ? new workspaceModule.OfficeTransferService(transferWorkspaces, { async consume(id, binding) {
       await authority.port.consume(id, { bindingSha256: binding.digest }); return true;
     } }) : null;
   const transferTools = transfers ? ['transfer_plan', 'transfer_reconcile', 'transfer_undo_plan', 'transfer_execute', 'transfer_undo'] : [];
   const archiveTools = archiveAvailable && typeof service.planArchive === 'function' ? ['archive_plan', 'archive_create_zip'] : [];
+  const templateTools = templateAvailable && typeof service.inspectTemplate === 'function'
+    ? ['template_inspect', 'template_render_sample', 'batch_render_templates']
+    : [];
+  const pendingTemplatePlans = new Map();
+  function templatePlanCacheKey(name, args, turnId) {
+    return crypto.createHash('sha256').update(JSON.stringify([turnId, name, String(args && args.request || '')])).digest('hex');
+  }
   function transferIdentity(turnId) { const who = identity(turnId); return { conversationId: who.conversationId, turnId: who.turnId }; }
   function transferBinding(input, turnId) { return transfers.getApprovalBinding(input.planId, transferIdentity(turnId)); }
   function transferSummary(binding) {
@@ -88,6 +116,33 @@ function createOfficeWorkflow({ service, identity, authority, containsSensitiveD
       ...header,
       entries,
       ...(entries.length < binding.entries.length ? { omittedEntries: binding.entries.length - entries.length } : {}),
+    }, null, 2);
+  }
+  function templateSummary(binding) {
+    const base = {
+      purpose: binding.purpose,
+      workspace: binding.workspaceRoot,
+      identity: binding.identity,
+      planId: binding.planId,
+      ...(binding.sampleId ? { sampleId: binding.sampleId } : {}),
+      templatePath: binding.templatePath,
+      templateSha256: binding.templateSha256,
+      viewerEnvironment: binding.viewerEnvironment,
+      outputRule: binding.outputRule,
+      mapping: binding.mapping,
+      dataSha256: binding.dataSha256,
+      outputCount: binding.outputs.length,
+    };
+    const outputs = [];
+    for (const item of binding.outputs) {
+      const candidate = JSON.stringify({ ...base, outputs: [...outputs, item] }, null, 2);
+      if (Buffer.byteLength(candidate, 'utf8') > 64 * 1024) break;
+      outputs.push(item);
+    }
+    return JSON.stringify({
+      ...base,
+      outputs,
+      ...(outputs.length < binding.outputs.length ? { omittedOutputs: binding.outputs.length - outputs.length } : {}),
     }, null, 2);
   }
   function check() { assertAvailable?.(); }
@@ -125,6 +180,25 @@ function createOfficeWorkflow({ service, identity, authority, containsSensitiveD
     } else if (name === 'archive_create_zip' && archiveTools.length) {
       object(input, ['planId'], ['planId']);
       if (typeof input.planId !== 'string' || !input.planId || input.planId.length > 128) fail('A9_OFFICE_REQUEST_INVALID');
+    } else if (name === 'template_inspect' && templateTools.length) {
+      object(input, ['path'], ['path']);
+      if (typeof input.path !== 'string' || containsSensitiveData?.(input.path)) fail('A9_OFFICE_SENSITIVE_PATH');
+    } else if (name === 'template_render_sample' && templateTools.length) {
+      object(input, [
+        'templatePath', 'templateSha256', 'mapping', 'normalRecord', 'boundaryRecord',
+        'normalOutputPath', 'boundaryOutputPath', 'outputRule', 'viewerEnvironment', 'records', 'dataPath',
+      ], [
+        'templatePath', 'templateSha256', 'mapping', 'normalRecord', 'boundaryRecord',
+        'normalOutputPath', 'boundaryOutputPath', 'outputRule', 'viewerEnvironment',
+      ]);
+      if ([input.templatePath, input.normalOutputPath, input.boundaryOutputPath, input.dataPath].some(p => p !== undefined && (typeof p !== 'string' || containsSensitiveData?.(p)))) {
+        fail('A9_OFFICE_SENSITIVE_PATH');
+      }
+    } else if (name === 'batch_render_templates' && templateTools.length) {
+      object(input, ['sampleId', 'templatePath', 'templateSha256', 'mapping', 'outputRule', 'records', 'dataPath'], ['sampleId']);
+      if ([input.templatePath, input.dataPath].some(p => p !== undefined && (typeof p !== 'string' || containsSensitiveData?.(p)))) {
+        fail('A9_OFFICE_SENSITIVE_PATH');
+      }
     } else fail('A9_OFFICE_UNAVAILABLE');
     if (input.path !== undefined && containsSensitiveData?.(input.path)) fail('A9_OFFICE_SENSITIVE_PATH');
     return input;
@@ -133,7 +207,7 @@ function createOfficeWorkflow({ service, identity, authority, containsSensitiveD
     return { planId: input.planId, selectedActionIds: input.selectedActionIds, identity: identity(turnId), signal };
   }
   return {
-    supportedTools: ['office_workflow_help', 'workspace_scan_metadata', 'batch_organize_plan', 'batch_organize', ...transferTools, ...archiveTools],
+    supportedTools: ['office_workflow_help', 'workspace_scan_metadata', 'batch_organize_plan', 'batch_organize', ...transferTools, ...archiveTools, ...templateTools],
     async read(name, args, turnId, signal) {
       const input = request(name, args);
       if (name === 'office_workflow_help') return { ...HELP, ...(transfers ? {
@@ -161,6 +235,7 @@ function createOfficeWorkflow({ service, identity, authority, containsSensitiveD
       }
       if (name === 'batch_organize_plan') return service.planOrganize(identity(turnId), input.actions, signal);
       if (name === 'archive_plan') return service.planArchive(identity(turnId), input, signal);
+      if (name === 'template_inspect') return service.inspectTemplate(input.path, signal);
       fail('A9_OFFICE_UNAVAILABLE');
     },
     async prepare(name, args, turnId) {
@@ -175,6 +250,32 @@ function createOfficeWorkflow({ service, identity, authority, containsSensitiveD
         const binding = await service.prepareArchive(input.planId, identity(turnId));
         check();
         return { bindingSha256: binding.bindingSha256, summary: archiveSummary(binding) };
+      }
+      if (name === 'template_render_sample' || name === 'batch_render_templates') {
+        const cacheKey = templatePlanCacheKey(name, args, turnId);
+        let planId = pendingTemplatePlans.get(cacheKey);
+        if (!planId) {
+          if (pendingTemplatePlans.size >= 32) {
+            const first = pendingTemplatePlans.keys().next().value;
+            if (first) pendingTemplatePlans.delete(first);
+          }
+          const plan = name === 'template_render_sample'
+            ? await service.planTemplateSample(identity(turnId), input)
+            : await service.planTemplateBatch(identity(turnId), input);
+          planId = plan.planId;
+          pendingTemplatePlans.set(cacheKey, planId);
+        }
+        let binding;
+        try {
+          binding = name === 'template_render_sample'
+            ? await service.prepareTemplateSample(planId, identity(turnId))
+            : await service.prepareTemplateBatch(planId, identity(turnId));
+        } catch (err) {
+          pendingTemplatePlans.delete(cacheKey);
+          throw err;
+        }
+        check();
+        return { bindingSha256: binding.bindingSha256, summary: templateSummary(binding) };
       }
       if (name !== 'batch_organize') fail('A9_OFFICE_UNAVAILABLE');
       const binding = await service.prepareOrganize(executionOptions(input, turnId));
@@ -206,6 +307,20 @@ function createOfficeWorkflow({ service, identity, authority, containsSensitiveD
           approvalId: grant.approvalId,
           signal,
         }));
+      }
+      if (name === 'template_render_sample' || name === 'batch_render_templates') {
+        const cacheKey = templatePlanCacheKey(name, args, turnId);
+        const planId = pendingTemplatePlans.get(cacheKey);
+        if (!planId) fail('A9_OFFICE_APPROVAL_STALE');
+        const fresh = name === 'template_render_sample'
+          ? await service.prepareTemplateSample(planId, identity(turnId), signal)
+          : await service.prepareTemplateBatch(planId, identity(turnId), signal);
+        check();
+        if (fresh.bindingSha256 !== grant?.bindingSha256) fail('A9_OFFICE_APPROVAL_STALE');
+        pendingTemplatePlans.delete(cacheKey);
+        return authority.run(grant, () => (name === 'template_render_sample'
+          ? service.executeTemplateSample({ planId, identity: identity(turnId), approvalId: grant.approvalId, signal })
+          : service.executeTemplateBatch({ planId, identity: identity(turnId), approvalId: grant.approvalId, signal })));
       }
       if (name !== 'batch_organize') fail('A9_OFFICE_UNAVAILABLE');
       const fresh = await service.prepareOrganize(executionOptions(input, turnId, signal));

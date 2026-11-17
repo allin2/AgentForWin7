@@ -46,6 +46,12 @@ import {
   OfficeArchivePlanInput, OfficeArchivePlan, OfficeArchiveApprovalBinding,
   OfficeArchiveExecuteOptions, OfficeArchiveResult,
 } from './a9-office-archive';
+import {
+  OfficeTemplateService, OfficeTemplateWorkerPort, OfficeTemplateApprovalPort,
+  TemplateInspectResult, TemplateRenderSampleInput, TemplateSamplePlan,
+  TemplateSampleResult, TemplateSampleConfirmation, TemplateBatchPlanInput,
+  TemplateBatchPlan, TemplateBatchResult, TemplateApprovalBinding,
+} from './a9-office-template';
 
 export interface A9ListResult {
   path: string;
@@ -232,6 +238,7 @@ export class A9WorkspaceService {
   private readonly checkpointManager: CheckpointManager;
   private readonly officeBatch: OfficeBatchService;
   private readonly officeArchive: OfficeArchiveService;
+  private readonly officeTemplate: OfficeTemplateService;
   private readonly baselines = new Map<string, BaselineFact>();
   private readonly containsSensitiveData: (value: string | Buffer) => boolean;
   private readonly containsSensitiveFeedbackData: (value: string | Buffer) => boolean;
@@ -262,7 +269,10 @@ export class A9WorkspaceService {
       containsSensitiveFeedbackData?: (value: string | Buffer) => boolean;
       officeBatchApproval?: OfficeBatchApprovalPort;
       officeArchiveApproval?: OfficeArchiveApprovalPort;
-      officeArchiveWorker?: OfficeZipWorkerPort } = {},
+      officeArchiveWorker?: OfficeZipWorkerPort;
+      officeTemplateApproval?: OfficeTemplateApprovalPort;
+      officeTemplateWorker?: OfficeTemplateWorkerPort;
+      officeTemplateSamples?: Map<string, any> } = {},
   ) {
     // 规范化工作区根本身（macOS /var → /private/var、junction 等），
     // 否则 realpathSync 的文件会得到跨前缀的 ../../ 相对路径。
@@ -318,6 +328,14 @@ export class A9WorkspaceService {
       options.officeArchiveApproval ?? (options.officeBatchApproval as unknown as OfficeArchiveApprovalPort | undefined),
       options.officeArchiveWorker,
     );
+    this.officeTemplate = new OfficeTemplateService(
+      canonicalRoot,
+      this.checkpointManager,
+      value => this.resolvePath(value),
+      options.officeTemplateApproval ?? (options.officeBatchApproval as unknown as OfficeTemplateApprovalPort | undefined),
+      options.officeTemplateWorker,
+      options.officeTemplateSamples,
+    );
     if (fs.existsSync(this.checkpointManager.getRecoveryRoot())) {
       this.checkpointManager.ensureRecoveryIgnore();
     }
@@ -357,6 +375,43 @@ export class A9WorkspaceService {
 
   executeArchive(options: OfficeArchiveExecuteOptions): Promise<OfficeArchiveResult> {
     return this.officeArchive.execute(options);
+  }
+
+  /** A9-70 P3: DOCX template inspection, sample rendering, viewer confirmation & batch output. */
+  inspectTemplate(templatePath: string, signal?: AbortSignal): Promise<TemplateInspectResult> {
+    return this.officeTemplate.inspect(templatePath, signal);
+  }
+
+  planTemplateSample(identity: OfficeBatchIdentity, input: TemplateRenderSampleInput, signal?: AbortSignal): Promise<TemplateSamplePlan> {
+    return this.officeTemplate.planSample(identity, input, signal);
+  }
+
+  prepareTemplateSample(planId: string, identity: OfficeBatchIdentity, signal?: AbortSignal): Promise<TemplateApprovalBinding> {
+    return this.officeTemplate.prepareSample(planId, identity, signal);
+  }
+
+  executeTemplateSample(options: { planId: string; identity: OfficeBatchIdentity; approvalId: string; signal?: AbortSignal }): Promise<TemplateSampleResult> {
+    return this.officeTemplate.executeSample(options);
+  }
+
+  confirmTemplateSample(input: TemplateSampleConfirmation, signal?: AbortSignal) {
+    return this.officeTemplate.confirmSample(input, signal);
+  }
+
+  listTemplateSamples(workspaceId: string, conversationId: string) {
+    return this.officeTemplate.listSamples(workspaceId, conversationId);
+  }
+
+  planTemplateBatch(identity: OfficeBatchIdentity, input: TemplateBatchPlanInput, signal?: AbortSignal): Promise<TemplateBatchPlan> {
+    return this.officeTemplate.planBatch(identity, input, signal);
+  }
+
+  prepareTemplateBatch(planId: string, identity: OfficeBatchIdentity, signal?: AbortSignal): Promise<TemplateApprovalBinding> {
+    return this.officeTemplate.prepareBatch(planId, identity, signal);
+  }
+
+  executeTemplateBatch(options: { planId: string; identity: OfficeBatchIdentity; approvalId: string; signal?: AbortSignal }): Promise<TemplateBatchResult> {
+    return this.officeTemplate.executeBatch(options);
   }
 
   // -------------------------------------------------------------------------
