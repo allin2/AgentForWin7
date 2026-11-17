@@ -4121,104 +4121,138 @@
     }
   }
 
+  function officeSkillsSurfaces() {
+    return [
+      {
+        button: el('a9-office-install-skills'),
+        status: el('a9-office-skills-status'),
+        confirmBox: el('a9-office-skills-confirm'),
+        targets: el('a9-office-skills-targets'),
+        confirmBtn: el('a9-office-skills-confirm-btn'),
+        unreadyText: '',
+      },
+      {
+        button: el('a9-settings-install-skills'),
+        status: el('a9-settings-skills-status'),
+        confirmBox: el('a9-settings-skills-confirm'),
+        targets: el('a9-settings-skills-targets'),
+        confirmBtn: el('a9-settings-skills-confirm-btn'),
+        unreadyText: '请先选择本地工作区并设为 Full Access 后安装。',
+      },
+    ].filter(s => s.button || s.status || s.confirmBox);
+  }
+
   function renderOfficeSkills(snapshot) {
-    const button = el('a9-office-install-skills');
-    const status = el('a9-office-skills-status');
-    const confirmBox = el('a9-office-skills-confirm');
-    if (!button || !status) return;
+    const surfaces = officeSkillsSurfaces();
+    if (!surfaces.length) return;
     const skills = snapshot && Array.isArray(snapshot.builtinOfficeSkills) ? snapshot.builtinOfficeSkills : [];
     const total = skills.length;
     const installed = skills.filter(s => s.installed).length;
-    if (!snapshot || snapshot.status !== 'ready') {
-      button.disabled = true;
-      button.textContent = '安装内置办公技能';
-      if (confirmBox) confirmBox.hidden = true;
-      if (!state.officeSkillsBusy) status.textContent = '';
-      return;
-    }
-    if (total > 0 && installed === total) {
-      button.disabled = true;
-      button.textContent = `内置办公技能已安装 (${installed}/${total})`;
-      if (confirmBox) confirmBox.hidden = true;
-      if (!state.officeSkillsBusy) status.textContent = '已在 .agents/skills/ 就绪；不覆盖已有技能文件。';
-      return;
-    }
-    if (snapshot.mode !== 'full_access') {
-      button.disabled = true;
-      button.textContent = '安装内置办公技能';
-      if (confirmBox) confirmBox.hidden = true;
-      if (!state.officeSkillsBusy) status.textContent = '需 Full Access 权限才可写入工作区技能目录。';
-      return;
-    }
-    button.disabled = state.officeSkillsBusy || state.running;
-    button.textContent = installed > 0 ? `安装剩余内置办公技能 (${installed}/${total})` : '安装内置办公技能';
-    if (confirmBox && !confirmBox.hidden && confirmBox.dataset.workspaceRoot !== String(snapshot.workspaceRoot || '')) {
-      confirmBox.hidden = true;
-      delete confirmBox.dataset.workspaceRoot;
-    }
-    if (!state.officeSkillsBusy && !status.textContent) {
-      status.textContent = '先预览将写入的 .agents/skills/ 目标路径再确认安装（不覆盖已有文件）。';
+    for (const surface of surfaces) {
+      const { button, status, confirmBox, confirmBtn, unreadyText } = surface;
+      if (!button || !status) continue;
+      if (!snapshot || snapshot.status !== 'ready') {
+        button.disabled = true;
+        button.textContent = '安装内置办公技能';
+        if (confirmBox) confirmBox.hidden = true;
+        if (!state.officeSkillsBusy) status.textContent = unreadyText;
+        continue;
+      }
+      if (total > 0 && installed === total) {
+        button.disabled = true;
+        button.textContent = `内置办公技能已安装 (${installed}/${total})`;
+        if (confirmBox) confirmBox.hidden = true;
+        if (!state.officeSkillsBusy) status.textContent = '已在 .agents/skills/ 就绪；不覆盖已有技能文件。';
+        continue;
+      }
+      if (snapshot.mode !== 'full_access') {
+        button.disabled = true;
+        button.textContent = '安装内置办公技能';
+        if (confirmBox) confirmBox.hidden = true;
+        if (!state.officeSkillsBusy) status.textContent = '需 Full Access 权限才可写入工作区技能目录。';
+        continue;
+      }
+      button.disabled = state.officeSkillsBusy || state.running;
+      if (confirmBtn) confirmBtn.disabled = state.officeSkillsBusy || state.running;
+      button.textContent = installed > 0 ? `安装剩余内置办公技能 (${installed}/${total})` : '安装内置办公技能';
+      if (confirmBox && !confirmBox.hidden && confirmBox.dataset.workspaceRoot !== String(snapshot.workspaceRoot || '')) {
+        confirmBox.hidden = true;
+        delete confirmBox.dataset.workspaceRoot;
+      }
+      if (!state.officeSkillsBusy && (!status.textContent || status.textContent === unreadyText)) {
+        status.textContent = '先预览将写入的 .agents/skills/ 目标路径再确认安装（不覆盖已有文件）。';
+      }
     }
   }
 
-  function openOfficeSkillsConfirm() {
+  function openOfficeSkillsConfirm(targetSurface) {
     if (state.browse && browseBlocked('安装内置办公技能')) return;
     const snapshot = state.snapshot;
-    const box = el('a9-office-skills-confirm');
-    const list = el('a9-office-skills-targets');
-    const status = el('a9-office-skills-status');
-    if (!box || !list || !snapshot) return;
+    const surfaces = officeSkillsSurfaces();
+    const surface = targetSurface && targetSurface.confirmBox ? targetSurface : surfaces[0];
+    if (!surface || !surface.confirmBox || !surface.targets || !snapshot) return;
     const pending = (snapshot.builtinOfficeSkills || []).filter(s => !s.installed);
     if (!pending.length) return;
-    list.textContent = '';
+    surfaces.forEach((other) => {
+      if (other !== surface && other.confirmBox) {
+        other.confirmBox.hidden = true;
+        delete other.confirmBox.dataset.workspaceRoot;
+      }
+    });
+    surface.targets.textContent = '';
     pending.forEach((s) => {
       const li = document.createElement('li');
       li.textContent = `${s.targetPath} — ${s.description}`;
-      list.appendChild(li);
+      surface.targets.appendChild(li);
     });
-    box.dataset.workspaceRoot = String(snapshot.workspaceRoot || '');
-    box.hidden = false;
-    if (status) status.textContent = `待确认写入 ${pending.length} 个技能文件。`;
-    const confirmBtn = el('a9-office-skills-confirm-btn');
-    if (confirmBtn && typeof confirmBtn.focus === 'function') confirmBtn.focus();
+    surface.confirmBox.dataset.workspaceRoot = String(snapshot.workspaceRoot || '');
+    surface.confirmBox.hidden = false;
+    surfaces.forEach((s) => {
+      if (s.status) s.status.textContent = `待确认写入 ${pending.length} 个技能文件。`;
+    });
+    if (surface.confirmBtn && typeof surface.confirmBtn.focus === 'function') surface.confirmBtn.focus();
   }
 
   function closeOfficeSkillsConfirm() {
-    const box = el('a9-office-skills-confirm');
-    if (box) {
-      box.hidden = true;
-      delete box.dataset.workspaceRoot;
+    for (const surface of officeSkillsSurfaces()) {
+      if (surface.confirmBox) {
+        surface.confirmBox.hidden = true;
+        delete surface.confirmBox.dataset.workspaceRoot;
+      }
     }
   }
 
   async function installOfficeSkills() {
     if (state.browse && browseBlocked('安装内置办公技能')) return null;
     if (state.officeSkillsBusy || typeof a9.installOfficeSkills !== 'function') return null;
-    const button = el('a9-office-install-skills');
-    const confirmBtn = el('a9-office-skills-confirm-btn');
-    const status = el('a9-office-skills-status');
+    const surfaces = officeSkillsSurfaces();
     state.officeSkillsBusy = true;
-    if (button) button.disabled = true;
-    if (confirmBtn) confirmBtn.disabled = true;
-    if (status) status.textContent = '正在安装内置办公技能…';
+    for (const surface of surfaces) {
+      if (surface.button) surface.button.disabled = true;
+      if (surface.confirmBtn) surface.confirmBtn.disabled = true;
+      if (surface.status) surface.status.textContent = '正在安装内置办公技能…';
+    }
     try {
       const response = await a9.installOfficeSkills();
       if (!response || response.ok !== true) {
-        if (status) status.textContent = errorMessage(response, '安装失败；若工作区已存在同名技能文件，已拒绝覆盖。');
+        const msg = errorMessage(response, '安装失败；若工作区已存在同名技能文件，已拒绝覆盖。');
+        for (const surface of surfaces) if (surface.status) surface.status.textContent = msg;
         return response;
       }
       closeOfficeSkillsConfirm();
       const count = response.result && Array.isArray(response.result.installed)
         ? response.result.installed.filter(i => i.status === 'succeeded').length : 0;
-      if (status) status.textContent = `已安装 ${count} 份内置办公技能至 .agents/skills/（可在“改动”中查看与撤销）。`;
+      const doneMsg = `已安装 ${count} 份内置办公技能至 .agents/skills/（可在“改动”中查看与撤销）。`;
+      for (const surface of surfaces) if (surface.status) surface.status.textContent = doneMsg;
       await refreshSnapshot();
       return response;
     } catch (error) {
-      if (status) status.textContent = errorMessage(error, '内置办公技能安装失败。');
+      const errMsg = errorMessage(error, '内置办公技能安装失败。');
+      for (const surface of surfaces) if (surface.status) surface.status.textContent = errMsg;
       return null;
     } finally {
       state.officeSkillsBusy = false;
-      if (confirmBtn) confirmBtn.disabled = false;
+      for (const surface of surfaces) if (surface.confirmBtn) surface.confirmBtn.disabled = false;
       if (state.snapshot) renderOfficeSkills(state.snapshot);
     }
   }
@@ -4963,6 +4997,7 @@
     if (!drawer) return;
     // 设置为全应用操作；只读查看期间暂时关闭入口，返回执行对话后恢复。
     if (id === 'settings-drawer' && state.browse && browseBlocked('打开设置')) return;
+    if (id === 'settings-drawer') renderOfficeSkills(state.snapshot);
     state.lastFocused = document.activeElement;
     drawer.hidden = false;
     el('navigation-rail').classList.remove('open');
@@ -4976,6 +5011,7 @@
   function closeDrawer(id) {
     const drawer = el(id);
     if (!drawer) return;
+    if (id === 'settings-drawer') closeOfficeSkillsConfirm();
     drawer.hidden = true;
     const workbench = document.querySelector('.workbench');
     if (workbench) workbench.inert = false;
@@ -6162,9 +6198,12 @@
     el('a9-approval-approve').addEventListener('click', () => { void decideApproval('approved'); });
     el('a9-approval-deny').addEventListener('click', () => { void decideApproval('denied'); });
     if (el('a9-approval-select-apply')) el('a9-approval-select-apply').addEventListener('click', () => { void applyOfficeSelection(); });
-    if (el('a9-office-install-skills')) el('a9-office-install-skills').addEventListener('click', openOfficeSkillsConfirm);
+    if (el('a9-office-install-skills')) el('a9-office-install-skills').addEventListener('click', () => openOfficeSkillsConfirm(officeSkillsSurfaces()[0]));
     if (el('a9-office-skills-confirm-btn')) el('a9-office-skills-confirm-btn').addEventListener('click', () => { void installOfficeSkills(); });
     if (el('a9-office-skills-cancel-btn')) el('a9-office-skills-cancel-btn').addEventListener('click', closeOfficeSkillsConfirm);
+    if (el('a9-settings-install-skills')) el('a9-settings-install-skills').addEventListener('click', () => openOfficeSkillsConfirm(officeSkillsSurfaces()[1]));
+    if (el('a9-settings-skills-confirm-btn')) el('a9-settings-skills-confirm-btn').addEventListener('click', () => { void installOfficeSkills(); });
+    if (el('a9-settings-skills-cancel-btn')) el('a9-settings-skills-cancel-btn').addEventListener('click', closeOfficeSkillsConfirm);
     el('a9-git-refresh').addEventListener('click', () => { void refreshGit(); });
     el('workspace-refresh').addEventListener('click', () => { void refreshWorkspace(state.explorerPath); });
     el('changes-refresh').addEventListener('click', () => { void refreshSnapshot(); });

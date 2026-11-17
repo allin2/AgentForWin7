@@ -2184,12 +2184,21 @@ describe('A9 unified desktop workbench contract', () => {
   });
 
   it('A9-70 bounds long approval summaries and keeps approval action buttons reachable inside the viewport', () => {
+    const questionCss = fs.readFileSync(path.join(productRoot, 'renderer/a9-question-card.css'), 'utf8');
     expect(css).toMatch(/\.composer-wrap\s*\{[^}]*max-height:\s*calc\(100% - 60px\)[^}]*overflow-y:\s*auto/);
     expect(css).toMatch(/\.approval-copy\s*\{[^}]*max-height:\s*min\(300px, 44vh\)[^}]*overflow-y:\s*auto/);
     expect(css).toMatch(/#a9-approval-summary\s*\{[^}]*max-height:\s*min\(150px, 22vh\)[^}]*overflow:\s*auto[^}]*font-size:\s*13px/);
     expect(css).not.toMatch(/#a9-approval-summary\s*\{[^}]*overflow(?:-[xy])?:\s*(?:hidden|clip)/);
     expect(css).toMatch(/\.approval-selection-list\s*\{[^}]*max-height:\s*min\(160px, 24vh\)[^}]*overflow:\s*auto/);
+    expect(css).toMatch(/\.sample-confirm-dock\s*\{[^}]*max-height:\s*min\(240px, 34vh\)[^}]*overflow-y:\s*auto/);
     expect(css).toMatch(/\.sample-confirm-list\s*\{[^}]*max-height:\s*min\(180px, 26vh\)[^}]*overflow:\s*auto/);
+    expect(css).toMatch(/\.turn-request-body\s*\{[^}]*max-height:\s*280px[^}]*overflow:\s*auto/);
+    expect(css).toMatch(/\.plan-steps\s*\{[^}]*max-height:\s*220px[^}]*overflow:\s*auto/);
+    expect(css).toMatch(/\.activity-items\s*\{[^}]*max-height:\s*360px[^}]*overflow:\s*auto/);
+    expect(css).toMatch(/\.approval-record-detail\s*\{[^}]*max-height:\s*160px[^}]*overflow:\s*auto/);
+    expect(css).toMatch(/\.delivery-body\s*\{[^}]*max-height:\s*360px[^}]*overflow:\s*auto/);
+    expect(css).toMatch(/\.office-skills-targets\s*\{[^}]*max-height:\s*180px[^}]*overflow:\s*auto/);
+    expect(questionCss).toMatch(/\.a9-question-card\s*\{[^}]*max-height:\s*min\(300px, 44vh\)[^}]*overflow-y:\s*auto/);
   });
 
 });

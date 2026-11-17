@@ -5,6 +5,8 @@
   background: var(--raised, var(--card));
   color: var(--text, var(--foreground));
   overflow-wrap: anywhere;
+  max-height: min(300px, 44vh);
+  overflow-y: auto;
 }
 .a9-question-host { flex: 0 0 auto; margin-bottom: 10px; }
 .a9-question-host[hidden] { display: none; }

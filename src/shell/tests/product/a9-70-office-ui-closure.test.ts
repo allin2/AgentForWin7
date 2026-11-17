@@ -361,14 +361,29 @@ describe('A9-70 P6 UI, skills installer & full product closure', () => {
     expect(nodes.get('a9-approval-surrogate')!.hidden).toBe(false);
     expect(nodes.get('a9-approval-surrogate')!.textContent).toContain('SURROGATE');
 
-    // Verify built-in skills installer shows target paths first and only installs after explicit confirm click.
+    // Verify built-in skills installer shows target paths first on welcome & settings and only installs after explicit confirm click.
+    expect(html).toContain('id="a9-settings-install-skills"');
     expect(nodes.get('a9-office-skills-confirm')!.hidden).toBe(true);
+    expect(nodes.get('a9-settings-skills-confirm')!.hidden).toBe(true);
     nodes.get('a9-office-install-skills')!.fire('click');
     expect(nodes.get('a9-office-skills-confirm')!.hidden).toBe(false);
+    expect(nodes.get('a9-settings-skills-confirm')!.hidden).toBe(true);
     expect(nodes.get('a9-office-skills-targets')!.textContent).toContain('.agents/skills/office-file-organize/SKILL.md');
     expect(installOfficeSkills).not.toHaveBeenCalled();
-    nodes.get('a9-office-skills-confirm-btn')!.fire('click');
+
+    nodes.get('a9-settings-install-skills')!.fire('click');
+    expect(nodes.get('a9-settings-skills-confirm')!.hidden).toBe(false);
+    expect(nodes.get('a9-office-skills-confirm')!.hidden).toBe(true);
+    expect(nodes.get('a9-settings-skills-targets')!.textContent).toContain('.agents/skills/office-file-organize/SKILL.md');
+    expect(installOfficeSkills).not.toHaveBeenCalled();
+
+    nodes.get('a9-settings-skills-confirm-btn')!.fire('click');
     await new Promise(r => setTimeout(r, 20));
     expect(installOfficeSkills).toHaveBeenCalledTimes(1);
+
+    nodes.get('a9-office-install-skills')!.fire('click');
+    nodes.get('a9-office-skills-confirm-btn')!.fire('click');
+    await new Promise(r => setTimeout(r, 20));
+    expect(installOfficeSkills).toHaveBeenCalledTimes(2);
   });
 });
