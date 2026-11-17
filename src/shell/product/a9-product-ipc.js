@@ -31,6 +31,7 @@ const A9_ACTIONS = Object.freeze({
   OFFICE_SELECT: 'a9.approval.select',
   TEMPLATE_CONFIRM_SAMPLE: 'a9.template.confirmSample',
   OFFICE_PREVIEW_HTML: 'a9.office.previewHtml',
+  OFFICE_INSTALL_SKILLS: 'a9.office.installSkills',
   QUESTION_REPLY: 'a9.question.reply',
   TURN_STOP: 'a9.turn.stop',
   MANAGED_DISMISS_RECOVERED: 'a9.managed.dismissRecovered',
@@ -405,6 +406,16 @@ function createA9ProductRequestHandler(options) {
             throw Object.assign(new Error('A9_PAYLOAD_INVALID: invalid html preview path'), { code: 'A9_PAYLOAD_INVALID' });
           }
           return await runtime.previewHtmlReport(payload);
+        }
+        case A9_ACTIONS.OFFICE_INSTALL_SKILLS: {
+          exactObject(payload, ['confirmed'], 'A9_PAYLOAD_INVALID', ['skillNames']);
+          if (payload.confirmed !== true) {
+            throw Object.assign(new Error('A9_PAYLOAD_INVALID: confirmed must be true'), { code: 'A9_PAYLOAD_INVALID' });
+          }
+          if (payload.skillNames !== undefined && (!Array.isArray(payload.skillNames) || payload.skillNames.some(s => typeof s !== 'string' || !s))) {
+            throw Object.assign(new Error('A9_PAYLOAD_INVALID: invalid skillNames'), { code: 'A9_PAYLOAD_INVALID' });
+          }
+          return await runtime.installOfficeSkills(payload);
         }
         case A9_ACTIONS.TURN_RESUME_APPROVAL: {
           exactObject(payload, ['approvalId', 'decision', 'bindingDigest', 'conversationId', 'taskId', 'turnId'], 'A9_PAYLOAD_INVALID');

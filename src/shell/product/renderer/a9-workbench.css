@@ -861,3 +861,22 @@ summary:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--focus
 .delivery-body p { margin: 8px 0; }
 .delivery-body button { margin: 4px 8px 0 0; }
 .history-result:focus-visible, .history-source:focus-visible, .delivery-card > summary:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+
+/* A9-70 P6: office guidance, skills installer, organize checklist & sample confirmation. */
+.office-skills-bar { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 10px; margin-top: 14px; }
+.office-skills-bar button { min-height: 36px; padding: 0 12px; border: 1px solid var(--line-strong); border-radius: var(--r-sm); background: var(--panel); color: var(--text-secondary); font-size: var(--fs-label); }
+.office-skills-bar button:hover:not(:disabled) { border-color: var(--accent); color: var(--text); }
+.approval-selection { margin: 8px 0; padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--panel); }
+.approval-selection-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; font-size: var(--fs-label); }
+.approval-selection-list { margin: 0; padding: 0; list-style: none; max-height: 180px; overflow: auto; display: grid; gap: 4px; }
+.approval-selection-list label { display: flex; align-items: flex-start; gap: 8px; font-size: var(--fs-label); color: var(--text-secondary); cursor: pointer; overflow-wrap: anywhere; }
+.approval-selection-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }
+.approval-selection-actions button { min-height: 32px; padding: 0 10px; border: 1px solid var(--line-strong); border-radius: var(--r-sm); background: var(--raised); color: var(--text); font-size: var(--fs-label); }
+.sample-confirm-dock { margin-bottom: 8px; padding: 10px 14px; border: 1px solid var(--amber-line); border-radius: var(--r-md); background: var(--amberbg); }
+.sample-confirm-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 12px; margin-bottom: 6px; }
+.sample-confirm-list { margin: 0; padding: 0; list-style: none; display: grid; gap: 8px; max-height: 200px; overflow: auto; }
+.sample-confirm-item { padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--panel); display: grid; gap: 4px; font-size: var(--fs-label); overflow-wrap: anywhere; }
+.sample-confirm-item-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 4px; }
+.sample-confirm-item-actions button { min-height: 32px; padding: 0 10px; border: 1px solid var(--accent); border-radius: var(--r-sm); background: var(--accent); color: var(--on-accent); font-size: var(--fs-label); }
+.sample-confirm-item-actions button:disabled { opacity: .6; cursor: default; }
+.sample-confirm-badge { color: var(--success); font-weight: 600; }

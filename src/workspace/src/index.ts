@@ -12,6 +12,7 @@ export * from './a9-office-archive';
 export * from './a9-office-template';
 export * from './a9-office-report';
 export * from './a9-office-mail';
+export * from './a9-office-skills';
 export * from './a9-office-transfer';
 export {
   Encoding,

@@ -61,6 +61,10 @@ import {
   OfficeMailService, MailSourceAdapter, OfficeMailApprovalPort,
   MailExtractPlanInput, MailExtractPlan, MailExtractApprovalBinding, MailExtractResult,
 } from './a9-office-mail';
+import {
+  OfficeSkillsService, OfficeSkillsApprovalPort, OfficeSkillsInstallInput,
+  OfficeSkillsInstallPlan, OfficeSkillsApprovalBinding, OfficeSkillsInstallResult,
+} from './a9-office-skills';
 
 export interface A9ListResult {
   path: string;
@@ -250,6 +254,7 @@ export class A9WorkspaceService {
   private readonly officeTemplate: OfficeTemplateService;
   private readonly officeReport: OfficeReportService;
   private readonly officeMail: OfficeMailService;
+  private readonly officeSkills: OfficeSkillsService;
   private readonly baselines = new Map<string, BaselineFact>();
   private readonly containsSensitiveData: (value: string | Buffer) => boolean;
   private readonly containsSensitiveFeedbackData: (value: string | Buffer) => boolean;
@@ -287,7 +292,8 @@ export class A9WorkspaceService {
       officeReportApproval?: OfficeReportApprovalPort;
       officeReportWorker?: OfficeReportWorkerPort;
       officeMailApproval?: OfficeMailApprovalPort;
-      officeMailEmlAdapter?: MailSourceAdapter } = {},
+      officeMailEmlAdapter?: MailSourceAdapter;
+      officeSkillsApproval?: OfficeSkillsApprovalPort } = {},
   ) {
     // 规范化工作区根本身（macOS /var → /private/var、junction 等），
     // 否则 realpathSync 的文件会得到跨前缀的 ../../ 相对路径。
@@ -364,6 +370,12 @@ export class A9WorkspaceService {
       value => this.resolvePath(value),
       options.officeMailApproval ?? (options.officeBatchApproval as unknown as OfficeMailApprovalPort | undefined),
       options.officeMailEmlAdapter,
+    );
+    this.officeSkills = new OfficeSkillsService(
+      canonicalRoot,
+      this.checkpointManager,
+      value => this.resolvePath(value),
+      options.officeSkillsApproval ?? (options.officeBatchApproval as unknown as OfficeSkillsApprovalPort | undefined),
     );
     if (fs.existsSync(this.checkpointManager.getRecoveryRoot())) {
       this.checkpointManager.ensureRecoveryIgnore();
@@ -493,6 +505,23 @@ export class A9WorkspaceService {
 
   executeMailExtract(options: { planId: string; identity: OfficeBatchIdentity; approvalId: string; signal?: AbortSignal }): Promise<MailExtractResult> {
     return this.officeMail.executeExtract(options);
+  }
+
+  /** A9-70 P6: Built-in office skill presets installer (refuses overwrite). */
+  listBuiltinOfficeSkills() {
+    return this.officeSkills.listBuiltin();
+  }
+
+  planInstallOfficeSkills(identity: OfficeBatchIdentity, input: OfficeSkillsInstallInput = {}, signal?: AbortSignal): Promise<OfficeSkillsInstallPlan> {
+    return this.officeSkills.planInstall(identity, input, signal);
+  }
+
+  prepareInstallOfficeSkills(planId: string, identity: OfficeBatchIdentity, signal?: AbortSignal): Promise<OfficeSkillsApprovalBinding> {
+    return this.officeSkills.prepareInstall(planId, identity, signal);
+  }
+
+  executeInstallOfficeSkills(options: { planId: string; identity: OfficeBatchIdentity; approvalId: string; signal?: AbortSignal }): Promise<OfficeSkillsInstallResult> {
+    return this.officeSkills.executeInstall(options);
   }
 
   // -------------------------------------------------------------------------

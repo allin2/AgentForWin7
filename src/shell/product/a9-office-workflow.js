@@ -100,6 +100,10 @@ const HELP = Object.freeze({
     request: { planId: 'mail_extract_plan 返回的 planId' },
     note: '批准准确清单后由宿主落盘附件并记录恢复点，不自动打开附件。',
   },
+  office_install_skills: {
+    request: { skillNames: ['office-file-organize', 'office-template-report', 'office-mail-triage'] },
+    note: 'skillNames 可选（默认安装全部 3 份内置办公技能至 .agents/skills/）；目标已存在时拒绝覆盖。',
+  },
   limits: {
     actions: 100,
     fileBytes: 16777216,
@@ -137,6 +141,7 @@ function createOfficeWorkflow({ service, identity, authority, containsSensitiveD
   const mailTools = mailAvailable && typeof service.listMailSource === 'function'
     ? ['mail_source_list', 'mail_source_read', 'mail_extract_plan', 'mail_extract_attachments']
     : [];
+  const skillsTools = typeof service.planInstallOfficeSkills === 'function' ? ['office_install_skills'] : [];
   const pendingCachedPlans = new Map();
   function cachedPlanKey(name, args, turnId) {
     return crypto.createHash('sha256').update(JSON.stringify([turnId, name, String(args && args.request || '')])).digest('hex');
@@ -225,6 +230,15 @@ function createOfficeWorkflow({ service, identity, authority, containsSensitiveD
       destinationDir: binding.destinationDir,
       totalBytes: binding.totalBytes,
       items: binding.items,
+    }, null, 2);
+  }
+  function skillsSummary(binding) {
+    return JSON.stringify({
+      purpose: binding.purpose,
+      workspace: binding.workspaceRoot,
+      identity: binding.identity,
+      planId: binding.planId,
+      skills: binding.skills,
     }, null, 2);
   }
   function check() { assertAvailable?.(); }
@@ -316,6 +330,8 @@ function createOfficeWorkflow({ service, identity, authority, containsSensitiveD
     } else if (name === 'mail_extract_attachments' && mailTools.length) {
       object(input, ['planId'], ['planId']);
       if (typeof input.planId !== 'string' || !input.planId || input.planId.length > 128) fail('A9_OFFICE_REQUEST_INVALID');
+    } else if (name === 'office_install_skills' && skillsTools.length) {
+      object(input, ['skillNames']);
     } else fail('A9_OFFICE_UNAVAILABLE');
     if (input.path !== undefined && containsSensitiveData?.(input.path)) fail('A9_OFFICE_SENSITIVE_PATH');
     return input;
@@ -324,7 +340,7 @@ function createOfficeWorkflow({ service, identity, authority, containsSensitiveD
     return { planId: input.planId, selectedActionIds: input.selectedActionIds, identity: identity(turnId), signal };
   }
   return {
-    supportedTools: ['office_workflow_help', 'workspace_scan_metadata', 'batch_organize_plan', 'batch_organize', ...transferTools, ...archiveTools, ...templateTools, ...reportTools, ...mailTools],
+    supportedTools: ['office_workflow_help', 'workspace_scan_metadata', 'batch_organize_plan', 'batch_organize', ...transferTools, ...archiveTools, ...templateTools, ...reportTools, ...mailTools, ...skillsTools],
     async read(name, args, turnId, signal) {
       const input = request(name, args);
       if (name === 'office_workflow_help') return { ...HELP, ...(transfers ? {
@@ -376,7 +392,7 @@ function createOfficeWorkflow({ service, identity, authority, containsSensitiveD
         check();
         return { bindingSha256: binding.bindingSha256, summary: mailSummary(binding) };
       }
-      if (['template_render_sample', 'batch_render_templates', 'presentation_create', 'html_report_create'].includes(name)) {
+      if (['template_render_sample', 'batch_render_templates', 'presentation_create', 'html_report_create', 'office_install_skills'].includes(name)) {
         const cacheKey = cachedPlanKey(name, args, turnId);
         let planId = pendingCachedPlans.get(cacheKey);
         if (!planId) {
@@ -390,7 +406,9 @@ function createOfficeWorkflow({ service, identity, authority, containsSensitiveD
               ? await service.planTemplateBatch(identity(turnId), input)
               : name === 'presentation_create'
                 ? await service.planPresentation(identity(turnId), input)
-                : await service.planHtmlReport(identity(turnId), input);
+                : name === 'html_report_create'
+                  ? await service.planHtmlReport(identity(turnId), input)
+                  : await service.planInstallOfficeSkills(identity(turnId), input);
           planId = plan.planId;
           pendingCachedPlans.set(cacheKey, planId);
         }
@@ -402,14 +420,21 @@ function createOfficeWorkflow({ service, identity, authority, containsSensitiveD
               ? await service.prepareTemplateBatch(planId, identity(turnId))
               : name === 'presentation_create'
                 ? await service.preparePresentation(planId, identity(turnId))
-                : await service.prepareHtmlReport(planId, identity(turnId));
+                : name === 'html_report_create'
+                  ? await service.prepareHtmlReport(planId, identity(turnId))
+                  : await service.prepareInstallOfficeSkills(planId, identity(turnId));
         } catch (err) {
           pendingCachedPlans.delete(cacheKey);
           throw err;
         }
         check();
         const isReport = name === 'presentation_create' || name === 'html_report_create';
-        return { bindingSha256: binding.bindingSha256, summary: isReport ? reportSummary(binding) : templateSummary(binding) };
+        return {
+          bindingSha256: binding.bindingSha256,
+          summary: name === 'office_install_skills'
+            ? skillsSummary(binding)
+            : isReport ? reportSummary(binding) : templateSummary(binding),
+        };
       }
       if (name !== 'batch_organize') fail('A9_OFFICE_UNAVAILABLE');
       const binding = await service.prepareOrganize(executionOptions(input, turnId));
@@ -453,7 +478,7 @@ function createOfficeWorkflow({ service, identity, authority, containsSensitiveD
           signal,
         }));
       }
-      if (['template_render_sample', 'batch_render_templates', 'presentation_create', 'html_report_create'].includes(name)) {
+      if (['template_render_sample', 'batch_render_templates', 'presentation_create', 'html_report_create', 'office_install_skills'].includes(name)) {
         const cacheKey = cachedPlanKey(name, args, turnId);
         const planId = pendingCachedPlans.get(cacheKey);
         if (!planId) fail('A9_OFFICE_APPROVAL_STALE');
@@ -463,7 +488,9 @@ function createOfficeWorkflow({ service, identity, authority, containsSensitiveD
             ? await service.prepareTemplateBatch(planId, identity(turnId), signal)
             : name === 'presentation_create'
               ? await service.preparePresentation(planId, identity(turnId), signal)
-              : await service.prepareHtmlReport(planId, identity(turnId), signal);
+              : name === 'html_report_create'
+                ? await service.prepareHtmlReport(planId, identity(turnId), signal)
+                : await service.prepareInstallOfficeSkills(planId, identity(turnId), signal);
         check();
         if (fresh.bindingSha256 !== grant?.bindingSha256) fail('A9_OFFICE_APPROVAL_STALE');
         pendingCachedPlans.delete(cacheKey);
@@ -473,7 +500,9 @@ function createOfficeWorkflow({ service, identity, authority, containsSensitiveD
             ? service.executeTemplateBatch({ planId, identity: identity(turnId), approvalId: grant.approvalId, signal })
             : name === 'presentation_create'
               ? service.executePresentation({ planId, identity: identity(turnId), approvalId: grant.approvalId, signal })
-              : service.executeHtmlReport({ planId, identity: identity(turnId), approvalId: grant.approvalId, signal })));
+              : name === 'html_report_create'
+                ? service.executeHtmlReport({ planId, identity: identity(turnId), approvalId: grant.approvalId, signal })
+                : service.executeInstallOfficeSkills({ planId, identity: identity(turnId), approvalId: grant.approvalId, signal })));
       }
       if (name !== 'batch_organize') fail('A9_OFFICE_UNAVAILABLE');
       const fresh = await service.prepareOrganize(executionOptions(input, turnId, signal));

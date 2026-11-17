@@ -135,6 +135,10 @@ function createA9Api(scope) {
     }),
     confirmTemplateSample: (values) => boundRequest('a9.template.confirmSample', values),
     previewHtmlReport: (targetPath) => boundRequest('a9.office.previewHtml', { path: targetPath }),
+    installOfficeSkills: (skillNames) => boundRequest('a9.office.installSkills', {
+      confirmed: true,
+      ...(skillNames !== undefined ? { skillNames } : {}),
+    }),
     resumeApproval: (approvalId, decision, bindingDigest, conversationId, taskId, turnId) => boundRequest('a9.turn.resumeApproval', {
       approvalId, decision, bindingDigest, conversationId, taskId, turnId,
     }),

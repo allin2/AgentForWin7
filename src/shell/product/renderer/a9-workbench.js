@@ -85,6 +85,10 @@
     running: false,
     outputGapRequests: new Set(),
     approvalDecision: null,
+    officeSelectionUpdating: false,
+    sampleConfirmBusy: null,
+    officeSampleSignature: null,
+    officeSkillsBusy: false,
     questionReply: null,
     lastFocused: null,
     providerHydratedSignature: null,
@@ -2950,6 +2954,8 @@
     modeButton.textContent = `权限：${modeLabel(snapshot.mode)}`;
     modeButton.title = '';
     renderManagedProcesses(snapshot);
+    renderTemplateSamples(snapshot);
+    renderOfficeSkills(snapshot);
     renderApproval(snapshot);
     renderQuestion(snapshot);
     state.running = ['running', 'cancelling'].includes(snapshot.agentStatus);
@@ -3035,6 +3041,7 @@
             el('a9-empty-state').hidden = false;
             el('a9-mode-open').hidden = true;
             el('a9-approval-card').hidden = true;
+            if (el('a9-template-samples')) el('a9-template-samples').hidden = true;
             el('a9-question-host').hidden = true;
             el('a9-managed-processes').hidden = true;
             el('viewer-panel').hidden = true;
@@ -4002,6 +4009,269 @@
     }
   }
 
+  function syncOfficeSelectionUi(actions) {
+    const selectionBox = el('a9-approval-selection');
+    const list = el('a9-approval-selection-list');
+    const applyBtn = el('a9-approval-select-apply');
+    const approveBtn = el('a9-approval-approve');
+    if (!selectionBox || !list || !applyBtn) return;
+    if (!Array.isArray(actions) || !actions.length) {
+      selectionBox.hidden = true;
+      return;
+    }
+    const boxes = Array.from(list.querySelectorAll('input[type="checkbox"]'));
+    const checkedIds = boxes.filter(box => box.checked).map(box => box.dataset.actionId).filter(Boolean);
+    const total = actions.length;
+    text('a9-approval-selection-count', `已选 ${checkedIds.length} / ${total}`);
+    const narrowed = checkedIds.length > 0 && checkedIds.length < total;
+    const busy = Boolean(state.approvalDecision || state.officeSelectionUpdating);
+    applyBtn.disabled = busy || !narrowed;
+    if (checkedIds.length === 0) {
+      text('a9-approval-selection-note', '至少保留 1 项动作；若全部不执行请点击“拒绝”。');
+      if (approveBtn) approveBtn.disabled = true;
+    } else if (narrowed) {
+      text('a9-approval-selection-note', '清单已缩减，请先点击“按勾选更新审批清单”重新绑定后再批准。');
+      if (approveBtn) approveBtn.disabled = true;
+    } else {
+      text('a9-approval-selection-note', '可直接批准，或取消不需要的动作后更新清单。');
+      if (approveBtn) approveBtn.disabled = busy;
+    }
+  }
+
+  function renderApprovalSelection(pending) {
+    const box = el('a9-approval-selection');
+    const list = el('a9-approval-selection-list');
+    const card = el('a9-approval-card');
+    if (!box || !list || !card) return;
+    const selection = pending && pending.officeSelection;
+    const actions = selection && Array.isArray(selection.actions) ? selection.actions : null;
+    if (!actions || !actions.length) {
+      box.hidden = true;
+      delete card.dataset.selectionKey;
+      list.textContent = '';
+      text('a9-approval-selection-count', '');
+      text('a9-approval-selection-note', '');
+      const approveBtn = el('a9-approval-approve');
+      if (approveBtn && !state.approvalDecision) approveBtn.disabled = false;
+      return;
+    }
+    box.hidden = false;
+    const selectionKey = `${pending.approvalId}:${pending.bindingDigest}`;
+    if (card.dataset.selectionKey !== selectionKey) {
+      card.dataset.selectionKey = selectionKey;
+      list.textContent = '';
+      actions.forEach((action) => {
+        const li = document.createElement('li');
+        const label = document.createElement('label');
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.checked = true;
+        checkbox.dataset.actionId = String(action.actionId || '');
+        checkbox.addEventListener('change', () => { syncOfficeSelectionUi(actions); });
+        const span = document.createElement('span');
+        const shaShort = action.sourceSha256 ? ` · ${String(action.sourceSha256).slice(0, 8)}…` : '';
+        span.textContent = `${action.actionId} · ${action.kind} · ${action.source}${action.destination ? ` → ${action.destination}` : ''}${shaShort}`;
+        label.appendChild(checkbox);
+        label.appendChild(span);
+        li.appendChild(label);
+        list.appendChild(li);
+      });
+    }
+    syncOfficeSelectionUi(actions);
+  }
+
+  async function applyOfficeSelection() {
+    if (state.browse && browseBlocked('更新整理清单')) return null;
+    if (state.officeSelectionUpdating || state.approvalDecision) return null;
+    const card = el('a9-approval-card');
+    const pending = state.snapshot && state.snapshot.pendingApproval;
+    const list = el('a9-approval-selection-list');
+    if (!card || card.hidden || !pending || !list || typeof a9.selectOfficeActions !== 'function') return null;
+    const selectedActionIds = Array.from(list.querySelectorAll('input[type="checkbox"]'))
+      .filter(box => box.checked)
+      .map(box => box.dataset.actionId)
+      .filter(Boolean);
+    if (!selectedActionIds.length) return null;
+    setFieldError('a9-approval-error', '');
+    state.officeSelectionUpdating = true;
+    const applyBtn = el('a9-approval-select-apply');
+    if (applyBtn) applyBtn.disabled = true;
+    try {
+      const response = await a9.selectOfficeActions(
+        card.dataset.approvalId,
+        card.dataset.bindingDigest,
+        selectedActionIds,
+        card.dataset.conversationId,
+        card.dataset.taskId,
+        card.dataset.turnId,
+      );
+      if (!response || response.ok !== true) {
+        setFieldError('a9-approval-error', errorMessage(response, '更新整理勾选清单失败，请重试。'));
+        return response;
+      }
+      await refreshSnapshot();
+      return response;
+    } catch (error) {
+      setFieldError('a9-approval-error', errorMessage(error, '更新整理勾选清单失败，请重试。'));
+      return null;
+    } finally {
+      state.officeSelectionUpdating = false;
+      if (state.snapshot) renderApproval(state.snapshot);
+    }
+  }
+
+  function renderOfficeSkills(snapshot) {
+    const button = el('a9-office-install-skills');
+    const status = el('a9-office-skills-status');
+    if (!button || !status) return;
+    const skills = snapshot && Array.isArray(snapshot.builtinOfficeSkills) ? snapshot.builtinOfficeSkills : [];
+    const total = skills.length;
+    const installed = skills.filter(s => s.installed).length;
+    if (!snapshot || snapshot.status !== 'ready') {
+      button.disabled = true;
+      button.textContent = '安装内置办公技能';
+      if (!state.officeSkillsBusy) status.textContent = '';
+      return;
+    }
+    if (total > 0 && installed === total) {
+      button.disabled = true;
+      button.textContent = `内置办公技能已安装 (${installed}/${total})`;
+      if (!state.officeSkillsBusy) status.textContent = '已在 .agents/skills/ 就绪；不覆盖已有技能文件。';
+      return;
+    }
+    if (snapshot.mode !== 'full_access') {
+      button.disabled = true;
+      button.textContent = '安装内置办公技能';
+      if (!state.officeSkillsBusy) status.textContent = '需 Full Access 权限才可写入工作区技能目录。';
+      return;
+    }
+    button.disabled = state.officeSkillsBusy || state.running;
+    button.textContent = installed > 0 ? `安装剩余内置办公技能 (${installed}/${total})` : '安装内置办公技能';
+    if (!state.officeSkillsBusy && !status.textContent) {
+      status.textContent = '将 3 份只读/套打/邮箱指南复制到 .agents/skills/（不覆盖已有文件）。';
+    }
+  }
+
+  async function installOfficeSkills() {
+    if (state.browse && browseBlocked('安装内置办公技能')) return null;
+    if (state.officeSkillsBusy || typeof a9.installOfficeSkills !== 'function') return null;
+    const button = el('a9-office-install-skills');
+    const status = el('a9-office-skills-status');
+    state.officeSkillsBusy = true;
+    if (button) button.disabled = true;
+    if (status) status.textContent = '正在安装内置办公技能…';
+    try {
+      const response = await a9.installOfficeSkills();
+      if (!response || response.ok !== true) {
+        if (status) status.textContent = errorMessage(response, '安装失败；若工作区已存在同名技能文件，已拒绝覆盖。');
+        return response;
+      }
+      const count = response.result && Array.isArray(response.result.installed)
+        ? response.result.installed.filter(i => i.status === 'succeeded').length : 0;
+      if (status) status.textContent = `已安装 ${count} 份内置办公技能至 .agents/skills/（可在“改动”中撤销）。`;
+      await refreshSnapshot();
+      return response;
+    } catch (error) {
+      if (status) status.textContent = errorMessage(error, '内置办公技能安装失败。');
+      return null;
+    } finally {
+      state.officeSkillsBusy = false;
+      if (state.snapshot) renderOfficeSkills(state.snapshot);
+    }
+  }
+
+  function renderTemplateSamples(snapshot) {
+    const dock = el('a9-template-samples');
+    const list = el('a9-sample-list');
+    if (!dock || !list) return;
+    if (state.browse || !snapshot || snapshot.status !== 'ready') {
+      dock.hidden = true;
+      return;
+    }
+    const samples = Array.isArray(snapshot.templateSamples) ? snapshot.templateSamples : [];
+    if (!samples.length) {
+      dock.hidden = true;
+      state.officeSampleSignature = null;
+      list.textContent = '';
+      setFieldError('a9-sample-error', '');
+      return;
+    }
+    dock.hidden = false;
+    const signature = JSON.stringify(samples.map(s => [s.sampleId, s.confirmedInViewer, s.confirmedAt || '', state.sampleConfirmBusy === s.sampleId]));
+    if (state.officeSampleSignature === signature) return;
+    state.officeSampleSignature = signature;
+    list.textContent = '';
+    samples.forEach((sample) => {
+      const li = document.createElement('li');
+      li.className = 'sample-confirm-item';
+      const title = document.createElement('strong');
+      title.textContent = `模板：${sample.templatePath} (${String(sample.templateSha256 || '').slice(0, 8)}…) · 查看环境：${sample.viewerEnvironment}`;
+      const paths = document.createElement('span');
+      paths.textContent = `普通样张：${sample.normalOutputPath} (${String(sample.normalSampleSha256 || '').slice(0, 8)}…) · 边界样张：${sample.boundaryOutputPath} (${String(sample.boundarySampleSha256 || '').slice(0, 8)}…)`;
+      li.appendChild(title);
+      li.appendChild(paths);
+      const actions = document.createElement('div');
+      actions.className = 'sample-confirm-item-actions';
+      if (sample.confirmedInViewer) {
+        const badge = document.createElement('span');
+        badge.className = 'sample-confirm-badge';
+        badge.textContent = `已在 ${sample.viewerEnvironment} 确认（可批量输出）`;
+        actions.appendChild(badge);
+      } else {
+        const ackLabel = document.createElement('label');
+        const ack = document.createElement('input');
+        ack.type = 'checkbox';
+        const confirmBtn = document.createElement('button');
+        confirmBtn.type = 'button';
+        confirmBtn.textContent = state.sampleConfirmBusy === sample.sampleId ? '确认中…' : '确认样张可批量输出';
+        confirmBtn.disabled = true;
+        ack.addEventListener('change', () => {
+          confirmBtn.disabled = !ack.checked || state.sampleConfirmBusy === sample.sampleId;
+        });
+        confirmBtn.addEventListener('click', () => {
+          if (!ack.checked) return;
+          void confirmTemplateSample(sample);
+        });
+        ackLabel.appendChild(ack);
+        ackLabel.appendChild(document.createTextNode(` 我已在 ${sample.viewerEnvironment} 核对普通与边界样张`));
+        actions.appendChild(ackLabel);
+        actions.appendChild(confirmBtn);
+      }
+      li.appendChild(actions);
+      list.appendChild(li);
+    });
+  }
+
+  async function confirmTemplateSample(sample) {
+    if (state.browse && browseBlocked('确认模板样张')) return null;
+    if (!sample || state.sampleConfirmBusy || typeof a9.confirmTemplateSample !== 'function') return null;
+    setFieldError('a9-sample-error', '');
+    state.sampleConfirmBusy = sample.sampleId;
+    state.officeSampleSignature = null;
+    if (state.snapshot) renderTemplateSamples(state.snapshot);
+    try {
+      const response = await a9.confirmTemplateSample({
+        sampleId: sample.sampleId,
+        viewerEnvironment: sample.viewerEnvironment,
+        normalSampleSha256: sample.normalSampleSha256,
+        boundarySampleSha256: sample.boundarySampleSha256,
+      });
+      if (!response || response.ok !== true) {
+        setFieldError('a9-sample-error', errorMessage(response, '样张确认失败，文件可能已修改，请重新生成样张。'));
+        return response;
+      }
+      await refreshSnapshot();
+      return response;
+    } catch (error) {
+      setFieldError('a9-sample-error', errorMessage(error, '样张确认失败，请检查文件状态后重试。'));
+      return null;
+    } finally {
+      state.sampleConfirmBusy = null;
+      state.officeSampleSignature = null;
+      if (state.snapshot) renderTemplateSamples(state.snapshot);
+    }
+  }
+
   function renderApproval(snapshot) {
     const card = el('a9-approval-card');
     const pending = snapshot.pendingApproval;
@@ -4012,6 +4282,7 @@
       delete card.dataset.conversationId;
       delete card.dataset.taskId;
       delete card.dataset.turnId;
+      renderApprovalSelection(null);
       setFieldError('a9-approval-error', '');
       setApprovalBusy(false);
       return;
@@ -4029,6 +4300,7 @@
     text('a9-approval-git', git
       ? `remote=${git.remote || '-'} · branch=${git.branch || '-'} · force=${git.force} · delete=${git.deleteTarget || '-'}`
       : `target digest: ${String(pending.bindingDigest || '').slice(0, 18)}…`);
+    renderApprovalSelection(pending);
   }
 
   async function decideApproval(decision) {
@@ -4818,7 +5090,7 @@
       clearGlobalError();
       closeDialog(el('conversation-new-dialog'));
       closeDialog(el('a9-mode-dialog'));
-      ['a9-managed-processes', 'a9-approval-card', 'a9-question-host', 'a9-empty-state', 'viewer-panel'].forEach((id) => { el(id).hidden = true; });
+      ['a9-managed-processes', 'a9-template-samples', 'a9-approval-card', 'a9-question-host', 'a9-empty-state', 'viewer-panel'].forEach((id) => { if (el(id)) el(id).hidden = true; });
       // A9-56（ADR-0324）：本入口的新对话首轮使用 Full Access，发送前即在权限标签可见；创建后可照常切换。
       const modeButton = el('a9-mode-open');
       modeButton.hidden = false;
@@ -5005,7 +5277,7 @@
   const BROWSE_EVENT_PAGE = 150;
   const BROWSE_EVENT_WINDOW = 600;
   // 执行侧区域：A 的正文、输入/队列/审批/回答、后台进程处置、目录与权限菜单、检查器。返回后恢复并按快照重绘。
-  const BROWSE_HIDDEN_IDS = ['conversation', 'composer-wrap', 'a9-managed-processes', 'conversation-find', 'workdir-control',
+  const BROWSE_HIDDEN_IDS = ['conversation', 'composer-wrap', 'a9-managed-processes', 'a9-template-samples', 'conversation-find', 'workdir-control',
     'a9-mode-open', 'a9-provider-open', 'a9-surface', 'conversation-current-actions', 'workspace-menu', 'conversation-row-menu'];
   const BROWSE_DISABLED_IDS = ['conversation-new', 'conversation-more', 'conversation-filter', 'conversation-find-open',
     'open-settings', 'workspace-select'];
@@ -5606,9 +5878,20 @@
             && activeManagedProcesses(state.snapshot).length === 0;
           const diff = button('查看 Diff', () => { if (canAct()) void showDiff(turnId); });
           const undo = button('撤销入口（先审阅 Diff）', () => { if (canAct()) void showDiff(turnId); });
+          const htmlFiles = changes.evidence === 'checkpoint_metadata'
+            ? (changes.files || []).filter(file => !file.undone && file.action === 'create' && /\.html?$/i.test(file.path))
+            : [];
+          htmlFiles.forEach((file) => {
+            button(`受限预览 HTML：${file.path}`, () => {
+              if (typeof a9.previewHtmlReport === 'function') void a9.previewHtmlReport(file.path);
+            });
+          });
           card.syncDeliveryActions = () => { diff.disabled = undo.disabled = !canAct(); };
           card.syncDeliveryActions();
           if (!canAct()) line('当前轮次仍在执行、等待处理或缺少当前 checkpoint；入口不可用。', 'quiet');
+          if (changes.evidence === 'checkpoint_metadata' && changes.total > 0) {
+            line(`恢复状态：${changes.incomplete ? '部分记录待核对（仅记录项可校验后撤销）' : '已记录 checkpoint（撤销前核验文件未 drift）'}`, 'quiet');
+          }
         }
         button('重新读取交付事实', () => { card.deliveryStale = true; void card.loadDelivery(); });
         if (focusLabel) {
@@ -5820,6 +6103,8 @@
     el('a9-shell-apply').addEventListener('click', () => { void applyShell(); });
     el('a9-approval-approve').addEventListener('click', () => { void decideApproval('approved'); });
     el('a9-approval-deny').addEventListener('click', () => { void decideApproval('denied'); });
+    if (el('a9-approval-select-apply')) el('a9-approval-select-apply').addEventListener('click', () => { void applyOfficeSelection(); });
+    if (el('a9-office-install-skills')) el('a9-office-install-skills').addEventListener('click', () => { void installOfficeSkills(); });
     el('a9-git-refresh').addEventListener('click', () => { void refreshGit(); });
     el('workspace-refresh').addEventListener('click', () => { void refreshWorkspace(state.explorerPath); });
     el('changes-refresh').addEventListener('click', () => { void refreshSnapshot(); });

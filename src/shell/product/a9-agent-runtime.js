@@ -242,7 +242,7 @@ function createA9AgentRuntime(options) {
       const value = target[property];
       if (typeof value !== 'function') return value;
       return (...args) => {
-        if (!['getCheckpointManager'].includes(property)) ensureWorkdir();
+        if (!['getCheckpointManager', 'listTemplateSamples', 'listBuiltinOfficeSkills'].includes(property)) ensureWorkdir();
         if (['list', 'read', 'write', 'edit', 'delete', 'writeDocumentCopy'].includes(property)) validateWorkdirPath(args[0]);
         if (['copy', 'move'].includes(property)) { validateWorkdirPath(args[0]); validateWorkdirPath(args[1]); }
         if (property === 'search') validateWorkdirPath(args[1] && args[1].path);
@@ -3324,6 +3324,13 @@ function createA9AgentRuntime(options) {
       templateSamples: typeof standaloneWorkspaceService.listTemplateSamples === 'function'
         ? standaloneWorkspaceService.listTemplateSamples(shellWorkspaceKey, a9SessionId)
         : [],
+      builtinOfficeSkills: typeof standaloneWorkspaceService.listBuiltinOfficeSkills === 'function'
+        ? standaloneWorkspaceService.listBuiltinOfficeSkills().map((item) => {
+          let installed = false;
+          try { installed = fs.existsSync(path.join(workspaceRoot, item.targetPath)); } catch (_e) { installed = false; }
+          return { name: item.name, description: item.description, targetPath: item.targetPath, installed };
+        })
+        : [],
       managedProcesses,
     };
   }
@@ -3905,6 +3912,32 @@ function createA9AgentRuntime(options) {
         windowOpened: false,
       };
     }),
+    installOfficeSkills: input => trackAsyncStateOperation(async () => {
+      assertOperationScope(a9SessionId);
+      if (permissionMode !== 'full_access') {
+        throw Object.assign(new Error('A9_MODE_READ_ONLY: Read Only 模式禁止安装技能到工作区'), { code: 'A9_MODE_READ_ONLY' });
+      }
+      if (!input || input.confirmed !== true) {
+        throw Object.assign(new Error('SKILLS_APPROVAL_REQUIRED'), { code: 'SKILLS_APPROVAL_REQUIRED' });
+      }
+      const service = workspaceServiceForState();
+      if (typeof service.planInstallOfficeSkills !== 'function') {
+        throw Object.assign(new Error('A9_OFFICE_UNAVAILABLE'), { code: 'A9_OFFICE_UNAVAILABLE' });
+      }
+      const uiTurnId = `ui-skills-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
+      const idObj = { workspaceId: shellWorkspaceKey, conversationId: a9SessionId, turnId: uiTurnId };
+      const plan = await service.planInstallOfficeSkills(idObj, input.skillNames !== undefined ? { skillNames: input.skillNames } : {});
+      const binding = await service.prepareInstallOfficeSkills(plan.planId, idObj);
+      const approvalId = `ui-skills-apr-${crypto.randomBytes(8).toString('hex')}`;
+      const result = await officeAuthority.run({ approvalId, bindingSha256: binding.bindingSha256 }, () =>
+        service.executeInstallOfficeSkills({ planId: plan.planId, identity: idObj, approvalId }));
+      persistence.recordToolEvent(a9SessionId, null, 'office.skills_installed', {
+        status: result.status,
+        code: result.code,
+        installed: result.installed,
+      });
+      return { ok: result.status === 'completed', result };
+    }),
     resumeApproval: input => {
       if (input && input.decision === 'denied') pauseQueue();
       return finishQueueOperation(trackAsyncStateOperation(() => resumeApproval(input)));
@@ -4103,6 +4136,7 @@ function createSqliteUnavailableRuntime(reason) {
     selectOfficeActions() { return Promise.reject(Object.assign(new Error('ELECTRON_SQLITE_UNAVAILABLE'), { code: 'ELECTRON_SQLITE_UNAVAILABLE' })); },
     confirmTemplateSample() { return Promise.reject(Object.assign(new Error('ELECTRON_SQLITE_UNAVAILABLE'), { code: 'ELECTRON_SQLITE_UNAVAILABLE' })); },
     previewHtmlReport() { return { ok: false, error: { code: 'ELECTRON_SQLITE_UNAVAILABLE' } }; },
+    installOfficeSkills() { return { ok: false, error: { code: 'ELECTRON_SQLITE_UNAVAILABLE' } }; },
     updateQueue() { return { ok: false, error: { code: 'A9_QUEUE_UNAVAILABLE' } }; },
     async submitTurn() { return { ok: false, error: { code: 'ELECTRON_SQLITE_UNAVAILABLE', message: 'Electron-ABI better-sqlite3 预检失败，A9 持久化不可用。' } }; },
     async resumeApproval() { return { ok: false, error: { code: 'ELECTRON_SQLITE_UNAVAILABLE' } }; },
@@ -4167,6 +4201,7 @@ function createDiagnosticsRuntime(outcome) {
     selectOfficeActions() { return Promise.reject(Object.assign(new Error('A9_DIAGNOSTICS_MODE'), { code: 'A9_DIAGNOSTICS_MODE' })); },
     confirmTemplateSample() { return Promise.reject(Object.assign(new Error('A9_DIAGNOSTICS_MODE'), { code: 'A9_DIAGNOSTICS_MODE' })); },
     previewHtmlReport() { return { ok: false, error: { code: 'A9_DIAGNOSTICS_MODE' } }; },
+    installOfficeSkills() { return { ok: false, error: { code: 'A9_DIAGNOSTICS_MODE' } }; },
     updateQueue() { return { ok: false, error: { code: 'A9_QUEUE_UNAVAILABLE' } }; },
     async submitTurn() { return { ok: false, error: { code: 'A9_DIAGNOSTICS_MODE', message: '数据库受限诊断模式，禁止执行任务。' } }; },
     async resumeApproval() { return { ok: false, error: { code: 'A9_DIAGNOSTICS_MODE' } }; },
