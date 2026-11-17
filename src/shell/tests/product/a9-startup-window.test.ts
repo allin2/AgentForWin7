@@ -74,6 +74,7 @@ function loadMainHarness(options: { failHost?: boolean; deferPaint?: boolean; re
     if (request.endsWith('/a9-package-runtime')) return { loadA9PackageRuntime: () => null };
     if (request.endsWith('/active-workspace-store')) return { createActiveWorkspaceStore: () => ({ load: () => options.restore ? { workspacePath } : null, save() {} }) };
     if (request.endsWith('/security-policy')) return { installSessionPolicy() {}, installWindowPolicy() {} };
+    if (request.endsWith('/a9-office-preview')) return require('../../product/a9-office-preview');
     if (request.endsWith('/desktop-host')) return { createDesktopHost: () => { calls.push('createDesktopHost'); if (options.failHost) throw new Error('HOST_FAIL'); return host; }, serializeError: (e: any) => ({ code: e.code || 'ERR', message: e.message }) };
     if (request.endsWith('/credential-vault')) return { createDpapiCredentialVault: () => ({}) };
     if (request.endsWith('/runner-runtime')) return { createProductRunner: () => null };

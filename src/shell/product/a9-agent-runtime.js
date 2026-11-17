@@ -3739,7 +3739,10 @@ function createA9AgentRuntime(options) {
         workspaceLockReleased = true;
       }
     };
-    if (!checkpointRecoveryPending && pendingStateOperations.size === 0 && !officeService && !archiveWorkerPort && !templateWorkerPort && !reportWorkerPort
+    if (!checkpointRecoveryPending && pendingStateOperations.size === 0 && !officeService
+      && !(typeof archiveWorkerPort !== 'undefined' && archiveWorkerPort)
+      && !(typeof templateWorkerPort !== 'undefined' && templateWorkerPort)
+      && !(typeof reportWorkerPort !== 'undefined' && reportWorkerPort)
       && !activeController && !(options.cancelPending && (currentPendingApproval || currentPendingQuestion)) && manager.getActiveCount() === 0) {
       // 保留既有无负载关闭语义：无需等待时同步释放锁，紧接着切换/重开
       // 同一工作区不会短暂误报 A9_WORKSPACE_LOCKED。
@@ -3754,9 +3757,9 @@ function createA9AgentRuntime(options) {
       await Promise.resolve();
       const officeClose = Promise.all([
         officeService ? Promise.resolve().then(() => officeService.close()) : Promise.resolve(),
-        archiveWorkerPort ? Promise.resolve().then(() => archiveWorkerPort.close()) : Promise.resolve(),
-        templateWorkerPort ? Promise.resolve().then(() => templateWorkerPort.close()) : Promise.resolve(),
-        reportWorkerPort ? Promise.resolve().then(() => reportWorkerPort.close()) : Promise.resolve(),
+        typeof archiveWorkerPort !== 'undefined' && archiveWorkerPort ? Promise.resolve().then(() => archiveWorkerPort.close()) : Promise.resolve(),
+        typeof templateWorkerPort !== 'undefined' && templateWorkerPort ? Promise.resolve().then(() => templateWorkerPort.close()) : Promise.resolve(),
+        typeof reportWorkerPort !== 'undefined' && reportWorkerPort ? Promise.resolve().then(() => reportWorkerPort.close()) : Promise.resolve(),
       ]);
       // Observe rejection immediately while recovery/cancellation still owns the wait.
       officeClose.catch(() => {});

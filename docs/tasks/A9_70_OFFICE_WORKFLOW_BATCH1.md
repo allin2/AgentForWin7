@@ -266,11 +266,15 @@ flowchart LR
 
 | 范围 | 当前源码与直接检查 | 尚未完成 |
 |---|---|---|
-| P0 | Sol/high 已在 chai2 真实生成；派单包装器62项、提交助手3项通过；115包纯JS闭包准入与复制后加载通过 | 后继员工改经 T3 远端链接；不改指定模型 |
-| P1 | 工作区内扫描、只读计划、批准选择、真实整理与checkpoint；Core 360项、Shell相关检查通过；Node16真实移动及重建服务撤销通过 | 办公确认卡的 Renderer 勾选展示仍属P6；Windows Hidden属性不可用 |
+| P0 | Sol/high 已在 chai2 真实生成；派单包装器62项、提交助手3项通过；115包纯JS闭包准入与复制后加载通过 | 后续打包与目标机验证 |
+| P1 | 工作区内扫描、只读计划、批准选择、真实整理与checkpoint；Core 360项、Shell相关检查通过；Node16真实移动及重建服务撤销通过 | Windows Hidden属性不可用 |
 | P1b | 已登记双工作区计划、双端收据、转移、新批准撤销；同包批准、保留模式边界与目标占用保护；37项转移定向通过 | 真实C盘→D盘、NTFS与Win7为NOT_PERFORMED；每计划一个文件 |
-| P2～P6 | ZIP派单输入已准备；准确依赖与Core宿主入口已准备 | ZIP、DOCX/PPTX模板、五版式PPTX、HTML、邮件与办公UI未交付 |
-| P7及目标验证 | 首失败及云端源码回执保留 | 独立审核、Win10/Win7、打包、正式门A/B、公开推送发布均NOT_PERFORMED |
+| P2（`9614cdb`） | `OfficeArchiveService` + `yazl 3.3.1` Node 16 Worker 流式 ZIP32 与交接清单；排除自身/临时/`.git`/恢复目录/`~$` 锁/重解析路径；独占发布与无大blob拷贝 checkpoint 撤销；开发机单元/Runtime/Node16 真实链路通过 | Windows Explorer 打开、ZIP64 与 Win7 实机为 NOT_PERFORMED |
+| P3（`d50e074`） | `OfficeTemplateService` + `docxtemplater 3.71.1` / `pizzip 3.3.0` Worker；DOCX 字段探查、映射、跨 run 占位符、普通与边界样张、指定查看环境确认门（`a9.template.confirmSample`）与批量生成；拒宏/外部关系/XXE/脚本表达式；开发机单元/Runtime/Node16 通过 | 任意内容下分页与版式不变不承诺；Win7 实机为 NOT_PERFORMED |
+| P4（`1c83454`） | `OfficeReportService` + `pptxgenjs 4.0.1` / `image-size 2.0.4` Worker；PPTX 模板填充与 5 套固定版式（封面/目录/双栏/表格/总结）逐页来源注脚；离线转义单文件 HTML+SVG 看板（无脚本/无外链）与受限 Chromium 108 预览；开发机单元/Runtime/Node16/Chromium 108 实测通过 | 外部默认浏览器兼容与 Win7 实机为 NOT_PERFORMED；不转 PDF |
+| P5（`ea1762b`） | `OfficeMailService`、`MailSourceAdapter` v1、`MockMailAdapter`（强制标 `SURROGATE`）与 `EmlDirectoryMailAdapter`（`emailjs-mime-parser 2.0.7` + 原始字节 `TextDecoder` GBK/GB2312/UTF-8 解码与错码显式拒绝）；有来源待办（不可信数据）与宿主安全附件落盘；开发机单元/Runtime/Node16 通过 | 真实邮箱协议认证、发信/删信、PST/Foxmail 与 Win7 实机不纳入或 NOT_PERFORMED |
+| P6（`682c183`） | 办公场景引导、整理清单勾选修订（`a9.approval.select`）、样张查看确认 UI、交付摘要与 HTML 受限预览入口、高级设置收拢（保留首次模型配置）、`OfficeSkillsService` 内置技能安装（拒覆盖）及 `office-lite` 闭包打包检查；开发机单元/Runtime/Electron 22 GUI 通过 | 独立只读审核、Win10/Win7、正式门 A/B、公开推送发布均 NOT_PERFORMED |
+| P7及目标验证 | 开发机各阶段实现、编译、单元/产品链路及 Electron 22 实测已记录 | 独立只读审核（待派发）、Win10/Win7、正式门 A/B 与公开推送发布均 NOT_PERFORMED |
 
 - 主代理接入后，开发机 Workspace 日常35套件663项通过。随后仅优化转移FD哈希路径，37项转移定向复验通过，未重复不受影响集合。Shell四个实际消费者文件67项通过，覆盖多工作区与SQLite、旧办公Worker、批准、Preload和IPC；后继目标模式负例见同目录最终日志。
 - Node16实际16MiB配对移动→重建服务→对账→普通undo拒绝→新批准撤销逐字节通过。原探针计时保留；去除已绑定FD每64KiB重复目录遍历后，第二份结果为总耗时2037ms、最大观测定时器间隔654ms、最大观测RSS142999552字节。不能写成总内存上限、始终流畅或Win7性能结论。同步计划/快照仍可能暂停主线程，容量和路径限制保持。
@@ -297,3 +301,4 @@ flowchart LR
 - 同一时间一名模型员工。审核在最终准确源码完成后用新的独立任务，实施与审核上下文分开；不再把同一既有VM描述成全新审核机器或沿用旧“新机G0”的结论。只读审核不替代产品检查或Win7证据。
 - 产品实际基线为06d2d961…，工作树仅保留原有 scripts/dashboard/。本节为派单治理记录，不代表源代码已同步至云端。后续同步与远端基线须另行绑定准确提交，保留未发布本地提交。公开 origin、发布与Win7窗口仍不在本轮授权内。
 - 准入结果与直接可用任务稿在 outputs/a9-70-instabox/cloud-main/；P2任务材料已备齐，阻塞只影响远端模型任务启动。
+- 后继执行（2026-11-17 UTC，cloud-main OpenCode `google-vertex/gemini-4-hydrogen` / `xhigh`）：已在工作分支 `a9-70-p1b` 基于 `71b341b…` 串行本地提交 P2（`9614cdb`）、P3（`d50e074`）、P4（`1c83454`）、P5（`ea1762b`）、P6（`682c183`），保留未跟踪目录 `scripts/dashboard/`。均属开发机证据（Linux Node `20.17.0` + Electron `22.3.27` / Node `16.17.1` / Chromium `108.0.5359.215`），不包含 Win7 实机、Win10 验收机、Windows Explorer/ZIP64、正式门 A/B 或公开推送发布。待本轮最终提交完成后由 `claude-opus-5-5`（`high`）执行一次独立只读审核。
