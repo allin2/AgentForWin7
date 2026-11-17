@@ -227,12 +227,16 @@ function createA9AgentRuntime(options) {
       fillTemplatePresentation: (input, signal) => getReportWorkerPort().fillTemplatePresentation(input, signal),
       close: () => (reportWorkerPort ? reportWorkerPort.close() : Promise.resolve()),
     };
+    const officeMailEmlAdapter = mailModule.emlAvailable()
+      ? mailModule.createEmlDirectoryMailAdapter({ workspaceRoot })
+      : undefined;
     const service = new modules.workspace.A9WorkspaceService(workspaceRoot, {
       ...options,
       officeBatchApproval: officeAuthority.port,
       ...(archiveModule.yazlAvailable() ? { officeArchiveWorker } : {}),
       ...(templateModule.docxtemplaterAvailable() ? { officeTemplateWorker, officeTemplateSamples: templateSampleStore } : {}),
       ...(reportModule.pptxAvailable() ? { officeReportWorker } : {}),
+      ...(officeMailEmlAdapter ? { officeMailEmlAdapter } : {}),
     });
     return new Proxy(service, { get(target, property) {
       const value = target[property];
@@ -345,6 +349,7 @@ function createA9AgentRuntime(options) {
   const templateModule = require('./a9-office-template');
   const reportModule = require('./a9-office-report');
   const previewModule = require('./a9-office-preview');
+  const mailModule = require('./a9-office-mail');
   function getArchiveWorkerPort() {
     if (!archiveWorkerPort) {
       if (!archiveModule.yazlAvailable()) throw Object.assign(new Error('ARCHIVE_WORKER_UNAVAILABLE'), { code: 'ARCHIVE_WORKER_UNAVAILABLE' });
@@ -1758,6 +1763,7 @@ function createA9AgentRuntime(options) {
           archiveAvailable: archiveModule.yazlAvailable(),
           templateAvailable: templateModule.docxtemplaterAvailable(),
           reportAvailable: reportModule.pptxAvailable(),
+          mailAvailable: true,
         }) } : {}),
         runner: runnerAdapter,
         managedProcesses: {

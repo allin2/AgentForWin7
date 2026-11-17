@@ -57,6 +57,10 @@ import {
   PresentationCreateInput, PresentationPlan, PresentationResult,
   HtmlReportCreateInput, HtmlReportPlan, HtmlReportResult, ReportApprovalBinding,
 } from './a9-office-report';
+import {
+  OfficeMailService, MailSourceAdapter, OfficeMailApprovalPort,
+  MailExtractPlanInput, MailExtractPlan, MailExtractApprovalBinding, MailExtractResult,
+} from './a9-office-mail';
 
 export interface A9ListResult {
   path: string;
@@ -245,6 +249,7 @@ export class A9WorkspaceService {
   private readonly officeArchive: OfficeArchiveService;
   private readonly officeTemplate: OfficeTemplateService;
   private readonly officeReport: OfficeReportService;
+  private readonly officeMail: OfficeMailService;
   private readonly baselines = new Map<string, BaselineFact>();
   private readonly containsSensitiveData: (value: string | Buffer) => boolean;
   private readonly containsSensitiveFeedbackData: (value: string | Buffer) => boolean;
@@ -280,7 +285,9 @@ export class A9WorkspaceService {
       officeTemplateWorker?: OfficeTemplateWorkerPort;
       officeTemplateSamples?: Map<string, any>;
       officeReportApproval?: OfficeReportApprovalPort;
-      officeReportWorker?: OfficeReportWorkerPort } = {},
+      officeReportWorker?: OfficeReportWorkerPort;
+      officeMailApproval?: OfficeMailApprovalPort;
+      officeMailEmlAdapter?: MailSourceAdapter } = {},
   ) {
     // 规范化工作区根本身（macOS /var → /private/var、junction 等），
     // 否则 realpathSync 的文件会得到跨前缀的 ../../ 相对路径。
@@ -350,6 +357,13 @@ export class A9WorkspaceService {
       value => this.resolvePath(value),
       options.officeReportApproval ?? (options.officeBatchApproval as unknown as OfficeReportApprovalPort | undefined),
       options.officeReportWorker,
+    );
+    this.officeMail = new OfficeMailService(
+      canonicalRoot,
+      this.checkpointManager,
+      value => this.resolvePath(value),
+      options.officeMailApproval ?? (options.officeBatchApproval as unknown as OfficeMailApprovalPort | undefined),
+      options.officeMailEmlAdapter,
     );
     if (fs.existsSync(this.checkpointManager.getRecoveryRoot())) {
       this.checkpointManager.ensureRecoveryIgnore();
@@ -452,6 +466,33 @@ export class A9WorkspaceService {
 
   executeHtmlReport(options: { planId: string; identity: OfficeBatchIdentity; approvalId: string; signal?: AbortSignal }): Promise<HtmlReportResult> {
     return this.officeReport.executeHtmlReport(options);
+  }
+
+  /** A9-70 P5: Read-only MailSourceAdapter (Mock/SURROGATE & EML) + host-approved attachment extraction. */
+  listMailSource(
+    input: { source: 'mock' | 'eml'; folder?: string; cursor?: string; limit?: number; emlDir?: string; mockPath?: string },
+    signal?: AbortSignal,
+  ) {
+    return this.officeMail.list(input, signal);
+  }
+
+  readMailMessage(
+    input: { source: 'mock' | 'eml'; messageId: string; emlDir?: string; mockPath?: string },
+    signal?: AbortSignal,
+  ) {
+    return this.officeMail.read(input, signal);
+  }
+
+  planMailExtract(identity: OfficeBatchIdentity, input: MailExtractPlanInput, signal?: AbortSignal): Promise<MailExtractPlan> {
+    return this.officeMail.planExtract(identity, input, signal);
+  }
+
+  prepareMailExtract(planId: string, identity: OfficeBatchIdentity, signal?: AbortSignal): Promise<MailExtractApprovalBinding> {
+    return this.officeMail.prepareExtract(planId, identity, signal);
+  }
+
+  executeMailExtract(options: { planId: string; identity: OfficeBatchIdentity; approvalId: string; signal?: AbortSignal }): Promise<MailExtractResult> {
+    return this.officeMail.executeExtract(options);
   }
 
   // -------------------------------------------------------------------------
