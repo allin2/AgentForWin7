@@ -23,6 +23,8 @@ function shutdownHarness(blocked?: string) {
   if (pending.size) gate.promise.then(() => pending.clear());
   const context: any = { Promise, Date, setTimeout, clearTimeout, config: { shutdownStageRecorder: (stage: string) => { events.push(['begin', stage]); return { end: () => events.push(['end', stage]) }; } },
     shutdownPromise: null, shutdownRequested: false, queueClosed: false, pauseQueue() {}, imageService: null, officeService: { close: office },
+    // C1：Office 外围端口已拆到 a9-runtime-office.js；此夹具没有创建过任何外围端口。
+    officePorts: { hasOpenPorts: () => false, closeOpenPorts: () => [] },
     loopTrustedRunner: { getBackgroundManager: () => manager },
     workspaceLock: createWorkspaceLock({ acquire: () => ({ acquired: true, holder: 'owner' }), release }),
     persistence: { releaseWorkspaceLock: release }, canonicalWorkspace: '/test', ownerId: 'owner', checkpointRecoveryPending: blocked === 'checkpoint_recovery',

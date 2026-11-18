@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as vm from 'vm';
+import { withCardRenderers } from './a9-renderer-bundle';
 
 type Checkpoint = { turnId: string; createdAt: string };
 const row = (index: number): Checkpoint => ({
@@ -35,7 +36,7 @@ function mount(listCheckpoints: jest.Mock = jest.fn(async () => ({ ok: true, con
   const source = fs.readFileSync(path.join(__dirname, '../../product/renderer/a9-workbench.js'), 'utf8');
   const instrumented = source.replace('}(window));', "window.__m3 = { state, syncCheckpointScope: typeof syncCheckpointScope === 'function' ? syncCheckpointScope : () => {}, renderCheckpoints, loadOlderCheckpoints: typeof loadOlderCheckpoints === 'function' ? loadOlderCheckpoints : () => {} };}(window));");
   expect(instrumented).not.toBe(source);
-  vm.runInNewContext(instrumented, { window, document, Promise, Map, Set, Array, Object, String, Number, Date, console });
+  vm.runInNewContext(withCardRenderers(instrumented), { window, document, Promise, Map, Set, Array, Object, String, Number, Date, console });
   const hooks = window.__m3;
   const render = (checkpoints: Checkpoint[], total: number, conversationId = 'one', workspaceRoot = '/ws') => {
     const snapshot = { checkpoints, checkpointsTotal: total, activeConversationId: conversationId, workspaceRoot, interruptions: [] };

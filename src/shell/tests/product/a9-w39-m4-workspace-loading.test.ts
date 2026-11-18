@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as vm from 'vm';
+import { withCardRenderers } from './a9-renderer-bundle';
 
 // Same vm + fake DOM approach as a9-workbench-contract.test.ts. The whole
 // production script runs unchanged except for exposing chooseWorkspace/state.
@@ -110,7 +111,7 @@ it('R5-01 real workbench loads 300 of 2500 events on workspace selection without
     '  root.__w39 = { chooseWorkspace, appendReviewFiles, state };\n  root.win7AgentA9Workbench = Object.freeze({');
   window.win7AgentStatus = require('../../product/renderer/a9-agent-status');
   window.win7AgentComposerController = require('../../product/renderer/a9-composer-controller');
-  vm.runInNewContext(instrumented, { window, document, Date });
+  vm.runInNewContext(withCardRenderers(instrumented), { window, document, Date });
   await window.__w39.chooseWorkspace();
   expect(window.win7Agent.selectWorkspace).toHaveBeenCalledTimes(1);
   expect(node('error-banner').textContent).toBe('');
@@ -160,7 +161,7 @@ function makeWorkbench(query: (request: any) => Promise<any>, empty = false) {
     '  root.__w39 = { chooseWorkspace, appendReviewFiles, state };\n  root.win7AgentA9Workbench = Object.freeze({');
   window.win7AgentStatus = require('../../product/renderer/a9-agent-status');
   window.win7AgentComposerController = require('../../product/renderer/a9-composer-controller');
-  vm.runInNewContext(instrumented, { window, document, Date });
+  vm.runInNewContext(withCardRenderers(instrumented), { window, document, Date });
   const stream = node('a9-task-stream');
   const legacyNotes = () => {
     const notes: FakeNode[] = [];

@@ -12,6 +12,7 @@ const { createOfficeApprovalAuthority, createOfficeWorkflow } = require('../../p
 const { loadSkillCatalog } = require('../../../core/dist');
 const { OFFICE_READ_TOOLS, OFFICE_WRITE_TOOLS } = require('../../../core/dist/a9-office-tools');
 const { A9WorkspaceService } = require('../../../workspace/dist');
+import { withCardRenderers } from './a9-renderer-bundle';
 
 const cleanups = new Set<() => Promise<void>>();
 afterEach(async () => {
@@ -313,7 +314,7 @@ describe('A9-70 P6 UI, skills installer & full product closure', () => {
       innerWidth: 1366,
     };
 
-    vm.runInNewContext(script, {
+    vm.runInNewContext(withCardRenderers(script), {
       window: winStub, document: docStub, console, Promise, Set, Map, Object, Array, String, Number, Date, JSON, Math, Boolean,
     });
     await listeners.get('doc:DOMContentLoaded')![0]();

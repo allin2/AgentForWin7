@@ -22,6 +22,18 @@ const { createProviderContextState } = require('./a9-provider-context-state');
 const agentStatusModel = require('./renderer/a9-agent-status');
 const { verifyWorkdir } = require('./a9-default-workdir');
 const { validateHistoryInput, visibleHistoryText, deliveryProjection } = require('./a9-history');
+// C1：无状态子模块（模型失败指引 / URL 校验与脱敏 / 持久化上下文选择 / 降级运行时）。
+const {
+  MODEL_INVOCATION_FAILED_PREFIX, describeModelFailure, presentModelFailureText,
+} = require('./a9-runtime-model-failure');
+const { createOfficeWorkerPorts } = require('./a9-runtime-office');
+const { validateProviderBaseUrl, redactUrlUserinfo, percentEquivalentRegex } = require('./a9-runtime-redaction');
+const {
+  PROVIDER_CONTEXT_MAX_ROUNDS, buildPersistedTextContext, buildPersistedTextContextFromSummary,
+} = require('./a9-runtime-persisted-context');
+const {
+  A9_PROTOCOL_VERSION, preflightElectronSqlite, createSqliteUnavailableRuntime, createDiagnosticsRuntime,
+} = require('./a9-runtime-unavailable');
 
 function requireModule(relativeName) {
   const candidates = [
@@ -34,85 +46,6 @@ function requireModule(relativeName) {
   return require(candidate);
 }
 
-/**
- * B3：把常见网络/模型调用错误映射为“错误原因 + 下一步操作”的中文指引。
- *
- * 只依据错误文本归类（Core 只把 `err.message` 带到界面层）；Gateway 会在消息中保留
- * HTTP 状态、Node 错误码与 TLS 码。顺序即优先级：先具体（状态码/证书码），后宽泛（超时、截断）。
- * 返回 null 表示没有可靠归类，调用方沿用原始错误文本。
- */
-const MODEL_FAILURE_GUIDANCE = [
-  { code: 'A9_ERR_PROXY_AUTH', test: /\bstatus 407\b|Proxy Authentication Required|PROXY_AUTH/i,
-    title: '代理服务器要求身份验证（HTTP 407）',
-    advice: '在“企业网络”中核对代理主机与端口；代理需要账号密码时，请向 IT 获取并配置代理凭据，或改用无需认证的代理。' },
-  { code: 'A9_ERR_AUTH', test: /\bstatus 401\b|AUTH_INVALID_CREDENTIALS|invalid[_ ]api[_ ]key|incorrect api key|(?<!status\s+[2-9]\d\d[^\n]*)\bunauthorized\b/i,
-    title: 'API Key 无效或已过期（HTTP 401）',
-    advice: '请在“模型设置”中重新输入有效的 API Key，并确认它属于当前 Base URL 对应的服务、未被撤销且账户未欠费。' },
-  { code: 'A9_ERR_FORBIDDEN', test: /\bstatus 403\b/i,
-    title: '没有访问该模型或接口的权限（HTTP 403）',
-    advice: '请确认 API Key 已开通所选模型的权限，并检查服务端的 IP 白名单或企业网关策略。' },
-  { code: 'A9_ERR_RATE_LIMIT', test: /\bstatus 429\b|rate.?limit/i,
-    title: '请求过于频繁或额度已用尽（HTTP 429）',
-    advice: '请稍后重试；若持续出现，请检查账户额度、并发限制，或联系服务提供方提高配额。' },
-  { code: 'A9_ERR_NOT_FOUND', test: /\bstatus 404\b|model_not_found|model .{0,60}does not exist/i,
-    title: '找不到模型或接口地址（HTTP 404）',
-    advice: '请核对“模型 ID”；Base URL 可填到 /v1，或者直接填完整的 …/chat/completions 地址（例如智谱 GLM 的 /v4 路径）。' },
-  { code: 'A9_ERR_SERVER', test: /\bstatus 5\d\d\b/i,
-    title: '模型服务暂时不可用（HTTP 5xx）',
-    advice: '这是服务端故障，请稍后重试；持续失败时请联系服务提供方或检查内网推理服务状态。' },
-  { code: 'A9_ERR_TLS_EXPIRED', test: /CERT_HAS_EXPIRED|certificate has expired|CERT_NOT_YET_VALID|certificate is not yet valid/i,
-    title: '服务器证书已过期或尚未生效',
-    advice: '先检查本机系统日期、时间和时区是否正确（Windows 7 电脑电池失效后常见）；日期无误则请联系服务管理员更新证书。本产品不允许关闭证书校验。' },
-  { code: 'A9_ERR_TLS_UNTRUSTED', test: /DEPTH_ZERO_SELF_SIGNED_CERT|SELF_SIGNED_CERT_IN_CHAIN|self[- ]signed certificate|UNABLE_TO_VERIFY_LEAF_SIGNATURE|UNABLE_TO_GET_ISSUER_CERT|unable to verify the (?:first|leaf) certificate|unable to get local issuer certificate/i,
-    title: '无法验证服务器证书（自签名证书或企业根证书未受信任）',
-    advice: '请在“企业网络 → CA bundle 路径”中配置企业根 CA（PEM 格式）；如经企业代理，请向 IT 获取代理使用的根证书。本产品不允许关闭证书校验。' },
-  { code: 'A9_ERR_TLS_HOSTNAME', test: /ERR_TLS_CERT_ALTNAME_INVALID|does not match certificate|Hostname\/IP does not match/i,
-    title: '服务器证书与访问地址不匹配',
-    advice: '请使用证书中登记的域名访问（避免直接填 IP 或别名），或联系管理员为该地址签发证书。' },
-  { code: 'A9_ERR_DNS', test: /ENOTFOUND|EAI_AGAIN|getaddrinfo/i,
-    title: '无法解析模型服务的域名（ENOTFOUND）',
-    advice: '请检查 Base URL 拼写、本机网络与 DNS；内网服务请确认已连接公司网络/VPN，必要时改用服务器 IP 或在“企业网络”中配置代理。' },
-  { code: 'A9_ERR_REFUSED', test: /ECONNREFUSED|connection refused/i,
-    title: '模型服务拒绝了连接（ECONNREFUSED）',
-    advice: '请确认服务已启动、端口正确，并检查本机防火墙与代理设置。' },
-  { code: 'A9_ERR_IDLE_TIMEOUT', test: /No SSE data received for (\d+)ms/i,
-    title: (match) => `模型长时间没有返回数据（空闲超时 ${Math.round(Number(match[1]) / 1000)} 秒）`,
-    advice: '模型可能仍在推理（CPU 推理或深度思考较慢）。可在“模型设置 → 高级设置”调大“空闲超时”（60～1800 秒），或降低思考强度、改用更快的模型。' },
-  { code: 'A9_ERR_TOTAL_TIMEOUT', test: /Total timeout of (\d+)ms/i,
-    title: (match) => `单次请求总耗时超过上限（${Math.round(Number(match[1]) / 1000)} 秒）`,
-    advice: '可在“模型设置 → 高级设置”调大“总超时”（60～1800 秒），或缩短输入、降低思考强度后重试。' },
-  { code: 'A9_ERR_TIMEOUT', test: /ETIMEDOUT|ESOCKETTIMEDOUT|CONNECTION_TIMEOUT|(?<!status\s+[2-9]\d\d[^\n]*)\btimed out\b/i,
-    title: '连接模型服务超时（ETIMEDOUT）',
-    advice: '请检查网络连通性、防火墙与代理设置，并确认 Base URL 可从本机访问；网络较慢时可在“高级设置”调大超时。' },
-  { code: 'A9_ERR_STREAM_TRUNCATED', test: /(?<!status\s+5\d\d[^\n]*)(?:stream ended without a finish_reason|Gateway stream (?:emitted|returned)|Malformed SSE|socket hang up|ECONNRESET|ECONNABORTED|premature close|aborted|EPIPE)/i,
-    title: '模型响应在传输中途被截断或中断',
-    advice: '通常是网络波动，或网关/代理提前断开了流式连接。请重试一次；若频繁出现，请检查代理对长连接（SSE）的超时设置，或调大“空闲超时”。' },
-];
-
-function describeModelFailure(rawMessage) {
-  const text = String(rawMessage == null ? '' : rawMessage);
-  for (const rule of MODEL_FAILURE_GUIDANCE) {
-    const match = rule.test.exec(text);
-    if (!match) continue;
-    return {
-      code: rule.code,
-      title: typeof rule.title === 'function' ? rule.title(match) : rule.title,
-      advice: rule.advice,
-    };
-  }
-  return null;
-}
-
-/** 界面文案：中文原因与下一步在前；原始英文错误放在“原始错误：”之后，渲染层把它折叠到详情里。 */
-const MODEL_FAILURE_DETAIL_MARKER = '\n\n原始错误：';
-function presentModelFailureText(rawMessage, guidance = describeModelFailure(rawMessage)) {
-  const raw = String(rawMessage == null ? '' : rawMessage);
-  if (!guidance) return raw;
-  return `${guidance.title}\n下一步：${guidance.advice}${MODEL_FAILURE_DETAIL_MARKER}${raw}`;
-}
-
-const MODEL_INVOCATION_FAILED_PREFIX = 'Model invocation failed: ';
-
 function loadModules() {
   return {
     core: requireModule('core/dist'),
@@ -122,84 +55,6 @@ function loadModules() {
     runner: requireModule('runner/dist'),
     gitAdapter: requireModule('git-adapter/dist'),
   };
-}
-
-const A9_PROTOCOL_VERSION = 1;
-function validateProviderBaseUrl(value) {
-  if (typeof value !== 'string') {
-    const err = new Error('A9_PROVIDER_CONFIG_INVALID: baseUrl 必须是 http(s) URL（允许任意 Base URL）');
-    err.code = 'A9_PROVIDER_CONFIG_INVALID';
-    throw err;
-  }
-  const trimmed = value.trim();
-  let parsed;
-  try {
-    parsed = new URL(trimmed);
-  } catch (_err) {
-    const err = new Error('A9_PROVIDER_CONFIG_INVALID: baseUrl 必须是有效的 http(s) URL');
-    err.code = 'A9_PROVIDER_CONFIG_INVALID';
-    throw err;
-  }
-  if ((parsed.protocol !== 'http:' && parsed.protocol !== 'https:') || !parsed.hostname) {
-    const err = new Error('A9_PROVIDER_CONFIG_INVALID: baseUrl 必须是有效的 http(s) URL');
-    err.code = 'A9_PROVIDER_CONFIG_INVALID';
-    throw err;
-  }
-  if (parsed.username || parsed.password || parsed.hash || parsed.search) {
-    const err = new Error('A9_PROVIDER_BASE_URL_CREDENTIALS_FORBIDDEN: baseUrl 不得包含 userinfo、query 或 fragment；请使用 API Key/Header/代理秘密字段');
-    err.code = 'A9_PROVIDER_BASE_URL_CREDENTIALS_FORBIDDEN';
-    throw err;
-  }
-  return trimmed;
-}
-
-// A9-21 M1b：与旧正则 /([a-z][a-z0-9+.-]*:\/\/)[^\s/@:]+:[^\s/@]+@/gi 等价的线性扫描。
-// 第 1 版 {0,31} 不等价（:// 前 32 字符内无字母时旧正则仍脱敏）；反向断言单正则在 V8 上仍二次。
-// 字符判定必须用正则字符类（保留 i 与 \s 的 Unicode 语义），不得改用 charCodeAt / toLowerCase。
-// 依据：协议名字符不含 ':'，任一起点只能对应所在段末尾的 '://'；段内最左字母为起点，其余起点输出相同。
-// 线性：各 '://' 的协议名段互不重叠；粘连匹配至多扫到下一个 '/'，而 '://' 本身含 '/'。
-const URL_USERINFO_TAIL = /[^\s/@:]+:[^\s/@]+@/iy;
-const PROTO_NAME_CHAR = /[a-z0-9+.-]/i;
-const SCHEME_LETTER = /[a-z]/i;
-
-function redactUrlUserinfo(text) {
-  const s = String(text == null ? '' : text);
-  let copied = 0;
-  let from = 0;
-  let out = '';
-  for (;;) {
-    const k = s.indexOf('://', from);
-    if (k < 0) {
-      out += s.slice(copied);
-      return out;
-    }
-    let hasLetter = false;
-    for (let i = k - 1; i >= copied; i--) {
-      const ch = s.charAt(i);
-      if (!PROTO_NAME_CHAR.test(ch)) break;
-      if (SCHEME_LETTER.test(ch)) {
-        hasLetter = true;
-        break;
-      }
-    }
-    if (hasLetter) {
-      URL_USERINFO_TAIL.lastIndex = k + 3;
-      if (URL_USERINFO_TAIL.test(s)) {
-        out += s.slice(copied, k + 3) + '***redacted***@';
-        copied = URL_USERINFO_TAIL.lastIndex;
-        from = copied;
-        continue;
-      }
-    }
-    from = k + 1;
-  }
-}
-
-function boundedDiagnosticText(value) {
-  return redactUrlUserinfo(value)
-    .replace(/((?:authorization|api[-_]?key|password|secret|access[-_]?token|refresh[-_]?token)\s*[:=]\s*)(?:bearer\s+)?[^\s,;&]+/gi, '$1***redacted***')
-    .replace(/([?&](?:api[-_]?key|password|secret|access[-_]?token|refresh[-_]?token)=)[^&#\s]*/gi, '$1***redacted***')
-    .slice(0, 600);
 }
 
 function openA9RuntimePersistence(config, modules = config.modules || loadModules()) {
@@ -324,40 +179,13 @@ function createA9AgentRuntime(options) {
     return path.isAbsolute(value) || path.win32.isAbsolute(value) || path.posix.isAbsolute(value) ||
       /^[A-Za-z]:/.test(value) || value.includes('\0') || value.split(/[\\/]+/).includes('..');
   }
+  // C1：Office 外围端口的惰性生命周期见 a9-runtime-office.js。
+  const officePorts = createOfficeWorkerPorts({ config, workspaceRoot });
   function guardedWorkspaceService(options) {
-    const officeArchiveWorker = {
-      createZip: (input, signal) => getArchiveWorkerPort().createZip(input, signal),
-      close: () => (archiveWorkerPort ? archiveWorkerPort.close() : Promise.resolve()),
-    };
-    const officeTemplateWorker = {
-      inspectTemplate: (buffer, format, signal) => getTemplateWorkerPort().inspectTemplate(buffer, format, signal),
-      renderBatch: (input, signal) => getTemplateWorkerPort().renderBatch(input, signal),
-      close: () => (templateWorkerPort ? templateWorkerPort.close() : Promise.resolve()),
-    };
-    const officeReportWorker = {
-      createLayoutsPresentation: (input, signal) => getReportWorkerPort().createLayoutsPresentation(input, signal),
-      fillTemplatePresentation: (input, signal) => getReportWorkerPort().fillTemplatePresentation(input, signal),
-      close: () => (reportWorkerPort ? reportWorkerPort.close() : Promise.resolve()),
-    };
-    const officeMailEmlAdapter = mailModule.emlAvailable()
-      ? {
-        schemaVersion: 1,
-        sourceId: 'eml',
-        kind: 'eml_directory',
-        evidenceClass: 'LOCAL_EML_EXPORT',
-        listFolders: (opts, sig) => getMailEmlAdapter().listFolders(opts, sig),
-        listMessages: (opts, sig) => getMailEmlAdapter().listMessages(opts, sig),
-        readMessage: (id, opts, sig) => getMailEmlAdapter().readMessage(id, opts, sig),
-        readAttachmentBytes: (id, attId, opts, sig) => getMailEmlAdapter().readAttachmentBytes(id, attId, opts, sig),
-      }
-      : undefined;
     const service = new modules.workspace.A9WorkspaceService(workspaceRoot, {
       ...options,
       officeBatchApproval: officeAuthority.port,
-      ...(archiveModule.yazlAvailable() ? { officeArchiveWorker } : {}),
-      ...(templateModule.docxtemplaterAvailable() ? { officeTemplateWorker, officeTemplateSamples: templateSampleStore } : {}),
-      ...(reportModule.pptxAvailable() ? { officeReportWorker } : {}),
-      ...(officeMailEmlAdapter ? { officeMailEmlAdapter } : {}),
+      ...officePorts.workspaceOptions(),
     });
     return new Proxy(service, { get(target, property) {
       const value = target[property];
@@ -452,45 +280,8 @@ function createA9AgentRuntime(options) {
   let loop = null;
   let imageService = null;
   let officeService = null;
-  let archiveWorkerPort = null;
-  let templateWorkerPort = null;
-  let reportWorkerPort = null;
-  let mailEmlAdapter = null;
-  const templateSampleStore = new Map();
   const officeModule = require('./a9-office-service');
-  const archiveModule = require('./a9-office-archive');
-  const templateModule = require('./a9-office-template');
-  const reportModule = require('./a9-office-report');
   const previewModule = require('./a9-office-preview');
-  const mailModule = require('./a9-office-mail');
-  function getMailEmlAdapter() {
-    if (!mailEmlAdapter) {
-      if (!mailModule.emlAvailable()) throw Object.assign(new Error('MAIL_EML_ADAPTER_UNAVAILABLE'), { code: 'MAIL_EML_ADAPTER_UNAVAILABLE' });
-      mailEmlAdapter = mailModule.createEmlDirectoryMailAdapter({ workspaceRoot });
-    }
-    return mailEmlAdapter;
-  }
-  function getArchiveWorkerPort() {
-    if (!archiveWorkerPort) {
-      if (!archiveModule.yazlAvailable()) throw Object.assign(new Error('ARCHIVE_WORKER_UNAVAILABLE'), { code: 'ARCHIVE_WORKER_UNAVAILABLE' });
-      archiveWorkerPort = archiveModule.createArchiveWorkerPort(config.archiveWorkerOptions);
-    }
-    return archiveWorkerPort;
-  }
-  function getTemplateWorkerPort() {
-    if (!templateWorkerPort) {
-      if (!templateModule.docxtemplaterAvailable()) throw Object.assign(new Error('TEMPLATE_WORKER_UNAVAILABLE'), { code: 'TEMPLATE_WORKER_UNAVAILABLE' });
-      templateWorkerPort = templateModule.createTemplateWorkerPort(config.templateWorkerOptions);
-    }
-    return templateWorkerPort;
-  }
-  function getReportWorkerPort() {
-    if (!reportWorkerPort) {
-      if (!reportModule.pptxAvailable()) throw Object.assign(new Error('REPORT_WORKER_UNAVAILABLE'), { code: 'REPORT_WORKER_UNAVAILABLE' });
-      reportWorkerPort = reportModule.createReportWorkerPort(config.reportWorkerOptions);
-    }
-    return reportWorkerPort;
-  }
   function getOfficeService() {
     if (!officeService) officeService = officeModule.createOfficeService({
       workspaceRoot, workspace: modules.workspace, workspaceService: {
@@ -1916,17 +1707,20 @@ function createA9AgentRuntime(options) {
         } : {}),
         provider,
         workspaceService,
-        ...(typeof workspaceService.prepareOrganize === 'function' ? { officeWorkflow: officeWorkflowModule.createOfficeWorkflow({
-          service: workspaceService, authority: officeAuthority,
-          identity: turnId => ({ workspaceId: shellWorkspaceKey, conversationId: a9SessionId, turnId }),
-          containsSensitiveData: containsSensitiveProjectInstructionData, assertAvailable,
-          workspaceModule: modules.workspace, transferWorkspaces: config.transferWorkspaces,
-          withTransferReservation: config.withTransferReservation,
-          archiveAvailable: archiveModule.yazlAvailable(),
-          templateAvailable: templateModule.docxtemplaterAvailable(),
-          reportAvailable: reportModule.pptxAvailable(),
-          mailAvailable: true,
-        }) } : {}),
+        ...(typeof workspaceService.prepareOrganize === 'function' ? { officeWorkflow: (() => {
+          const avail = officePorts.availability();
+          return officeWorkflowModule.createOfficeWorkflow({
+            service: workspaceService, authority: officeAuthority,
+            identity: turnId => ({ workspaceId: shellWorkspaceKey, conversationId: a9SessionId, turnId }),
+            containsSensitiveData: containsSensitiveProjectInstructionData, assertAvailable,
+            workspaceModule: modules.workspace, transferWorkspaces: config.transferWorkspaces,
+            withTransferReservation: config.withTransferReservation,
+            archiveAvailable: avail.archive,
+            templateAvailable: avail.template,
+            reportAvailable: avail.report,
+            mailAvailable: true,
+          });
+        })() } : {}),
         runner: runnerAdapter,
         managedProcesses: {
           async start(command, context) {
@@ -4030,10 +3824,7 @@ function createA9AgentRuntime(options) {
     const manager = loopTrustedRunner.getBackgroundManager();
     const releaseWorkspaceLock = () => workspaceLock.release();
     if (!checkpointRecoveryPending && pendingStateOperations.size === 0 && !officeService
-      && !(typeof archiveWorkerPort !== 'undefined' && archiveWorkerPort)
-      && !(typeof templateWorkerPort !== 'undefined' && templateWorkerPort)
-      && !(typeof reportWorkerPort !== 'undefined' && reportWorkerPort)
-      && !(typeof mailEmlAdapter !== 'undefined' && mailEmlAdapter)
+      && !officePorts.hasOpenPorts()
       && !activeController && !(options.cancelPending && (currentPendingApproval || currentPendingQuestion)) && manager.getActiveCount() === 0) {
       // 保留既有无负载关闭语义：无需等待时同步释放锁，紧接着切换/重开
       // 同一工作区不会短暂误报 A9_WORKSPACE_LOCKED。
@@ -4048,10 +3839,7 @@ function createA9AgentRuntime(options) {
       await Promise.resolve();
       const officeClose = Promise.all([
         officeService ? Promise.resolve().then(() => officeService.close()) : Promise.resolve(),
-        typeof archiveWorkerPort !== 'undefined' && archiveWorkerPort ? Promise.resolve().then(() => archiveWorkerPort.close()) : Promise.resolve(),
-        typeof templateWorkerPort !== 'undefined' && templateWorkerPort ? Promise.resolve().then(() => templateWorkerPort.close()) : Promise.resolve(),
-        typeof reportWorkerPort !== 'undefined' && reportWorkerPort ? Promise.resolve().then(() => reportWorkerPort.close()) : Promise.resolve(),
-        typeof mailEmlAdapter !== 'undefined' && mailEmlAdapter ? Promise.resolve().then(() => mailEmlAdapter.close()) : Promise.resolve(),
+        ...officePorts.closeOpenPorts(),
       ]);
       // Observe rejection immediately while recovery/cancellation still owns the wait.
       // 关闭失败由随后的 office_close 阶段向调用方抛出；这里立即观察以免产生未处理拒绝，并留下诊断。
@@ -4323,249 +4111,6 @@ function createA9AgentRuntime(options) {
 
 function createConversationId() {
   return `a9c-${Date.now()}-${crypto.randomBytes(6).toString('hex')}`;
-}
-
-const PROVIDER_CONTEXT_MAX_ROUNDS = 20;
-const PROVIDER_CONTEXT_MAX_CHARS = 32_000;
-
-/**
- * A9-66 F-007: same selection/statistics as buildPersistedTextContext, from the
- * bounded asynchronous scan summary (newest complete rounds in ascending order,
- * exact complete/visible counts). buildPersistedTextContext stays the
- * independent synchronous oracle.
- */
-function buildPersistedTextContextFromSummary(summary) {
-  const recent = summary.recent;
-  const selected = [];
-  let includedChars = 0;
-  for (let index = recent.length - 1; index >= 0 && selected.length < PROVIDER_CONTEXT_MAX_ROUNDS; index -= 1) {
-    const fact = recent[index];
-    const roundChars = fact.requestPrompt.length + fact.finalMessage.length;
-    if (includedChars + roundChars > PROVIDER_CONTEXT_MAX_CHARS) break;
-    selected.push(fact);
-    includedChars += roundChars;
-  }
-  selected.reverse();
-  const omittedRounds = Math.max(0, summary.completeRounds - selected.length);
-  return {
-    messages: selected.flatMap((fact) => [
-      { role: 'user', content: fact.requestPrompt },
-      { role: 'assistant', content: fact.finalMessage },
-    ]),
-    stats: {
-      includedRounds: selected.length,
-      includedChars,
-      omittedRounds,
-      visibleRounds: summary.visibleRounds,
-      maxRounds: PROVIDER_CONTEXT_MAX_ROUNDS,
-      maxChars: PROVIDER_CONTEXT_MAX_CHARS,
-      ...(omittedRounds > 0 ? { note: `更早的 ${omittedRounds} 个完整轮次仅在本地可见，未恢复给 Provider。` } : {}),
-    },
-  };
-}
-
-/**
- * 重启/切换时只恢复完整用户+助手文本轮；工具、审批和副作用不进入模型上下文。
- */
-function buildPersistedTextContext(facts, providerContextGeneration = 0) {
-  const complete = (Array.isArray(facts) ? facts : []).filter((fact) =>
-    (Number.isSafeInteger(fact.providerContextGeneration) ? fact.providerContextGeneration : 0) === providerContextGeneration
-    &&
-    typeof fact.requestPrompt === 'string' && fact.requestPrompt.length > 0
-    && typeof fact.finalMessage === 'string' && fact.finalMessage.length > 0);
-  const selected = [];
-  let includedChars = 0;
-  for (let index = complete.length - 1; index >= 0 && selected.length < 20; index -= 1) {
-    const fact = complete[index];
-    const roundChars = fact.requestPrompt.length + fact.finalMessage.length;
-    if (includedChars + roundChars > 32_000) break;
-    selected.push(fact);
-    includedChars += roundChars;
-  }
-  selected.reverse();
-  const omittedRounds = Math.max(0, complete.length - selected.length);
-  return {
-    messages: selected.flatMap((fact) => [
-      { role: 'user', content: fact.requestPrompt },
-      { role: 'assistant', content: fact.finalMessage },
-    ]),
-    stats: {
-      includedRounds: selected.length,
-      includedChars,
-      omittedRounds,
-      visibleRounds: Array.isArray(facts) ? facts.length : 0,
-      maxRounds: 20,
-      maxChars: 32_000,
-      ...(omittedRounds > 0 ? { note: `更早的 ${omittedRounds} 个完整轮次仅在本地可见，未恢复给 Provider。` } : {}),
-    },
-  };
-}
-
-function percentEquivalentRegex(value) {
-  const escape = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const percentBytes = (text) => Array.from(Buffer.from(text, 'utf8'))
-    .map((byte) => `%${byte.toString(16).padStart(2, '0')}`)
-    .join('');
-  // Each Unicode code point may appear literally or as its complete UTF-8
-  // percent sequence. This covers legal mixed forms such as `%61b%2F...`
-  // without making unescaped secret characters case-insensitive.
-  const pattern = Array.from(value).map((character) => {
-    const encoded = percentBytes(character);
-    const encodedPattern = encoded.replace(/[a-f]/g, (digit) => `[${digit}${digit.toUpperCase()}]`);
-    const alternatives = [escape(character), encodedPattern];
-    if (character === ' ') alternatives.push('\\+');
-    return `(?:${alternatives.join('|')})`;
-  }).join('');
-  return new RegExp(pattern, 'g');
-}
-
-function preflightElectronSqlite(root) {
-  try {
-    const modulePath = path.join(String(root), 'node_modules', 'better-sqlite3');
-    // eslint-disable-next-line global-require
-    const Database = require(modulePath);
-    const probe = new Database(':memory:');
-    const version = probe.prepare('select sqlite_version() v').get();
-    probe.close();
-    return {
-      ok: true,
-      sqliteVersion: version && version.v,
-      openDatabase: (databasePath, opts) => new Database(databasePath, opts && opts.readonly ? { readonly: true } : {}),
-    };
-  } catch (err) {
-    // A9-67 F-028: a stable probe code precedes the bounded detail so the
-    // diagnostic is classifiable without parsing platform-specific messages.
-    const message = `${err && err.message ? err.message : String(err)}`;
-    const errorCode = err && typeof err.code === 'string' ? err.code : '';
-    const code = errorCode === 'MODULE_NOT_FOUND' ? 'A9_PROBE_SQLITE_MODULE_MISSING'
-      : errorCode === 'ERR_DLOPEN_FAILED' || /NODE_MODULE_VERSION/.test(message) ? 'A9_PROBE_SQLITE_ABI_MISMATCH'
-        : 'A9_PROBE_SQLITE_OPEN_FAILED';
-    return { ok: false, code, reason: `${code}: ${message}` };
-  }
-}
-
-function createSqliteUnavailableRuntime(reason) {
-  const safeReason = boundedDiagnosticText(reason);
-  return {
-    protocolVersion: 1,
-    status: 'electron_sqlite_unavailable',
-    shareProviderState() { throw Object.assign(new Error('ELECTRON_SQLITE_UNAVAILABLE'), { code: 'ELECTRON_SQLITE_UNAVAILABLE' }); },
-    acceptProviderState() { throw Object.assign(new Error('ELECTRON_SQLITE_UNAVAILABLE'), { code: 'ELECTRON_SQLITE_UNAVAILABLE' }); },
-    diagnostics: { code: 'ELECTRON_SQLITE_UNAVAILABLE', detail: safeReason },
-    whenReady() { return Promise.resolve(); },
-    assertAvailable() {},
-    configureProvider() { throw new Error('ELECTRON_SQLITE_UNAVAILABLE'); },
-    probeProvider() { throw new Error('ELECTRON_SQLITE_UNAVAILABLE'); },
-    configureShell() { throw new Error('ELECTRON_SQLITE_UNAVAILABLE'); },
-    async continueTask() { return { ok: false, error: { code: 'ELECTRON_SQLITE_UNAVAILABLE' } }; },
-    dismissRecovered() { return { ok: false, error: { code: 'ELECTRON_SQLITE_UNAVAILABLE' } }; },
-    selectOfficeActions() { return { ok: false, error: { code: 'ELECTRON_SQLITE_UNAVAILABLE' } }; },
-    confirmTemplateSample() { return { ok: false, error: { code: 'ELECTRON_SQLITE_UNAVAILABLE' } }; },
-    previewHtmlReport() { return { ok: false, error: { code: 'ELECTRON_SQLITE_UNAVAILABLE' } }; },
-    installOfficeSkills() { return { ok: false, error: { code: 'ELECTRON_SQLITE_UNAVAILABLE' } }; },
-    updateQueue() { return { ok: false, error: { code: 'A9_QUEUE_UNAVAILABLE' } }; },
-    async submitTurn() { return { ok: false, error: { code: 'ELECTRON_SQLITE_UNAVAILABLE', message: 'Electron-ABI better-sqlite3 预检失败，A9 持久化不可用。' } }; },
-    async resumeApproval() { return { ok: false, error: { code: 'ELECTRON_SQLITE_UNAVAILABLE' } }; },
-    async answerQuestion() { return { ok: false, error: { code: 'ELECTRON_SQLITE_UNAVAILABLE' } }; },
-    stop() { return { ok: false }; },
-    saveDraft() { return { ok: false, error: { code: 'ELECTRON_SQLITE_UNAVAILABLE' } }; },
-    createConversation() { throw new Error('ELECTRON_SQLITE_UNAVAILABLE'); },
-    activateConversation() { throw new Error('ELECTRON_SQLITE_UNAVAILABLE'); },
-    renameConversation() { throw new Error('ELECTRON_SQLITE_UNAVAILABLE'); },
-    archiveConversation() { throw new Error('ELECTRON_SQLITE_UNAVAILABLE'); },
-    restoreConversation() { throw new Error('ELECTRON_SQLITE_UNAVAILABLE'); },
-    settleConversation() { return { ok: false, error: { code: 'ELECTRON_SQLITE_UNAVAILABLE' } }; },
-    reopenConversation() { return { ok: false, error: { code: 'ELECTRON_SQLITE_UNAVAILABLE' } }; },
-    visitConversation() { return { ok: false, error: { code: 'ELECTRON_SQLITE_UNAVAILABLE' } }; },
-    canLeaveWorkspace() { return { allowed: true, reason: null }; },
-    getWorkdirInfo() { return {}; },
-    getTransferWorkspace() { throw Object.assign(new Error('ELECTRON_SQLITE_UNAVAILABLE'), { code: 'ELECTRON_SQLITE_UNAVAILABLE' }); },
-    getWorkdirConversationId() { return null; },
-    ensureWorkdir() { throw Object.assign(new Error('ELECTRON_SQLITE_UNAVAILABLE'), { code: 'ELECTRON_SQLITE_UNAVAILABLE' }); },
-    listWorkspaceDirectory() { return { ok: false, error: { code: 'ELECTRON_SQLITE_UNAVAILABLE' } }; },
-    setMode() { throw new Error('ELECTRON_SQLITE_UNAVAILABLE'); },
-    getSnapshot() { return { schemaVersion: 1, status: 'electron_sqlite_unavailable', diagnostics: { code: 'ELECTRON_SQLITE_UNAVAILABLE', detail: safeReason } }; },
-    listCheckpoints() { return { ok: false, error: { code: 'ELECTRON_SQLITE_UNAVAILABLE' } }; },
-    queryEvents() { return { ok: false, error: { code: 'ELECTRON_SQLITE_UNAVAILABLE' } }; },
-    queryConversation() { return { ok: false, error: { code: 'ELECTRON_SQLITE_UNAVAILABLE' } }; },
-    browseConversation() { return { ok: false, error: { code: 'ELECTRON_SQLITE_UNAVAILABLE' } }; },
-    searchHistory() { return { ok: false, error: { code: 'ELECTRON_SQLITE_UNAVAILABLE' } }; },
-    locateHistory() { return { ok: false, error: { code: 'ELECTRON_SQLITE_UNAVAILABLE' } }; },
-    getDelivery() { return { ok: false, error: { code: 'ELECTRON_SQLITE_UNAVAILABLE' } }; },
-    readWorkspaceFile() { return { ok: false, error: { code: 'ELECTRON_SQLITE_UNAVAILABLE' } }; },
-    previewImage() { return { ok: false, error: { code: 'ELECTRON_SQLITE_UNAVAILABLE' } }; },
-    undoTurn() { throw new Error('ELECTRON_SQLITE_UNAVAILABLE'); },
-    undoFile() { throw new Error('ELECTRON_SQLITE_UNAVAILABLE'); },
-    getDiff() { throw new Error('ELECTRON_SQLITE_UNAVAILABLE'); },
-    async gitStatus() { return { ok: false, error: { code: 'ELECTRON_SQLITE_UNAVAILABLE' } }; },
-    getShutdownStage() { return null; },
-    shutdown() {},
-  };
-}
-
-function createDiagnosticsRuntime(outcome) {
-  const diagnosticStatus = outcome && outcome.status === 'schema_refused' ? 'schema_refused' : 'diagnostics';
-  const safeDiagnostics = {
-    code: diagnosticStatus === 'schema_refused' ? 'A9_SCHEMA_REFUSED' : 'A9_PERSISTENCE_DIAGNOSTICS',
-    detail: boundedDiagnosticText(outcome && (outcome.error || outcome.reason || 'A9 persistence unavailable')),
-    ...(outcome && outcome.hint ? { hint: boundedDiagnosticText(outcome.hint) } : {}),
-    ...(outcome && Number.isSafeInteger(outcome.foundVersion) ? { foundVersion: outcome.foundVersion } : {}),
-  };
-  return {
-    protocolVersion: A9_PROTOCOL_VERSION,
-    status: diagnosticStatus,
-    shareProviderState() { throw Object.assign(new Error('A9_DIAGNOSTICS_MODE'), { code: 'A9_DIAGNOSTICS_MODE' }); },
-    acceptProviderState() { throw Object.assign(new Error('A9_DIAGNOSTICS_MODE'), { code: 'A9_DIAGNOSTICS_MODE' }); },
-    diagnostics: safeDiagnostics,
-    whenReady() { return Promise.resolve(); },
-    assertAvailable() {},
-    configureProvider() { throw new Error('A9_DIAGNOSTICS_MODE'); },
-    probeProvider() { throw new Error('A9_DIAGNOSTICS_MODE'); },
-    configureShell() { throw new Error('A9_DIAGNOSTICS_MODE'); },
-    async continueTask() { return { ok: false, error: { code: 'A9_DIAGNOSTICS_MODE' } }; },
-    dismissRecovered() { return { ok: false, error: { code: 'A9_DIAGNOSTICS_MODE' } }; },
-    selectOfficeActions() { return { ok: false, error: { code: 'A9_DIAGNOSTICS_MODE' } }; },
-    confirmTemplateSample() { return { ok: false, error: { code: 'A9_DIAGNOSTICS_MODE' } }; },
-    previewHtmlReport() { return { ok: false, error: { code: 'A9_DIAGNOSTICS_MODE' } }; },
-    installOfficeSkills() { return { ok: false, error: { code: 'A9_DIAGNOSTICS_MODE' } }; },
-    updateQueue() { return { ok: false, error: { code: 'A9_QUEUE_UNAVAILABLE' } }; },
-    async submitTurn() { return { ok: false, error: { code: 'A9_DIAGNOSTICS_MODE', message: '数据库受限诊断模式，禁止执行任务。' } }; },
-    async resumeApproval() { return { ok: false, error: { code: 'A9_DIAGNOSTICS_MODE' } }; },
-    async answerQuestion() { return { ok: false, error: { code: 'A9_DIAGNOSTICS_MODE' } }; },
-    stop() { return { ok: false }; },
-    saveDraft() { return { ok: false, error: { code: 'A9_DIAGNOSTICS_MODE' } }; },
-    createConversation() { throw new Error('A9_DIAGNOSTICS_MODE'); },
-    activateConversation() { throw new Error('A9_DIAGNOSTICS_MODE'); },
-    renameConversation() { throw new Error('A9_DIAGNOSTICS_MODE'); },
-    archiveConversation() { throw new Error('A9_DIAGNOSTICS_MODE'); },
-    restoreConversation() { throw new Error('A9_DIAGNOSTICS_MODE'); },
-    settleConversation() { return { ok: false, error: { code: 'A9_DIAGNOSTICS_MODE' } }; },
-    reopenConversation() { return { ok: false, error: { code: 'A9_DIAGNOSTICS_MODE' } }; },
-    visitConversation() { return { ok: false, error: { code: 'A9_DIAGNOSTICS_MODE' } }; },
-    canLeaveWorkspace() { return { allowed: true, reason: null }; },
-    getWorkdirInfo() { return {}; },
-    getTransferWorkspace() { throw Object.assign(new Error('A9_DIAGNOSTICS_MODE'), { code: 'A9_DIAGNOSTICS_MODE' }); },
-    getWorkdirConversationId() { return null; },
-    ensureWorkdir() { throw Object.assign(new Error('A9_DIAGNOSTICS_MODE'), { code: 'A9_DIAGNOSTICS_MODE' }); },
-    listWorkspaceDirectory() { return { ok: false, error: { code: 'A9_DIAGNOSTICS_MODE' } }; },
-    setMode() { throw new Error('A9_DIAGNOSTICS_MODE'); },
-    getSnapshot() { return { schemaVersion: A9_PROTOCOL_VERSION, status: diagnosticStatus, diagnostics: safeDiagnostics }; },
-    listCheckpoints() { return { ok: false, error: { code: 'A9_DIAGNOSTICS_MODE' } }; },
-    queryEvents() { return { ok: false, error: { code: 'A9_DIAGNOSTICS_MODE' } }; },
-    queryConversation() { return { ok: false, error: { code: 'A9_DIAGNOSTICS_MODE' } }; },
-    browseConversation() { return { ok: false, error: { code: 'A9_DIAGNOSTICS_MODE' } }; },
-    searchHistory() { return { ok: false, error: { code: 'A9_DIAGNOSTICS_MODE' } }; },
-    locateHistory() { return { ok: false, error: { code: 'A9_DIAGNOSTICS_MODE' } }; },
-    getDelivery() { return { ok: false, error: { code: 'A9_DIAGNOSTICS_MODE' } }; },
-    readWorkspaceFile() { return { ok: false, error: { code: 'A9_DIAGNOSTICS_MODE' } }; },
-    previewImage() { return { ok: false, error: { code: 'A9_DIAGNOSTICS_MODE' } }; },
-    undoTurn() { throw new Error('A9_DIAGNOSTICS_MODE'); },
-    undoFile() { throw new Error('A9_DIAGNOSTICS_MODE'); },
-    getDiff() { throw new Error('A9_DIAGNOSTICS_MODE'); },
-    async gitStatus() { return { ok: false, error: { code: 'A9_DIAGNOSTICS_MODE' } }; },
-    getShutdownStage() { return null; },
-    shutdown() {},
-  };
 }
 
 module.exports = { createA9AgentRuntime, describeModelFailure, presentModelFailureText, openA9RuntimePersistence, buildPersistedTextContext, buildPersistedTextContextFromSummary, normalizeConversationTitle: (...args) => requireModule('state/dist').normalizeConversationTitle(...args), A9_PROTOCOL_VERSION, redactUrlUserinfo };

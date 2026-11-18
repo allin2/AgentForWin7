@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as vm from 'vm';
+import { withCardRenderers } from './a9-renderer-bundle';
 
 class FakeNode {
   children: FakeNode[] = [];
@@ -71,7 +72,7 @@ function mount() {
   expect(instrumented).not.toBe(source);
   root.win7AgentStatus = require('../../product/renderer/a9-agent-status');
   root.win7AgentComposerController = require('../../product/renderer/a9-composer-controller');
-  vm.runInNewContext(instrumented, { window: root, document, Date, Map, Set, Promise });
+  vm.runInNewContext(withCardRenderers(instrumented), { window: root, document, Date, Map, Set, Promise });
   const hooks = root.__review;
   const snapshot = { workspaceRoot: 'C:\\中文 空格', activeConversationId: 'conversation-1',
     mode: 'full_access', status: 'ready', provider: { configured: true, probe: { classification: 'tool_calling' } },

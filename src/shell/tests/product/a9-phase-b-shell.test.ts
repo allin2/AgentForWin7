@@ -223,7 +223,7 @@ describe('B2/B3 Provider settings and failure presentation', () => {
 
 describe('B3 renderer folds the original error into a details element', () => {
   const script = fs.readFileSync(path.join(__dirname, '../../product/renderer/a9-workbench.js'), 'utf8');
-  const source = script.slice(script.indexOf('  function setOutcomeText('), script.indexOf('  function clampText('));
+  const source = script.slice(script.indexOf('  function setOutcomeText('), script.indexOf('  function formatElapsed('));
   const makeNode = (tag: string): any => ({
     tag, className: '', children: [] as any[], _text: '',
     get textContent() { return this._text; },

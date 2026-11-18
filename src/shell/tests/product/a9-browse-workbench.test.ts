@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as vm from 'vm';
+import { withCardRenderers } from './a9-renderer-bundle';
 
 // A9-57 / ADR-0325：执行完整产品 Renderer。只有 DOM 与冻结的 preload 边界是夹具。
 const rendererRoot = path.resolve(__dirname, '../../product/renderer');
@@ -205,7 +206,7 @@ function workbench(initial: any = snapshot()) {
     addEventListener: (type: string, listener: (event?: any) => any) => register(`window:${type}`, listener) };
   window.win7AgentStatus = require('../../product/renderer/a9-agent-status');
   window.win7AgentComposerController = require('../../product/renderer/a9-composer-controller');
-  vm.runInNewContext(source, { window, document, console }, { filename: 'a9-workbench.js' });
+  vm.runInNewContext(withCardRenderers(source), { window, document, console }, { filename: 'a9-workbench.js' });
   const fire = (key: string, event: any = {}) => Promise.all((registry.get(key) || []).map((listener) => listener({ preventDefault() {}, stopPropagation() {}, ...event })));
   const node = (id: string) => nodes.get(id)!;
   const row = (conversationId: string) => {

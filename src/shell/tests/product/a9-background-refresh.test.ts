@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as vm from 'vm';
+import { withCardRenderers } from './a9-renderer-bundle';
 
 const rendererRoot = path.resolve(__dirname, '../../product/renderer');
 const source = fs.readFileSync(path.join(rendererRoot, 'a9-workbench.js'), 'utf8');
@@ -142,7 +143,7 @@ function workbench(initial: any = snapshot()) {
     addEventListener: (type: string, listener: (event?: any) => any) => register(`window:${type}`, listener) };
   window.win7AgentStatus = require('../../product/renderer/a9-agent-status');
   window.win7AgentComposerController = require('../../product/renderer/a9-composer-controller');
-  vm.runInNewContext(source, { window, document, console }, { filename: 'a9-workbench.js' });
+  vm.runInNewContext(withCardRenderers(source), { window, document, console }, { filename: 'a9-workbench.js' });
   const fire = (key: string) => Promise.all((listeners.get(key) || []).map((listener) => listener({})));
   return { api, a9, ui: window.win7AgentA9Workbench, document, node: (id: string) => nodes.get(id)!, fire,
     get current() { return current; }, set current(value) { current = value; },

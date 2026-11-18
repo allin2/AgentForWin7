@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as vm from 'vm';
+import { withCardRenderers } from './a9-renderer-bundle';
 
 const root = path.join(__dirname, '../../product');
 const rendererSource = fs.readFileSync(path.join(root, 'renderer/a9-workbench.js'), 'utf8');
@@ -87,7 +88,7 @@ function rendererHarness(limits: { global?: number; bytes?: number; turn?: numbe
   source = source.replace('  root.win7AgentA9Workbench = Object.freeze({',
     '  root.__m4 = { state, ingestEvents, ingestTimelineEvents, renderConversation, renderTimeline, loadConversationEvents, resetConversationEvents, setLimits: (global, turn) => { EVENT_GLOBAL_LIMIT = global; EVENT_TURN_LIMIT = turn; } };\n  root.win7AgentA9Workbench = Object.freeze({');
   const window: any = { win7Agent: { a9: { queryEvents } } };
-  vm.runInNewContext(source, { window, document, setTimeout, Date });
+  vm.runInNewContext(withCardRenderers(source), { window, document, setTimeout, Date });
   const api = window.__m4;
   api.state.activeConversationId = 'conversation-a';
   api.state.renderedConversationId = 'conversation-a';

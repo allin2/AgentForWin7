@@ -78,7 +78,11 @@ describe('A9 unified desktop workbench contract', () => {
   const css = fs.readFileSync(path.join(productRoot, 'renderer/a9-workbench.css'), 'utf8');
   const script = fs.readFileSync(path.join(productRoot, 'renderer/a9-workbench.js'), 'utf8');
   // VM 切片必须带入生产依赖；不为测试的截取边界改写产品实现。
-  const outcomeLabels = script.slice(script.indexOf('  const OUTCOME_LABELS ='), script.indexOf('  const state ='));
+  // C1：OUTCOME_LABELS / clampText / 工具与时间线标签 / 计划与审批卡片已拆到 a9-card-renderers.js；
+  // VM 切片按 workbench.html 的加载顺序带入该模块，并以其导出名绑定，不为切片改写产品实现。
+  const cardRenderersSource = fs.readFileSync(path.join(productRoot, 'renderer/a9-card-renderers.js'), 'utf8');
+  const cardRenderersPrelude = `${cardRenderersSource}\nconst { OUTCOME_LABELS, clampText, toolHeadline, toolDetailText, toolEndStatus, timelineEntryLabel, buildPlanCard, buildApprovalRecord } = win7AgentCardRenderers;`;
+  const outcomeLabels = cardRenderersPrelude;
   const errorFormatter = script.slice(script.indexOf('  function errorMessage('), script.indexOf('  /** ADR-0114 显示上限'));
   const main = fs.readFileSync(path.join(productRoot, 'main.js'), 'utf8');
   const smokeDriver = fs.readFileSync(path.join(__dirname, 'a9-06-driver-entry.cjs'), 'utf8');
@@ -320,7 +324,7 @@ describe('A9 unified desktop workbench contract', () => {
       setTimeout,
       clearTimeout,
     };
-    vm.runInNewContext(script, { window: windowStub, document: documentStub, console, Promise, Set, Map, Object, Array, String, Number, Date });
+    vm.runInNewContext(`${cardRenderersSource}\n${script}`, { window: windowStub, document: documentStub, console, Promise, Set, Map, Object, Array, String, Number, Date });
     listeners['document:DOMContentLoaded'][0]();
     const keydown = listeners['task-prompt:keydown'][0];
     const composingPrevented = jest.fn();
@@ -373,7 +377,7 @@ describe('A9 unified desktop workbench contract', () => {
       "case 'approval_resolved':", "case 'tool_start':", "case 'tool_end':"].forEach((fragment) => {
       expect(script).toContain(fragment);
     });
-    expect(script).toContain('function toolHeadline(data)');
+    expect(cardRenderersSource).toContain('function toolHeadline(data)');
     expect(script).toContain("const key = data.callId ? String(data.callId) : '__last__';");
     expect(script).toContain('历史记录未包含过程。');
     // 搜索与键盘：Ctrl+K 聚焦搜索、Ctrl+I 切换检查器；空结果如实提示。
@@ -390,17 +394,17 @@ describe('A9 unified desktop workbench contract', () => {
     // 显示上限（ADR-0114）：单条说明 16 KB、单条工具输出 8 KB，截断必须明示。
     expect(script).toContain('const NOTE_LIMIT = 16 * 1024');
     expect(script).toContain('const TOOL_OUTPUT_LIMIT = 8 * 1024');
-    expect(script).toContain('已截断；完整内容见持久化事件与日志');
+    expect(cardRenderersSource).toContain('已截断；完整内容见持久化事件与日志');
     // 渲染安全：唯一 innerHTML 为静态状态图标，不可信文本一律 textContent。
     expect((script.match(/innerHTML/g) || [])).toHaveLength(1);
     expect(script).toContain("runtimeStatus.innerHTML = '<i aria-hidden=\"true\"></i>'");
+    expect(cardRenderersSource).not.toMatch(/innerHTML/);
     expect(script).toContain('clampText(data.content, NOTE_LIMIT)');
   });
 
   it('classifies actual tool failure, cancellation and uncertain cleanup without claiming success', () => {
-    const source = script.slice(script.indexOf('  function toolEndStatus('), script.indexOf('  function timelineEntryLabel('));
     const context: any = {};
-    vm.runInNewContext(source + ';this.classify = toolEndStatus;', context);
+    vm.runInNewContext(`${cardRenderersSource};this.classify = win7AgentCardRenderers.toolEndStatus;`, context);
     expect(context.classify({ shell: { exitCode: 1 } })[0]).toBe('failed');
     expect(context.classify({ result: 'Tool execution error: file not found' })[0]).toBe('failed');
     // A9-46 real tool_end: execution exceptions are serialized into result,
@@ -592,7 +596,7 @@ describe('A9 unified desktop workbench contract', () => {
       ok: true, events: eventsByConversation[conversationId], hasMore: false,
     }));
     const normalizeAndLoad = script.slice(script.indexOf('  function normalizeTimelineEvent('), script.indexOf('  /** 事实'));
-    const labels = script.slice(script.indexOf('  function toolHeadline('), script.indexOf('  // ------------------------------------------------------------------\n  // 轮次渲染'));
+    const labels = ''; // toolHeadline/timelineEntryLabel 等已随 outcomeLabels 前导（a9-card-renderers.js）带入。
     const timeline = script.slice(script.indexOf('  function renderTimeline('), script.indexOf('  function renderCheckpoints('));
     const context: any = {
       state, document, a9: { queryEvents }, Date,
@@ -625,7 +629,7 @@ describe('A9 unified desktop workbench contract', () => {
   it('keeps the latest verified outcome through a real incremental rerender and rejects the old side effect', () => {
     const rendererFunctions = [
       script.slice(script.indexOf('  function resolveTurnId('), script.indexOf('  // ------------------------------------------------------------------\n  // 友好文案')),
-      script.slice(script.indexOf('  function toolHeadline('), script.indexOf('  function timelineEntryLabel(')),
+      cardRenderersPrelude,
       script.slice(script.indexOf('  function ensureTurnBlock('), script.indexOf('  function startLiveTracking(')),
     ].join('\n');
 
@@ -693,7 +697,7 @@ describe('A9 unified desktop workbench contract', () => {
   it('A9-19 F1/P02/P05: renders a running turn (persisted as active) live with its tool card, elapsed time and preview', () => {
     const rendererFunctions = [
       script.slice(script.indexOf('  function resolveTurnId('), script.indexOf('  // ------------------------------------------------------------------\n  // 友好文案')),
-      script.slice(script.indexOf('  function toolHeadline('), script.indexOf('  function timelineEntryLabel(')),
+      cardRenderersPrelude,
       script.slice(script.indexOf('  function ensureTurnBlock('), script.indexOf('  function startLiveTracking(')),
     ].join('\n');
     const runScenario = (source: string, outcome: string, preview: any) => {
@@ -944,7 +948,7 @@ describe('A9 unified desktop workbench contract', () => {
       nodes, listeners, workbench, windowStub, sink,
       document: documentStub,
       run(source: string, extra?: string) {
-        vm.runInNewContext(source + (extra || ''), { window: windowStub, document: documentStub, console, Promise, Set, Map, Object, Array, String, Number, Date, sink });
+        vm.runInNewContext(`${cardRenderersSource}\n${source}${extra || ''}`, { window: windowStub, document: documentStub, console, Promise, Set, Map, Object, Array, String, Number, Date, sink });
       },
       ready() { (listeners['document:DOMContentLoaded'] || []).forEach((h) => h()); },
       fireWindow(type: string) { (windowListeners[type] || []).forEach((h) => h()); },
@@ -2200,7 +2204,7 @@ describe('A9-30 streamed activity cards', () => {
       toolDetailText: (d: any) => d.shell.stdout, appendWorkdirBoundaryAction: jest.fn(),
       settleItem: jest.fn(), toolEndStatus: () => ['success', '已完成'],
     };
-    const source = script.slice(script.indexOf('  function attachActivityDetail('), script.indexOf('  function buildPlanCard('));
+    const source = script.slice(script.indexOf('  function attachActivityDetail('), script.indexOf('  function projectOutcome('));
     vm.runInNewContext(source + ';this.append = appendEventNode;', context);
     const emit = (seq: number, stream: string, text: string) => context.append(block, { type: 'tool_output', data: {
       schemaVersion: 1, toolCallId: 'call', outputSeq: seq, stream, text,

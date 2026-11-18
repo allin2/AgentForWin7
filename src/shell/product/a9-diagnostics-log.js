@@ -8,7 +8,13 @@ const EMERGENCY_FILE_BYTES = 512 * 1024;
 const LINE_BYTES = 4096;
 const CODE_PATTERN = /^(?:A[89]_[A-Z0-9_]+|E[A-Z0-9]{2,15}|ERR_[A-Z0-9_]{2,44})$/;
 const ERROR_NAMES = new Set(['Error', 'TypeError', 'RangeError', 'ReferenceError', 'SyntaxError', 'URIError', 'EvalError', 'AggregateError']);
-const STACK_FILES = new Set(['main.js', 'a9-diagnostics-log.js', 'desktop-host.js', 'a9-agent-runtime.js', 'a9-workspace-registry.js', 'a9-product-ipc.js', 'a9-package-runtime.js', 'active-workspace-store.js', 'rc-composition.js', 'runner-runtime.js']);
+const STACK_FILES = new Set([
+  'main.js', 'a9-diagnostics-log.js', 'desktop-host.js', 'a9-agent-runtime.js',
+  'a9-runtime-office.js', 'a9-runtime-model-failure.js', 'a9-runtime-redaction.js',
+  'a9-runtime-persisted-context.js', 'a9-runtime-unavailable.js',
+  'a9-workspace-registry.js', 'a9-product-ipc.js', 'a9-package-runtime.js',
+  'active-workspace-store.js', 'rc-composition.js', 'runner-runtime.js',
+]);
 
 function errorFacts(error, fallback = 'A9_DIAGNOSTIC_ERROR') {
   // Error messages can contain entire requests. Never persist a message,

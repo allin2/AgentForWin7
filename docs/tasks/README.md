@@ -8,7 +8,7 @@
 任务书路径保持稳定，不通过移动文件表达生命周期。
 
 本轮健康体检与质量提升（负责人授权“同意，sonnet5.5high 修复，opus5.5high审核”、“允许；并开启phaseb”及“继续推进phase C”）：`APPROVED_FOR_IMPLEMENTATION`，实际分支 `main`，基线 `ba7c9de`。
-交付 Phase A 快速修复（本地提交 `fda0aee`）、Phase B 体验与质量提升（本地提交 `35678eb`，ADR-0339）以及 Phase C 长期架构优化批次 1（C5 文档瘦身治理、C4 Gateway 网络策略收敛、C6 Win7 SP1 运行时与供应链安全策略规范，ADR-0340）。
+交付 Phase A 快速修复（本地提交 `fda0aee`）、Phase B 体验与质量提升（本地提交 `35678eb`，ADR-0339）、Phase C 长期架构优化批次 1（C5 文档瘦身治理、C4 Gateway 网络策略收敛、C6 Win7 SP1 运行时与供应链安全策略规范，ADR-0340）、Phase C 批次 2（C2 状态机强制转态表、C3 事件驱动快照推送，ADR-0341）以及 Phase C 批次 3（C1 巨石文件拆分模块化与审查加固）。
 必要验证为 7 模块编译、设计安全门、全量单元测试与文档一致性检查；证据仅为开发机（Node 20.17.0），Win7/Win10 实机为 `NOT_PERFORMED`。
 保护既有未跟踪目录 `scripts/dashboard/`，不新增系统权限，未公开推送。
 
