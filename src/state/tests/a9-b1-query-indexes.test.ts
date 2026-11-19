@@ -12,6 +12,7 @@ import * as os from 'os';
 import * as path from 'path';
 import Database from 'better-sqlite3';
 import { A9PersistenceManager, A9_SCHEMA_VERSION } from '../src';
+import { inspectA9SchemaV4Profile } from '../src/a9-persistence';
 import type { SqliteDatabase } from '../src';
 
 const PERF_INDEXES: Record<string, string[]> = {
@@ -21,6 +22,7 @@ const PERF_INDEXES: Record<string, string[]> = {
   idx_a9_turns_session_task: ['session_id', 'task_id'],
   idx_a9_events_created: ['created_at'],
   idx_a9_events_session_type: ['session_id', 'event_type'],
+  idx_a9_events_type_id: ['event_type', 'id'],
 };
 
 const openReal = (file: string, options?: { readonly?: boolean }): SqliteDatabase =>
@@ -73,6 +75,31 @@ describe('B1 SQLite performance indexes', () => {
     const again = open();
     expect(indexColumns(again.db, 'idx_a9_events_created')).toEqual(['created_at']);
     again.db.close();
+  });
+
+  it('adds the required event-type index when a legacy index uses its name', () => {
+    const first = open();
+    first.db.exec('DROP INDEX idx_a9_events_type_id');
+    first.db.exec('CREATE INDEX idx_a9_events_type_id ON a9_events (session_id)');
+    first.db.close();
+    const reopened = open();
+    expect(indexColumns(reopened.db, 'idx_a9_events_type_id')).toEqual(['session_id']);
+    expect(indexColumns(reopened.db, 'idx_a9_events_type_id_1')).toEqual(['event_type', 'id']);
+    expect(inspectA9SchemaV4Profile(reopened.db)).toBe('canonical');
+    reopened.db.close();
+  });
+
+  it('invalidates the checkpoint scope of a row removed by UPDATE OR REPLACE', () => {
+    const manager = open();
+    try {
+      manager.saveCheckpoint({ turnId: 'first', sessionId: 's1', payload: {} });
+      manager.saveCheckpoint({ turnId: 'second', sessionId: 's2', payload: {} });
+      const before = manager.readSnapshotRevisions('/ws', 's2', '/ws');
+      expect(before).not.toBeNull();
+      manager.db.prepare("UPDATE OR REPLACE a9_checkpoints SET turn_id = 'second' WHERE turn_id = 'first'").run();
+      expect(manager.listRecentCheckpoints('s2', 50).total).toBe(0);
+      expect(manager.readSnapshotRevisions('/ws', 's2', '/ws')?.checkpoints).not.toBe(before?.checkpoints);
+    } finally { manager.db.close(); }
   });
 
   it('keeps list/summary/retention query plans free of full table scans on the guarded tables', () => {
@@ -134,6 +161,67 @@ describe('B1 SQLite performance indexes', () => {
     const empty = manager.getConversationInboxSummary('s2');
     expect(empty.lastCompletedAt).toBeNull();
     expect(typeof empty.lastActivityAt).toBe('string');
+    manager.db.close();
+  });
+
+  it('idx_a9_events_type_id passes canonical v4 schema check and keeps ownership/disposition/inbox/history plans free of a9_events table scans', async () => {
+    const manager = open();
+    manager.createConversation('s1', '/ws');
+    manager.upsertTask('t1', 's1', 'active');
+    manager.upsertTurn('u1', 't1', 's1', 'active');
+    manager.recordModelEvent('s1', null, 'conversation.request', { taskId: 't1', requestPrompt: 'hello needle' });
+    manager.recordToolEvent('s1', 'u1', 'tool_output', {
+      data: {
+        schemaVersion: 1, conversationId: 's1', turnId: 'u1', taskId: 't1',
+        toolCallId: 'c1', requestId: 'r1', stream: 'stdout', text: 'noise',
+        outputSeq: 1, sourceSeqThrough: 1, rawBytesRead: 5, truncated: false,
+      },
+    });
+    manager.recordManagedOwnership(
+      { handleId: 'h1', workspacePath: '/ws', command: 'sleep 1', cwd: '/ws', startedAt: '2026-10-01T00:00:00.000Z', lastProbeStatus: 'running', pid: 123 },
+      { schemaVersion: 1, owner: { workspace: '/ws', conversationId: 's1', taskId: 't1', turnId: 'u1', toolCallId: 'c1' }, requestId: 'req-1', ownershipState: 'owned' },
+    );
+
+    expect(inspectA9SchemaV4Profile(manager.db)).toBe('canonical');
+    const info = manager.db.prepare('PRAGMA index_xinfo(idx_a9_events_type_id)').all() as any[];
+    expect(info.filter((r) => r.key === 1).map((r) => ({ name: r.name, coll: r.coll, desc: r.desc }))).toEqual([
+      { name: 'event_type', coll: 'BINARY', desc: 0 },
+      { name: 'id', coll: 'BINARY', desc: 0 },
+    ]);
+
+    const captured: string[] = [];
+    const rawPrepare = manager.db.prepare.bind(manager.db);
+    (manager.db as any).prepare = (sql: string) => { captured.push(sql); return rawPrepare(sql); };
+    manager.getManagedOwnership('h1');
+    manager.getManagedProcessDisposition('h1');
+    manager.listManagedOwnerships(['h1']);
+    manager.listConversationInboxSummaries('/ws');
+    await manager.searchRetainedHistoryAsync('/ws', { query: 'needle' }, (payload, type) => {
+      try { const p = JSON.parse(payload); return type === 'conversation.request' ? String(p.requestPrompt || '') : ''; } catch { return ''; }
+    });
+    (manager.db as any).prepare = rawPrepare;
+
+    const eventQueries = captured.filter((sql) => /\ba9_events\b/i.test(sql) && !/MAX\(id\)|^\s*(INSERT|UPDATE|DELETE)/i.test(sql));
+    expect(eventQueries.length).toBeGreaterThanOrEqual(6);
+    const fullScanEvents = /\bSCAN\s+(e|a9_events)\b(?!\s+USING)/i;
+    for (const sql of eventQueries) {
+      if (/^SELECT id AS key FROM a9_events WHERE id > \?/i.test(sql.trim())) continue;
+      const params = (sql.match(/\?/g) ?? []).map((_q, i) => (sql.includes('LIMIT ?') && i === (sql.match(/\?/g) ?? []).length - 1 ? 10 : 'x'));
+      const plan = (rawPrepare(`EXPLAIN QUERY PLAN ${sql}`).all(...params) as any[]).map((row) => String(row.detail));
+      for (const detail of plan) {
+        expect({ sql: sql.slice(0, 80), detail, bad: fullScanEvents.test(detail) }).toMatchObject({ bad: false });
+      }
+    }
+
+    const ownershipPlan = (rawPrepare("EXPLAIN QUERY PLAN SELECT id, payload_json FROM a9_events WHERE event_type='managed_process_ownership' AND json_extract(payload_json, '$.handleId')=? ORDER BY id DESC LIMIT 1")
+      .all('h1') as any[]).map((row) => String(row.detail)).join('\n');
+    expect(ownershipPlan).toContain('idx_a9_events_type_id');
+    const dispositionPlan = (rawPrepare("EXPLAIN QUERY PLAN SELECT id, payload_json FROM a9_events WHERE event_type='managed_process_disposition' AND json_extract(payload_json, '$.handleId')=? ORDER BY id DESC LIMIT 1")
+      .all('h1') as any[]).map((row) => String(row.detail)).join('\n');
+    expect(dispositionPlan).toContain('idx_a9_events_type_id');
+    const requestKeysPlan = (rawPrepare("EXPLAIN QUERY PLAN SELECT id AS key FROM a9_events WHERE event_type = 'conversation.request' AND id > ? AND id <= ? ORDER BY id LIMIT ?")
+      .all(0, 100, 256) as any[]).map((row) => String(row.detail)).join('\n');
+    expect(requestKeysPlan).toContain('idx_a9_events_type_id');
     manager.db.close();
   });
 });

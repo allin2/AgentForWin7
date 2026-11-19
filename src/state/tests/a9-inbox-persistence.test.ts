@@ -92,4 +92,71 @@ describe('A9-54 persisted inbox', () => {
     manager.db.prepare("UPDATE a9_approvals SET decision = 'pending', created_at = ?").run('2026-10-04T00:00:00.000Z');
     expect(manager.getConversationInboxSummary('s').lastActivityAt).toBe('2026-10-04T00:00:00.000Z');
   });
+
+  it('listConversationInboxSummaries matches getConversationInboxSummary in O(1) queries including diagnostics', () => {
+    const otherRoot = path.join(root, 'other-ws');
+    manager.createConversation('s-runs', root);
+    manager.upsertRun('r-done', 'u1', 's-runs', 'completed');
+    manager.db.prepare('UPDATE a9_runs SET created_at = ?, updated_at = ? WHERE run_id = ?').run(t1, t2, 'r-done');
+    manager.upsertRun('r-active', 'u2', 's-runs', 'active');
+    manager.db.prepare('UPDATE a9_runs SET created_at = ?, updated_at = ? WHERE run_id = ?').run(t3, t3, 'r-active');
+    manager.mergeConversationInbox('s-runs', root, { settledAt: t1, lastVisitedAt: t2 });
+
+    manager.createConversation('s-approval', root);
+    manager.recordApproval({ approvalId: 'ap1', sessionId: 's-approval', toolName: 'shell', binding: {}, decision: 'pending' });
+    manager.db.prepare('UPDATE a9_approvals SET created_at = ? WHERE approval_id = ?').run('2026-10-05T00:00:00.000Z', 'ap1');
+    manager.recordToolEvent('s-approval', null, 'approval_required', {});
+    manager.db.prepare('UPDATE a9_events SET created_at = ? WHERE session_id = ?').run(t2, 's-approval');
+
+    manager.createConversation('s-question', root);
+    manager.recordToolEvent('s-question', null, 'question_pending', { questionId: 'q1', revision: 1 });
+    manager.db.prepare("UPDATE a9_events SET created_at = ? WHERE session_id = ? AND event_type = 'question_pending'").run('2026-10-06T00:00:00.000Z', 's-question');
+    manager.mergeConversationInbox('s-question', root, { activeSince: '2026-10-07T00:00:00.000Z' });
+
+    manager.createConversation('s-archived', root);
+    manager.upsertRun('r-arch', 'ua', 's-archived', 'completed');
+    manager.db.prepare('UPDATE a9_runs SET created_at = ?, updated_at = ? WHERE run_id = ?').run(t1, t2, 'r-arch');
+    manager.activateConversation(root, 's-archived');
+    manager.archiveConversation('s-archived');
+
+    manager.createConversation('s-bad-json', root);
+    manager.db.prepare('UPDATE a9_sessions SET metadata_json = ? WHERE session_id = ?').run('{not-valid-json', 's-bad-json');
+
+    manager.createConversation('s-other', otherRoot);
+    manager.db.close();
+
+    // Open two fresh managers to isolate diagnosticBuffer state and compare query counts.
+    const batchMgr = open();
+    const prepareSpy = jest.spyOn(batchMgr.db, 'prepare');
+    const batchMap = batchMgr.listConversationInboxSummaries(root);
+    const batchQueries = prepareSpy.mock.calls.length;
+    prepareSpy.mockRestore();
+    const batchDiags = batchMgr.getDiagnostics();
+    const expectedIds = batchMgr.listConversations(root).map((c) => c.sessionId);
+    batchMgr.db.close();
+
+    const singleMgr = open();
+    const singlePrepareSpy = jest.spyOn(singleMgr.db, 'prepare');
+    const singleMap = new Map<string, ReturnType<A9PersistenceManager['getConversationInboxSummary']>>();
+    for (const id of expectedIds) {
+      singleMap.set(id, singleMgr.getConversationInboxSummary(id));
+    }
+    const singleQueries = singlePrepareSpy.mock.calls.length;
+    singlePrepareSpy.mockRestore();
+    const singleDiags = singleMgr.getDiagnostics();
+    singleMgr.db.close();
+
+    manager = open();
+    expect(batchQueries).toBe(1);
+    expect(singleQueries).toBeGreaterThanOrEqual(expectedIds.length * 2);
+    expect(Array.from(batchMap.keys()).sort()).toEqual([...expectedIds].sort());
+    expect(batchMap.has('s-other')).toBe(false);
+    for (const id of expectedIds) {
+      expect(batchMap.get(id)).toEqual(singleMap.get(id));
+    }
+    expect(batchDiags).toEqual(singleDiags);
+    expect(batchDiags).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'A9_PERSISTED_JSON_INVALID', table: 'a9_sessions', rowId: 's-bad-json' }),
+    ]));
+  });
 });

@@ -5680,3 +5680,57 @@ Claude P2-1、P2-3 已补测试，P2-4 已修复；P2-2 按裁决保留为 K7。
 - 决定（C2 状态机）：`renderer/a9-agent-status.js` 以显式有限转移表 `TRANSITIONS` 取代原先按阶段推导的规则，`canTransition` 的合法边集合与原约定逐边一致（休息态只能开始 Turn 或以失败/中断结束；`running` 以结果或 `cancelling` 结束且不会静默回到 `idle`；等待审批/问询只能恢复、Stop、取消、互转或失败/中断；`cancelling` 只能以结果结束）。`a9-agent-runtime.js` 的 `setAgentStatus` 由“只观察”改为强制执行：非法转移记录 `A9_AGENT_STATUS_TRANSITION_ILLEGAL` 结构化诊断（源/目标状态、允许目标、控制器与待决审批/问询是否存在，限长、不含会话内容），仍先通知 `agentStatusObserver`（`legal:false`），随后抛出同码错误且保持原状态不变。从持久事实重载（启动、切换对话、恢复待决问询）仍以 `resync:true` 绕过转移表。Stop 与关闭路径经 `markCancelling` 调用：中止已经生效，若此刻转移被拒绝只留诊断、不把已生效的中止变成错误；其他异常照常抛出。Core `state-machine.ts` 的转移表与异常语义不变，补充穷举测试。
 - 决定（C3 快照推送）：Runtime 新增可选配置 `onSnapshotChanged`，在状态实际变化、Core 事件落库后、模型输出增量、审批待决、问询待决时报告“有新事实”。主进程 `a9-snapshot-push.js` 按工作区合并（默认 150 ms），经 `webContents.send('a9:snapshot:updated', { schemaVersion: 1, workspaceId, reasons, at })` 推送；载荷不含会话内容、路径或秘密。Preload 新增 `onA9SnapshotUpdated(callback)`，只透传校验后的 `workspaceId`、`reasons`、`at`。Renderer 收到推送后经既有 `a9.snapshot.get`（Schema IPC）重读，与显式操作共用 `refreshSnapshot` 的合并逻辑；轮询降级为保活：活动 30 秒、空闲 60 秒；存在存活的托管后台进程时保持 5 秒（后台进程退出目前没有事件源）；没有推送能力的宿主保持原 500 毫秒行为。推送失败只计数并写入主进程错误记录，不影响 Runtime，保活读取兜底。
 - 边界：不新增 Renderer 的文件、进程、凭据或网络权限，推送不是数据通道；不改变快照结构、持久化格式或既有 IPC 动作；不修改 Runner 的后台进程管理。Win7 实机下的推送时序与 Electron 22 IPC 行为为 NOT_PERFORMED。
+
+## ADR-0342 体检 Phase C 补充：快照缓存与 SQLite 查询
+
+- 状态：Accepted（2026-11-18 UTC，负责人授权修复四项快照与 SQLite 遗留问题）。
+- 快照缓存分别跟踪 checkpoint 会话、目录工作区和托管事实工作区。State 使用 SQLite 连接本地临时触发器记录同连接的相关写入，并用 `data_version` 识别跨连接提交。事务内直接读取，查询前后修订一致才缓存。缓存探针失败时记录诊断并直接读取。
+- 收件箱摘要与持久草稿标记按工作区批量读取。内存草稿、审批、问询以及托管进程的实时探测保留原有读取和授权链。
+- 托管事实仅在持久化字段变化时重写。批量归属读取按目标句柄返回最新记录，损坏的新记录不得回退到旧归属。启动记录诊断并跳过损坏归属，恢复处置仍按持久化身份验证。
+- State 保持 SQLite 3.43.1 与 schema v4。事件表新增普通索引 `(event_type, id)`，同名旧索引保留并使用可用后缀创建。临时触发器只对当前连接生效。Win7 实机验证为 `NOT_PERFORMED`。
+
+## ADR-0343 Phase C 补充复审修复：托管事实凭据、终态核验与锁释放确认
+
+- 状态：Accepted（2026-11-19 UTC，负责人授权修复复审确认的 3 项 P1 和 4 项 P2；不修改 ADR-0342 及 A9-34 原文）。
+- 决定（凭据来源）：只有 `kind='tool'` 的 `managed_process_ownership` 与 `managed_process_disposition` 事件是归属和处置凭据，`kind='model'` 的同名事件不计入。同一句柄范围内第一条有效记录是锚点。后续记录的 owner 五元组与 `requestId` 必须和锚点逐字段一致，写入先后不构成授权。
+- 决定（released 终态）：`released` 行须从锚点开始核验完整链。链为 owned 锚点、紧邻的 `release_intent(R)`、`released(R)`，之后的记录与收据一致。锚点 `owner.workspace` 须等于托管事实行自身的工作区，锚点的会话、任务与 Turn 须仍真实关联。核验不使用对话当前的 `workspace_path`。registry 正常改绑或重命名后，原工作区的合法历史事实不会因此变成残留。活动事实仍按当前来源校验，改绑前须先结束活动事实。
+- 决定（user_dismissed 终态）：`user_dismissed` 行须有本句柄最新的 tool 处置记录才算结清。该记录须与原归属、`requestId`、PID、启动时间、`pidProbe.status='absent'` 一致。按处置前 `cleanup_required` 行重算的 revision 也须一致。只改状态文本、缺记录或记录不符时，该行保持待清理并阻断关闭。同一原 revision 的重试仍幂等，并返回原记录。
+- 决定（保留期）：90 天保留语义不变。只有托管事实行仍存在的句柄，其 tool 归属与处置记录才保留，其余过期事件照常清理。迁移边界：归属事件自 A9-31（2026-10）起写入，按默认 90 天保留，截至本 ADR 不应有已清理的安装。若旧库因自定义更短保留期或时钟回拨已失去这些记录，相应 `released`/`user_dismissed` 行保持阻断（fail-closed），不自动放行。无法归属的畸形事件不受此保护，可按期清理。
+- 决定（最终锁事务）：关闭时最终的 IMMEDIATE 事务会再读一次托管事实。`starting`、`running`、`running_unknown`、`identity_mismatch` 等活动事实即使无归属、内存中也没有句柄，仍会阻断释放。唯一例外是本次关闭中 Runner 自身交给系统的旧直接派生句柄，且须精确匹配 handleId、PID 和启动时间。Runner 停止恢复的 PID 事实后，持久状态改写为 Runner 确认的终态（`exited`/`stopped`/`failed`），不再保留 `running_unknown`。
+- 决定（锁删除确认）：判定锁已释放，须删除后本 owner 的锁行确实不存在。DELETE 返回 0 行但锁仍在时（例如触发器 `RAISE(IGNORE)`），返回 `A9_WORKSPACE_LOCK_RELEASE_UNCONFIRMED`。Runtime 将其计入 unresolved 并保留诊断，registry 保留入口，用户可重试。
+- 决定（隔离解除）：句柄被隔离后，只有同时满足以下条件才解除对关闭的阻断：State 重新核验了完整释放链；持久身份与隔离时记录的相同；内存中若仍有句柄，须是同一身份且已 released。隔离诊断保留，并追加 `A9_MANAGED_QUARANTINE_CLEARED`。未确认的句柄继续隔离，已暂停的派发不随之恢复。
+- 边界：schema v4、表、列和索引不变；IPC、权限和进程操作不变；不发送新的停止信号。证据仅为开发机（Node 20.17.0、真实 SQLite）；Win10、Win7 实机为 `NOT_PERFORMED`。
+
+## ADR-0344 Phase C 第二次复审修复：恢复句柄终态、必需写入确认、等价路径锚点与持久活动阻断
+
+- 状态：Accepted（2026-11-19 UTC，负责人授权修复 Sol high 独立复核确认的 3 项 P1 和 3 项 P2；不修改 ADR-0342、ADR-0343 及 A9-34 原文）。
+- 决定（恢复 PID 探测）：Runner 对重启采纳的 PID 事实在采纳和 Stop 时都使用既有三态探测。只有 `ESRCH` 证明 PID 不存在；`EPERM` 仍按存活处理并保留 PID 复用守卫；其他错误（如 `EINVAL`）为未知，Stop 返回 `A9_MANAGED_PID_PROBE_UNKNOWN`，不写终态，采纳时保留 `running_unknown`。仍只发送信号 0，不向恢复 PID 发送停止信号。
+- 决定（恢复事实条件结算）：无归属的旧句柄被采纳后，其终态只由新增的 `settleRecoveredManagedProcess` 写入。该事务要求行仍属同一工作区，PID、启动时间与采纳身份一致，状态仍为活动值，且仍无持久归属；条件 UPDATE 须恰好影响 1 行。另一连接已把同一句柄行改成新身份时返回 `A9_MANAGED_RECOVERY_STALE`，新身份行保持原样并继续阻断。正常 Stop 与 shutdown 都写入 Runner 返回的真实终态：`dispose` 结果新增 `stoppedHandles`，Runtime 不再把关闭前快照改写为 `stopped`。shutdown 中结算失败计入 unresolved，锁保留。
+- 决定（必需写入确认）：A9 事件插入、托管事实写入、恢复探测更新与 A9-34 处置更新都核对实际影响行数。触发器 `RAISE(IGNORE)` 等导致的 0 行写入返回 `A9_PERSISTENCE_WRITE_UNCONFIRMED`，所在事务整体回滚：starting 归属审计失败时 Runner 不派发；A9-34 处置失败时 Runtime 报 `A9_AUDIT_PERSISTENCE_FAILED` 并保留内存中的恢复事实。合法幂等（事实与归属未变、探测值已相同）不产生写入，仍返回成功。
+- 决定（等价路径归属锚点）：归属读取不再在 SQL 中按原始路径分组。同一句柄在 canonical Windows 语义下等价的全部路径（如 `c:\work` 与 `C:/Work/`）属于同一范围；其中第一条有效记录是锚点，且须为 `owned`。之后每条记录的 owner 五元组与 `requestId` 都须与锚点一致，否则 `A9_MANAGED_OWNERSHIP_UNCONFIRMED`。真实历史改绑仍按 ADR-0343 从稳定历史核验；其他工作区的坏事件仍隔离。
+- 决定（处置记录读取）：A9-34 处置记录只从有效 JSON 且 `handleId` 为文本的 `kind='tool'` 事件中提取目标句柄。其他工作区的损坏事件不影响读取、快照或关闭。本工作区会话或未知会话中比匹配记录更新的无法归属处置事件保持 fail-closed（`A9_MANAGED_DISPOSITION_UNCONFIRMED`）。
+- 决定（移交凭据保留）：Runner 自身交给系统的旧直接派生句柄，其 handleId、PID、启动时间由 Runtime 保留到锁真正释放；锁删除未确认（`RAISE(IGNORE)`）后的每次重试都把它传入最终事务重新核验，身份已变化时不豁免。
+- 决定（持久活动阻断）：State 的 `isManagedSettlementBlocker` 是唯一活动判据，最终锁事务与 Runtime 共用。Runtime 每次读取托管事实（含快照缓存命中）都按该判据刷新持久阻断；不在 Runner 中的持久活动事实会阻断 `conversationControls.canSwitch`、`canLeaveWorkspace()`、新建/切换对话、模式切换和转移目标检查。已核验终态和其他工作区的事实不阻断。
+- 边界：schema v4、表、列和索引不变；IPC、权限和进程操作不变；不新增停止信号、系统 API 或依赖。证据仅为开发机（Node 20.17.0、真实 SQLite）；Win10、Win7 实机为 `NOT_PERFORMED`。
+
+## ADR-0345 Phase C 第三次复核修复：无效 PID 未知、终态待结算重试、移交后回调隔离与处置来源筛选
+
+- 状态：Accepted（2026-11-19 UTC，负责人授权修复独立复核确认的 3 项 P1 和 3 项 P2；补充 ADR-0344，不修改 ADR-0342、ADR-0343、ADR-0344 及 A9-34 原文）。
+- 决定（无效 PID）：重启采纳时，缺失、非安全整数或不大于 0 的 PID 不发起探测，事实保持 `running_unknown`；Stop 对此返回 `A9_MANAGED_PID_PROBE_UNKNOWN` 且不写终态。只有有效 PID 的探测返回 `ESRCH` 才结算为 `exited`。持久化 PID 值原样保留为身份。
+- 决定（终态待结算重试）：Stop 或 shutdown 中 Runner 已确认的终态写入未确认时，Runtime 保留该 Runner 终态句柄（含采纳时的原始 PID 与启动时间）和写入模式。之后的 Stop 与 shutdown 都先经同一条件事务重试；写入确认后才清除待结算记录。State 返回 `A9_MANAGED_RECOVERY_STALE`（持久行已属另一身份或不再活动）时丢弃该记录，由持久行自身继续阻断。存在待结算记录时切换与快速关闭路径均不放行。
+- 决定（移交后回调隔离）：Runner 确认把句柄交给系统（helper 释放回执，或旧直接派生句柄的移交）后，该句柄后续的生命周期回调不再触发持久化。最终锁事务仍逐次核验 Runtime 保留的精确移交凭据（handleId、PID、启动时间）。
+- 决定（处置记录来源）：A9-34 处置读取先按可信来源筛选，再选最新记录。可信来源为句柄稳定归属锚点所在会话（registry 改绑后仍有效）、本工作区会话及未知会话；其他工作区的记录（损坏或仅含同名 `handleId`）既不使读取失败，也不遮蔽合法处置。可信来源中更新的无法归属记录保持 fail-closed。
+- 决定（快照失效）：会话 `session_id`、`workspace_path`、`state` 变化时，若该会话含归属或处置事件，托管快照修订号推进；普通工具事件不推进，缓存命中保持。
+- 决定（非 tool 记录）：活动归属与稳定历史读取先按 `kind='tool'` 筛选，再判断句柄与载荷是否损坏；同名非 tool 记录既不是证据，也不视为损坏。
+- 边界：schema v4、表、列和索引不变；IPC、权限和进程操作不变；不新增停止信号、系统 API 或依赖。证据仅为开发机（Node 20.17.0、真实 SQLite）；Win10、Win7 实机为 `NOT_PERFORMED`。
+
+## ADR-0346 Phase C 第四次复核修复：PID 0 身份、启动采纳终态待结算、helper 终态审计失败、锚点来源与待结算控件
+
+- 状态：Accepted（2026-11-19 UTC，负责人授权修复第 4 轮复核确认的 3 项 P1 和 2 项 P2；补充 ADR-0345，不修改 ADR-0342～ADR-0345 及 A9-34 原文）。
+- 决定（PID 0）：Runner 与 Runtime 只把缺失（`null`/`undefined`）视为“无 PID”。`0` 与负数、非整数一样是无效 PID，但仍是持久身份：采纳时原样保留、不探测，事实保持 `running_unknown`；身份比较、快照缓存键和移交凭据都用空值合并而不是真值判断。Stop 对其返回 `A9_MANAGED_PID_PROBE_UNKNOWN`，不写终态。
+- 决定（启动采纳终态）：重启采纳时有效 PID 探测为 `ESRCH`，即为 Runner 确认的终态，经与 Stop 相同的 `settleManagedTerminal` 写入（无归属旧句柄用条件结算，有归属句柄用 reconcile）。写入未确认时登记到待结算记录，不再隔离句柄；之后的 Stop 与 shutdown 按 ADR-0345 重试，`A9_MANAGED_RECOVERY_STALE` 时丢弃。
+- 决定（helper 终态审计）：helper 已给出完整清理证明但终态持久化回调失败时，Runner 不再把审计失败折入 `cleanupRequired`，而是标记 `statePersistencePending`。该句柄仍计入活动数；Stop 与 dispose（两种关闭策略）都先重试同一终态写入，失败则抛出 `A9_BACKGROUND_STATE_PERSIST_FAILED`，不返回终态句柄。Runtime 因此不会写入 `cleanup_required` 冒充结算，也不会报告 Stop 成功。
+- 决定（关闭报告）：Runtime shutdown 中 Runner 仍有需处理的句柄、或工作区锁仍未释放时，`unresolved` 不得为空。Runtime 新增只读查询 `isWorkspaceLockReleased()`（受限 Runtime 恒为 `true`，因其不持锁）；registry 的 `close` 在锁仍被持有时保留入口并返回 `A9_WORKSPACE_CLEANUP_UNCONFIRMED`，`shutdown` 汇总中补记该工作区。
+- 决定（锚点来源）：A9-34 处置读取的锚点会话须来自一条完整的 `owned` tool 归属记录，其 `owner.workspace` 等于托管事实行的工作区，且会话、任务、Turn 来源存在（registry 改绑后仍成立）。稳定历史核验只采纳未知会话、本工作区会话或 `owner.workspace` 指向本事实工作区（ADR-0343 改绑上下文）的记录；其他工作区只含同名 `handleId` 或属于其他工作区的归属记录既不是锚点，也不算损坏，不能扩大处置来源或遮蔽合法处置。
+- 决定（待结算控件）：存在待结算记录时，`setMode()` 返回 `A9_MODE_CHANGE_BLOCKED_MANAGED_PROCESS`；快照 `controls.canStop` 保持 `true`、`stopKind='managed_process'`，作为重试入口。Runner 的 `statePersistencePending` 句柄同样阻断模式切换并保留 Stop。
+- 边界：schema v4、表、列和索引不变；IPC 动作、权限和进程操作不变；不新增停止信号、系统 API 或依赖。直接派生（旧 profile）子进程的持久化失败处理保持原样。证据仅为开发机（Node 20.17.0、真实 SQLite）；Win10、Win7 实机为 `NOT_PERFORMED`。

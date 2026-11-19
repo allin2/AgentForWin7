@@ -134,6 +134,7 @@ export {
   A9ConversationStateValue,
   A9ConversationActivityValue,
   A9ConversationTitleSource,
+  A9ManagedOwnershipRecord,
   A9ConversationRecord,
   A9OpenOptions,
   A9OpenOutcome,

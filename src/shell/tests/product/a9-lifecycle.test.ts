@@ -1961,6 +1961,181 @@ async function recoveredCleanupEnv(mode = 'read_only', providerBaseUrl?: string)
   } };
 }
 
+it.each([
+  ['released', 'cleanup_required', true],
+  ['released', 'cleanup_required', false],
+  ['release_intent', 'released', true],
+  ['release_intent', 'released', false],
+] as const)('A9-34 blocks ownership %s with fact %s at startup and stopManaged=%s', async (ownershipState, status, stopManaged) => {
+  const f = await recoveredCleanupEnv();
+  f.db.prepare('UPDATE a9_managed_processes SET last_probe_status = ? WHERE handle_id = ?').run(status, f.fact.handleId);
+  f.db.prepare(`INSERT INTO a9_events (session_id, turn_id, kind, event_type, payload_json, created_at)
+    VALUES (?, ?, 'tool', 'managed_process_ownership', ?, '2026-11-18')`)
+    .run(f.owner.conversationId, f.owner.turnId, JSON.stringify({
+      handleId: f.fact.handleId, schemaVersion: 1, owner: f.owner, requestId: 'original-request',
+      ownershipState, releaseId: 'unconfirmed',
+    }));
+  const warn = jest.spyOn(process, 'emitWarning').mockImplementation(() => {});
+  const runtime = f.open();
+  try {
+    expect(runtime.getSnapshot().managedProcesses[0]).toMatchObject({ cleanupRequired: true, canDismissRecovered: false });
+    expect(() => runtime.createConversation()).toThrow('A9_CONVERSATION_BUSY');
+    expect(() => runtime.setMode('full_access')).toThrow('A9_MODE_CHANGE_BLOCKED_MANAGED_PROCESS');
+    expect(runtime.setMode('read_only')).toMatchObject({ unchanged: true });
+    expect(await runtime.shutdown({ stopManaged })).toMatchObject({ unresolved: [expect.any(String)] });
+    expect(f.db.prepare('SELECT owner_id FROM a9_workspace_locks').get()).toBeDefined();
+  } finally { await runtime.shutdown({ stopManaged }); warn.mockRestore(); f.db.close(); fs.rmSync(f.env.root, { recursive: true, force: true }); }
+});
+
+it('A9-34 leaves a deleted ownership event missing and refuses the old card before and after a snapshot', async () => {
+  const f = await recoveredCleanupEnv();
+  const warn = jest.spyOn(process, 'emitWarning').mockImplementation(() => {});
+  const runtime = f.open();
+  try {
+    const input = f.input(runtime);
+    f.db.prepare("DELETE FROM a9_events WHERE event_type='managed_process_ownership'").run();
+    expect(runtime.dismissRecovered(input)).toMatchObject({ ok: false, error: { code: 'A9_MANAGED_OWNERSHIP_UNCONFIRMED' } });
+    expect(runtime.getSnapshot().managedProcesses[0]).toMatchObject({ cleanupRequired: true, canDismissRecovered: false });
+    expect(runtime.dismissRecovered(input)).toMatchObject({ ok: false, error: { code: 'A9_MANAGED_OWNERSHIP_UNCONFIRMED' } });
+    expect(f.db.prepare("SELECT count(*) AS n FROM a9_events WHERE event_type IN ('managed_process_ownership','managed_process_disposition')").get()).toEqual({ n: 0 });
+    expect(await runtime.shutdown()).toMatchObject({ unresolved: [expect.any(String)] });
+  } finally { await runtime.shutdown(); warn.mockRestore(); f.db.close(); fs.rmSync(f.env.root, { recursive: true, force: true }); }
+});
+
+it.each([
+  ['started_at', '2026-11-18', 'A9_MANAGED_RECOVERY_STALE'],
+  ['workspace_path', '/other', 'A9_MANAGED_HANDLE_WRONG_OWNER'],
+])('A9-34 snapshot preserves persistent %s drift and rejects the old card', async (column, value, code) => {
+  const f = await recoveredCleanupEnv();
+  const warn = jest.spyOn(process, 'emitWarning').mockImplementation(() => {});
+  const runtime = f.open();
+  try {
+    const input = f.input(runtime);
+    f.db.prepare(`UPDATE a9_managed_processes SET ${column}=? WHERE handle_id=?`).run(value, f.fact.handleId);
+    const expected = { ok: false, error: { code } };
+    expect(runtime.dismissRecovered(input)).toMatchObject(expected);
+    expect(runtime.getSnapshot().managedProcesses.some((item: any) => item.canDismissRecovered)).toBe(false);
+    expect(runtime.dismissRecovered(input)).toMatchObject(expected);
+    expect(f.db.prepare(`SELECT ${column} AS value FROM a9_managed_processes WHERE handle_id=?`).get(f.fact.handleId)).toEqual({ value });
+    expect(f.db.prepare("SELECT count(*) AS n FROM a9_events WHERE event_type='managed_process_disposition'").get()).toEqual({ n: 0 });
+  } finally { await runtime.shutdown(); warn.mockRestore(); f.db.close(); fs.rmSync(f.env.root, { recursive: true, force: true }); }
+});
+
+it('A9-34 preserves cleanup after restart with an unfinished release and absent PID', async () => {
+  const f = await recoveredCleanupEnv();
+  f.db.prepare("UPDATE a9_managed_processes SET last_probe_status='running' WHERE handle_id=?").run(f.fact.handleId);
+  f.db.prepare(`INSERT INTO a9_events (session_id, turn_id, kind, event_type, payload_json, created_at)
+    VALUES (?, ?, 'tool', 'managed_process_ownership', ?, '2026-11-18')`).run(f.owner.conversationId, f.owner.turnId,
+    JSON.stringify({ handleId: f.fact.handleId, schemaVersion: 1, owner: f.owner, requestId: 'original-request',
+      ownershipState: 'release_intent', releaseId: 'release-pending' }));
+  const runtime = f.open();
+  try {
+    expect(runtime.getSnapshot().managedProcesses[0]).toMatchObject({
+      cleanupRequired: true, ownershipState: 'release_intent', canDismissRecovered: false,
+    });
+    expect(() => runtime.setMode('full_access')).toThrow('A9_MODE_CHANGE_BLOCKED_MANAGED_PROCESS');
+    expect(await runtime.shutdown({ stopManaged: false })).toMatchObject({ unresolved: [expect.any(String)] });
+    expect(f.db.prepare('SELECT owner_id FROM a9_workspace_locks').get()).toBeDefined();
+  } finally { await runtime.shutdown({ stopManaged: false }); f.db.close(); fs.rmSync(f.env.root, { recursive: true, force: true }); }
+});
+
+it('A9-34 refuses disposal after an ownership event with an object handle is appended', async () => {
+  const f = await recoveredCleanupEnv();
+  const warn = jest.spyOn(process, 'emitWarning').mockImplementation(() => {});
+  const runtime = f.open();
+  try {
+    const input = f.input(runtime);
+    f.db.prepare(`INSERT INTO a9_events (session_id, turn_id, kind, event_type, payload_json, created_at)
+      VALUES (?, ?, 'tool', 'managed_process_ownership', ?, '2026-11-18')`).run(f.owner.conversationId, f.owner.turnId,
+      JSON.stringify({ handleId: { value: f.fact.handleId }, schemaVersion: 1, owner: f.owner,
+        requestId: 'original-request', ownershipState: 'owned' }));
+    expect(runtime.getSnapshot().managedProcesses[0].canDismissRecovered).toBe(false);
+    expect(runtime.dismissRecovered(input)).toMatchObject({ ok: false, error: { code: 'A9_MANAGED_OWNERSHIP_CORRUPT' } });
+  } finally { await runtime.shutdown(); warn.mockRestore(); f.db.close(); fs.rmSync(f.env.root, { recursive: true, force: true }); }
+});
+
+it('A9-34 preserves wrong-owner refusal after a snapshot isolates the handle', async () => {
+  const f = await recoveredCleanupEnv();
+  const warn = jest.spyOn(process, 'emitWarning').mockImplementation(() => {});
+  const runtime = f.open();
+  try {
+    const input = f.input(runtime);
+    f.db.prepare(`UPDATE a9_events SET payload_json=json_set(payload_json,'$.owner.workspace','/other')
+      WHERE event_type='managed_process_ownership'`).run();
+    const expected = { ok: false, error: { code: 'A9_MANAGED_HANDLE_WRONG_OWNER' } };
+    expect(runtime.dismissRecovered(input)).toMatchObject(expected);
+    expect(runtime.getSnapshot().managedProcesses[0].canDismissRecovered).toBe(false);
+    expect(runtime.dismissRecovered(input)).toMatchObject(expected);
+  } finally { await runtime.shutdown(); warn.mockRestore(); f.db.close(); fs.rmSync(f.env.root, { recursive: true, force: true }); }
+});
+
+/** A durable intent -> released receipt chain, written through the real State API before restart. */
+function releasedRestartEnv() {
+  const env = makeEnv(); const seed = makeRuntime(env);
+  const conversationId = seed.getSnapshot().activeConversationId;
+  void seed.shutdown();
+  const { A9PersistenceManager } = require('../../../state/dist/a9-persistence');
+  const opened = A9PersistenceManager.open({ databasePath: path.join(env.dataRoot, 'a9-state.db'), dataRoot: env.dataRoot,
+    openDatabase: (p: string) => new Database(p) });
+  if (opened.status !== 'ready') throw new Error(opened.status);
+  const p = opened.manager;
+  p.upsertTask('release-task', conversationId, 'completed');
+  p.upsertTask('other-task', conversationId, 'completed');
+  p.upsertTurn('release-turn', 'release-task', conversationId, 'completed');
+  const owner = { workspace: env.workspaceRoot, conversationId, taskId: 'release-task', turnId: 'release-turn', toolCallId: 'release-call' };
+  const fact = { handleId: 'released-helper', workspacePath: env.workspaceRoot, pid: 987654320, command: 'serve', cwd: env.workspaceRoot,
+    startedAt: '2026-11-18T00:00:00.000Z', lastProbeStatus: 'running' };
+  const ownership = { schemaVersion: 1, owner, requestId: 'release-request', ownershipState: 'owned' };
+  p.recordManagedOwnership(fact, ownership);
+  p.recordManagedOwnership(fact, { ...ownership, ownershipState: 'release_intent', releaseId: 'release-1' });
+  p.recordManagedOwnership({ ...fact, lastProbeStatus: 'released', cleanupRequired: false },
+    { ...ownership, ownershipState: 'released', releaseId: 'release-1' });
+  p.db.close();
+  return { env, conversationId, db: new Database(path.join(env.dataRoot, 'a9-state.db')) };
+}
+
+it.each([
+  ['a valid release in an archived conversation', "UPDATE a9_sessions SET state = 'archived'", true],
+  ['every ownership event removed', "DELETE FROM a9_events WHERE event_type = 'managed_process_ownership'", false],
+  ['owner.taskId no longer matching the persistent task', `UPDATE a9_events SET payload_json = json_set(payload_json, '$.owner.taskId', 'other-task')
+    WHERE event_type = 'managed_process_ownership'`, false],
+  ['its release intent removed', `DELETE FROM a9_events WHERE event_type = 'managed_process_ownership'
+    AND json_extract(payload_json, '$.ownershipState') = 'release_intent'`, false],
+] as const)('A9-34 restart shutdown with a released row and %s', async (_name, mutation, releasable) => {
+  const f = releasedRestartEnv();
+  f.db.exec(mutation);
+  const warn = jest.spyOn(process, 'emitWarning').mockImplementation(() => {});
+  const runtime = makeRuntime(f.env);
+  try {
+    expect(runtime.getSnapshot().managedProcesses[0]).toMatchObject({ handleId: 'released-helper', cleanupRequired: !releasable });
+    // A refused attempt is retryable under either choice; a clean exit is cached for its choice.
+    for (const stopManaged of releasable ? [false] : [true, false]) {
+      const result = await runtime.shutdown({ stopManaged });
+      expect(result.unresolved).toHaveLength(releasable ? 0 : 1);
+      expect(f.db.prepare('SELECT count(*) AS n FROM a9_workspace_locks').get()).toEqual({ n: releasable ? 0 : 1 });
+    }
+    expect(f.db.prepare('SELECT last_probe_status FROM a9_managed_processes').get()).toEqual({ last_probe_status: 'released' });
+  } finally { await runtime.shutdown({ stopManaged: false }); warn.mockRestore(); f.db.close(); fs.rmSync(f.env.root, { recursive: true, force: true }); }
+});
+
+it('A9-34 fast shutdown keeps the lock for a cleanup fact another SQLite connection committed', async () => {
+  const f = releasedRestartEnv();
+  const runtime = makeRuntime(f.env);
+  try {
+    expect(runtime.getSnapshot().managedProcesses[0]).toMatchObject({ cleanupRequired: false });
+    // Not adopted by this Runtime's manager: only the final State transaction can see it.
+    f.db.prepare(`INSERT INTO a9_managed_processes (handle_id, workspace_path, pid, command, cwd, started_at, last_probe_status, pid_reuse_possible)
+      VALUES ('foreign-window', ?, 7, 'late', ?, '2026-11-19', 'cleanup_required', 0)`).run(f.env.workspaceRoot, f.env.workspaceRoot);
+    const blocked = await runtime.shutdown({ stopManaged: false });
+    expect(blocked.unresolved).toEqual([expect.stringContaining('foreign-window')]);
+    expect(runtime.getSnapshot().lock.held).toBe(true);
+    expect(f.db.prepare('SELECT count(*) AS n FROM a9_workspace_locks').get()).toEqual({ n: 1 });
+    f.db.prepare("DELETE FROM a9_managed_processes WHERE handle_id = 'foreign-window'").run();
+    expect(await runtime.shutdown({ stopManaged: false })).toEqual({ stopped: [], leftToSystem: [], unresolved: [] });
+    expect(f.db.prepare('SELECT count(*) AS n FROM a9_workspace_locks').get()).toEqual({ n: 0 });
+  } finally { await runtime.shutdown({ stopManaged: false }); f.db.close(); fs.rmSync(f.env.root, { recursive: true, force: true }); }
+});
+
 it('A9-34 disposition closes Stop, switching, shutdown, lock and restart without claiming cleanup', async () => {
   const f = await recoveredCleanupEnv(); let runtime = f.open(); let reopened: any;
   try {
@@ -2105,3 +2280,1584 @@ it('A9-34 rejects a disposition after the workspace lock has been released', asy
     expect(runtime.dismissRecovered(input)).toMatchObject({ ok: false, error: { code: 'A9_WORKSPACE_LOCKED' } });
   } finally { await runtime.shutdown(); f.db.close(); fs.rmSync(f.env.root, { recursive: true, force: true }); }
 });
+
+// ADR-0344 regressions. Real Runtime + file SQLite + current built Runner/State; the
+// process.kill spy only scripts the probe of one never-signalled synthetic PID.
+function scriptedPidProbe(pid: number) {
+  const realKill = process.kill.bind(process);
+  const state = { result: 'alive' as 'alive' | 'absent' | 'EINVAL' };
+  const spy = jest.spyOn(process, 'kill').mockImplementation(((target: number, signal?: any) => {
+    if (target !== pid) return realKill(target, signal);
+    if (signal !== 0) throw new Error(`TEST_ONLY: signal ${signal} sent to synthetic PID`);
+    if (state.result === 'alive') return true;
+    throw Object.assign(new Error(state.result === 'absent' ? 'ESRCH' : 'EINVAL'), { code: state.result === 'absent' ? 'ESRCH' : 'EINVAL' });
+  }) as any);
+  return { state, restore: () => spy.mockRestore(), signals: () => spy.mock.calls.filter(([target]) => target === pid).map(([, signal]) => signal) };
+}
+
+async function legacyRecoveredEnv(pid: number) {
+  const env = makeEnv(); const seed = makeRuntime(env); await seed.shutdown();
+  const db = new Database(path.join(env.dataRoot, 'a9-state.db'));
+  db.prepare(`INSERT INTO a9_managed_processes (handle_id, workspace_path, pid, command, cwd, started_at, last_probe_status, pid_reuse_possible)
+    VALUES ('legacy-recovered', ?, ?, 'previous command', ?, '2026-11-18T00:00:00.000Z', 'running', 0)`).run(env.workspaceRoot, pid, env.workspaceRoot);
+  const row = () => db.prepare("SELECT pid, started_at, last_probe_status FROM a9_managed_processes WHERE handle_id = 'legacy-recovered'").get();
+  const lockRows = () => (db.prepare('SELECT count(*) AS n FROM a9_workspace_locks').get() as { n: number }).n;
+  return { env, db, row, lockRows };
+}
+
+it.each([
+  ['stop', 'identity replaced by another connection'],
+  ['shutdown', 'identity replaced by another connection'],
+  ['stop', 'probe unknown'],
+  ['shutdown', 'probe unknown'],
+  ['stop', 'same identity, PID gone'],
+  ['shutdown', 'same identity, PID gone'],
+] as const)('a recovered legacy PID settles only its own identity via %s (%s)', async (entry, variant) => {
+  const pid = 987654300 + Math.floor(Math.random() * 99);
+  const probe = scriptedPidProbe(pid);
+  const f = await legacyRecoveredEnv(pid); let runtime: any;
+  try {
+    runtime = makeRuntime(f.env);
+    expect(f.row()).toEqual({ pid, started_at: '2026-11-18T00:00:00.000Z', last_probe_status: 'running_unknown' });
+    if (variant === 'identity replaced by another connection') {
+      f.db.prepare("UPDATE a9_managed_processes SET pid = ?, started_at = '2026-11-19T00:00:00.000Z', last_probe_status = 'running' WHERE handle_id = 'legacy-recovered'").run(pid + 1);
+    }
+    probe.state.result = variant === 'probe unknown' ? 'EINVAL' : 'absent';
+    const expectedRow = variant === 'identity replaced by another connection'
+      ? { pid: pid + 1, started_at: '2026-11-19T00:00:00.000Z', last_probe_status: 'running' }
+      : variant === 'probe unknown' ? { pid, started_at: '2026-11-18T00:00:00.000Z', last_probe_status: 'running_unknown' }
+        : { pid, started_at: '2026-11-18T00:00:00.000Z', last_probe_status: 'exited' };
+    if (entry === 'stop') {
+      const stopped = await runtime.stop();
+      if (variant === 'same identity, PID gone') expect(stopped).toEqual({ ok: true, stopped: ['legacy-recovered'] });
+      else expect(stopped.errors).toEqual([expect.objectContaining({ handleId: 'legacy-recovered',
+        code: variant === 'probe unknown' ? 'A9_MANAGED_PID_PROBE_UNKNOWN' : 'A9_MANAGED_RECOVERY_STALE' })]);
+    }
+    const closed = await runtime.shutdown({ stopManaged: true });
+    expect(f.row()).toEqual(expectedRow);
+    if (variant === 'same identity, PID gone') {
+      expect(closed.unresolved).toEqual([]);
+      expect(f.lockRows()).toBe(0);
+    } else {
+      expect(closed.unresolved.length).toBeGreaterThan(0);
+      expect(f.lockRows()).toBe(1);
+      expect(runtime.getSnapshot().lock.held).toBe(true);
+      expect(runtime.getSnapshot().conversationControls.canSwitch).toBe(false);
+      expect(runtime.canLeaveWorkspace().allowed).toBe(false);
+    }
+    expect(probe.signals().every((signal: unknown) => signal === 0)).toBe(true);
+  } finally {
+    probe.state.result = 'absent';
+    if (runtime) { f.db.prepare("DELETE FROM a9_managed_processes WHERE handle_id = 'legacy-recovered'").run(); await runtime.shutdown({ stopManaged: true }); }
+    probe.restore(); f.db.close(); fs.rmSync(f.env.root, { recursive: true, force: true });
+  }
+});
+
+it.each([[null], [0], [-1]] as const)('a recovered legacy starting fact with invalid PID %p stays unknown and keeps every blocker', async (pid) => {
+  const kill = jest.spyOn(process, 'kill');
+  const f = await legacyRecoveredEnv(pid as unknown as number); let runtime: any;
+  try {
+    f.db.prepare("UPDATE a9_managed_processes SET last_probe_status = 'starting' WHERE handle_id = 'legacy-recovered'").run();
+    runtime = makeRuntime(f.env);
+    const unknown = { pid, started_at: '2026-11-18T00:00:00.000Z', last_probe_status: 'running_unknown' };
+    expect(f.row()).toEqual(unknown);
+    expect(runtime.getSnapshot().conversationControls.canSwitch).toBe(false);
+    expect(runtime.getSnapshot({ bypassCache: true }).conversationControls.canSwitch).toBe(false);
+    expect(runtime.canLeaveWorkspace().allowed).toBe(false);
+    // The invalid PID is the persisted identity: adoption is neither isolated nor rewritten.
+    expect(runtime.getSnapshot().managedProcesses).toEqual([expect.objectContaining({ handleId: 'legacy-recovered',
+      pid, lastProbeStatus: 'running_unknown' })]);
+    expect(runtime.getSnapshot().controls).toEqual({ canStop: true, stopKind: 'managed_process' });
+    const stopped = await runtime.stop();
+    expect(stopped.errors).toEqual([expect.objectContaining({ handleId: 'legacy-recovered', code: 'A9_MANAGED_PID_PROBE_UNKNOWN' })]);
+    const closed = await runtime.shutdown({ stopManaged: true });
+    expect(closed.unresolved.length).toBeGreaterThan(0);
+    expect(f.row()).toEqual(unknown);
+    expect(f.lockRows()).toBe(1);
+    // No invalid PID is ever probed or signalled.
+    expect(kill.mock.calls.filter(([target]) => !(Number.isSafeInteger(target) && Number(target) > 0))).toEqual([]);
+  } finally {
+    kill.mockRestore();
+    if (runtime) { f.db.prepare("DELETE FROM a9_managed_processes WHERE handle_id = 'legacy-recovered'").run(); await runtime.shutdown({ stopManaged: true }); }
+    f.db.close(); fs.rmSync(f.env.root, { recursive: true, force: true });
+  }
+});
+
+it.each([
+  ['stop', 'stop'], ['stop', 'shutdown'], ['shutdown', 'stop'], ['shutdown', 'shutdown'],
+] as const)('an ignored recovered terminal write first seen by %s is retried by %s with its original identity', async (first, retry) => {
+  const pid = 987654400 + Math.floor(Math.random() * 99);
+  const probe = scriptedPidProbe(pid);
+  const f = await legacyRecoveredEnv(pid); let runtime: any;
+  const unknown = { pid, started_at: '2026-11-18T00:00:00.000Z', last_probe_status: 'running_unknown' };
+  try {
+    runtime = makeRuntime(f.env);
+    expect(f.row()).toEqual(unknown);
+    probe.state.result = 'absent';
+    f.db.exec("CREATE TRIGGER ignore_exit BEFORE UPDATE ON a9_managed_processes WHEN NEW.last_probe_status='exited' BEGIN SELECT RAISE(IGNORE); END");
+    if (first === 'stop') {
+      const stopped = await runtime.stop();
+      expect(stopped.errors).toEqual([expect.objectContaining({ handleId: 'legacy-recovered', code: 'A9_PERSISTENCE_WRITE_UNCONFIRMED' })]);
+    } else {
+      const closed = await runtime.shutdown({ stopManaged: true });
+      expect(closed.unresolved).toEqual(expect.arrayContaining([expect.stringContaining('legacy-recovered')]));
+    }
+    expect(f.row()).toEqual(unknown);
+    expect(f.lockRows()).toBe(1);
+    expect(runtime.getSnapshot().conversationControls.canSwitch).toBe(false);
+    expect(runtime.canLeaveWorkspace().allowed).toBe(false);
+    f.db.exec('DROP TRIGGER ignore_exit');
+    if (retry === 'stop') expect(await runtime.stop()).toEqual({ ok: true, stopped: ['legacy-recovered'] });
+    const closed = await runtime.shutdown({ stopManaged: true });
+    expect(closed.unresolved).toEqual([]);
+    expect(f.row()).toEqual({ ...unknown, last_probe_status: 'exited' });
+    expect(f.lockRows()).toBe(0);
+    expect(probe.signals().every((signal: unknown) => signal === 0)).toBe(true);
+  } finally {
+    probe.state.result = 'absent';
+    if (runtime) await runtime.shutdown({ stopManaged: true });
+    probe.restore(); f.db.close(); fs.rmSync(f.env.root, { recursive: true, force: true });
+  }
+});
+
+it('an unconfirmed recovered terminal write never settles an identity another connection replaced', async () => {
+  const pid = 987654500 + Math.floor(Math.random() * 99);
+  const probe = scriptedPidProbe(pid);
+  const f = await legacyRecoveredEnv(pid); let runtime: any;
+  try {
+    runtime = makeRuntime(f.env);
+    probe.state.result = 'absent';
+    f.db.exec("CREATE TRIGGER ignore_exit BEFORE UPDATE ON a9_managed_processes WHEN NEW.last_probe_status='exited' BEGIN SELECT RAISE(IGNORE); END");
+    expect((await runtime.stop()).errors[0].code).toBe('A9_PERSISTENCE_WRITE_UNCONFIRMED');
+    f.db.exec('DROP TRIGGER ignore_exit');
+    const replaced = { pid: pid + 1, started_at: '2026-11-19T00:00:00.000Z', last_probe_status: 'running' };
+    f.db.prepare("UPDATE a9_managed_processes SET pid = ?, started_at = ?, last_probe_status = 'running' WHERE handle_id = 'legacy-recovered'")
+      .run(replaced.pid, replaced.started_at);
+    expect((await runtime.stop()).errors).toEqual([expect.objectContaining({ code: 'A9_MANAGED_RECOVERY_STALE' })]);
+    expect((await runtime.shutdown({ stopManaged: true })).unresolved.length).toBeGreaterThan(0);
+    expect(f.row()).toEqual(replaced);
+    expect(f.lockRows()).toBe(1);
+  } finally {
+    probe.state.result = 'absent';
+    if (runtime) { f.db.prepare("DELETE FROM a9_managed_processes WHERE handle_id = 'legacy-recovered'").run(); await runtime.shutdown({ stopManaged: true }); }
+    probe.restore(); f.db.close(); fs.rmSync(f.env.root, { recursive: true, force: true });
+  }
+});
+
+it.each([
+  ['fact update', "CREATE TRIGGER ignore_w BEFORE UPDATE ON a9_managed_processes WHEN NEW.last_probe_status='user_dismissed' BEGIN SELECT RAISE(IGNORE); END"],
+  ['disposition event', "CREATE TRIGGER ignore_w BEFORE INSERT ON a9_events WHEN NEW.event_type='managed_process_disposition' BEGIN SELECT RAISE(IGNORE); END"],
+] as const)('A9-34 disposition with an ignored %s fails and keeps the adopted fact in memory', async (_name, trigger) => {
+  const f = await recoveredCleanupEnv(); const runtime = f.open();
+  try {
+    const input = f.input(runtime);
+    f.db.exec(trigger);
+    expect(runtime.dismissRecovered(input)).toMatchObject({ ok: false, error: { code: 'A9_AUDIT_PERSISTENCE_FAILED' } });
+    expect(f.db.prepare('SELECT last_probe_status FROM a9_managed_processes').get()).toEqual({ last_probe_status: 'cleanup_required' });
+    expect(f.db.prepare("SELECT count(*) AS n FROM a9_events WHERE event_type='managed_process_disposition'").get()).toEqual({ n: 0 });
+    expect(runtime.getSnapshot().controls).toEqual({ canStop: true, stopKind: 'managed_process' });
+    expect((await runtime.stop()).errors[0].code).toBe('A9_MANAGED_PROCESS_CLEANUP_UNCONFIRMED');
+    expect(runtime.canLeaveWorkspace().allowed).toBe(false);
+    expect((await runtime.shutdown()).unresolved).toHaveLength(1);
+    expect(f.db.prepare('SELECT count(*) AS n FROM a9_workspace_locks').get()).toEqual({ n: 1 });
+  } finally { await runtime.shutdown(); f.db.close(); fs.rmSync(f.env.root, { recursive: true, force: true }); }
+});
+
+it.each(['damaged', 'handleId only'] as const)('A9-34 disposition, snapshots and close survive a %s disposition event of another workspace', async (variant) => {
+  const f = await recoveredCleanupEnv(); const runtime = f.open();
+  try {
+    const input = f.input(runtime);
+    const result = runtime.dismissRecovered(input);
+    expect(result.ok).toBe(true);
+    const otherRoot = path.join(f.env.root, 'other-ws'); fs.mkdirSync(otherRoot);
+    f.db.prepare(`INSERT INTO a9_sessions (session_id, workspace_path, created_at, updated_at, last_activated_at)
+      VALUES ('foreign-session', ?, '2026-11-19', '2026-11-19', '2026-11-19')`).run(otherRoot);
+    f.db.prepare(`INSERT INTO a9_events (session_id, turn_id, kind, event_type, payload_json, created_at)
+      VALUES ('foreign-session', NULL, 'tool', 'managed_process_disposition', ?, '2026-11-19')`)
+      .run(variant === 'damaged' ? '{"handleId":' : JSON.stringify({ handleId: f.fact.handleId }));
+    const snapshot = runtime.getSnapshot({ bypassCache: true });
+    expect(snapshot.managedProcesses[0]).toMatchObject({ lastProbeStatus: 'user_dismissed', cleanupRequired: false,
+      disposition: expect.objectContaining({ eventId: result.disposition.eventId }) });
+    expect(snapshot.conversationControls.canSwitch).toBe(true);
+    expect(runtime.dismissRecovered(input)).toEqual(result);
+    expect(await runtime.shutdown()).toEqual({ stopped: [], leftToSystem: [], unresolved: [] });
+    expect(f.db.prepare('SELECT count(*) AS n FROM a9_workspace_locks').get()).toEqual({ n: 0 });
+  } finally { await runtime.shutdown(); f.db.close(); fs.rmSync(f.env.root, { recursive: true, force: true }); }
+});
+
+it('a persistent active fact outside the Runner blocks switching, leaving, new conversations and mode changes', async () => {
+  const env = makeEnv(); const runtime = makeRuntime(env);
+  const db = new Database(path.join(env.dataRoot, 'a9-state.db'));
+  const insert = (handleId: string, workspace: string, status: string) => db.prepare(`INSERT INTO a9_managed_processes
+    (handle_id, workspace_path, pid, command, cwd, started_at, last_probe_status, pid_reuse_possible)
+    VALUES (?, ?, 7, 'late', ?, '2026-11-19', ?, 0)`).run(handleId, workspace, workspace, status);
+  const allowed = () => {
+    const first = runtime.getSnapshot(); const cached = runtime.getSnapshot();
+    expect(cached.conversationControls.canSwitch).toBe(first.conversationControls.canSwitch);
+    return first.conversationControls.canSwitch;
+  };
+  try {
+    runtime.setMode('read_only');
+    expect(allowed()).toBe(true);
+    // Settled terminal facts and facts of another workspace keep everything available.
+    insert('terminal', env.workspaceRoot, 'stopped');
+    insert('elsewhere', path.join(env.root, 'other'), 'running');
+    expect(allowed()).toBe(true);
+    expect(runtime.canLeaveWorkspace().allowed).toBe(true);
+    for (const status of ['running', 'running_unknown', 'identity_mismatch', 'cleanup_required']) {
+      insert('late', env.workspaceRoot, status);
+      expect(allowed()).toBe(false);
+      expect(runtime.getSnapshot().conversationControls.reason).toBe('工作区仍有未结算的托管后台进程记录');
+      expect(runtime.canLeaveWorkspace().allowed).toBe(false);
+      expect(() => runtime.createConversation()).toThrow('A9_CONVERSATION_BUSY');
+      expect(() => runtime.setMode('full_access')).toThrow('A9_MODE_CHANGE_BLOCKED_MANAGED_PROCESS');
+      db.prepare("DELETE FROM a9_managed_processes WHERE handle_id = 'late'").run();
+      expect(allowed()).toBe(true);
+    }
+    expect(runtime.createConversation().ok).toBe(true);
+    expect(runtime.setMode('full_access').ok).toBe(true);
+    expect(await runtime.shutdown()).toEqual({ stopped: [], leftToSystem: [], unresolved: [] });
+  } finally { await runtime.shutdown(); db.close(); fs.rmSync(env.root, { recursive: true, force: true }); }
+});
+
+// ADR-0346 regressions.
+it.each(['stop', 'shutdown'] as const)('an ignored terminal write of a PID found gone at startup adoption is retried by %s', async (retry) => {
+  const pid = 987654600 + Math.floor(Math.random() * 99);
+  const probe = scriptedPidProbe(pid);
+  const f = await legacyRecoveredEnv(pid); let runtime: any;
+  const running = { pid, started_at: '2026-11-18T00:00:00.000Z', last_probe_status: 'running' };
+  // A persistent trigger fails the schema profile at open; the fault is a TEMP trigger
+  // on the Runtime's own connection, present before its startup adoption runs.
+  const connections: any[] = [];
+  try {
+    probe.state.result = 'absent';
+    runtime = createA9AgentRuntime({
+      workspaceRoot: f.env.workspaceRoot, dataRoot: f.env.dataRoot, ownerId: `adopt-${process.pid}-${Math.random()}`,
+      openDatabase: (p: string, o?: { readonly?: boolean }) => {
+        const db = new Database(p, o?.readonly ? { readonly: true } : {});
+        if (!o?.readonly) {
+          db.exec("CREATE TEMP TRIGGER ignore_exit BEFORE UPDATE ON main.a9_managed_processes WHEN NEW.last_probe_status='exited' BEGIN SELECT RAISE(IGNORE); END");
+          connections.push(db);
+        }
+        return db;
+      },
+    });
+    expect(runtime.status).toBe('ready');
+    expect(f.row()).toEqual(running);
+    expect(runtime.getSnapshot().conversationControls.canSwitch).toBe(false);
+    expect(runtime.getSnapshot().controls).toEqual({ canStop: true, stopKind: 'managed_process' });
+    expect(runtime.canLeaveWorkspace().allowed).toBe(false);
+    expect(() => runtime.setMode('review')).toThrow('A9_MODE_CHANGE_BLOCKED_MANAGED_PROCESS');
+    expect((await runtime.stop()).errors).toEqual([expect.objectContaining({ handleId: 'legacy-recovered', code: 'A9_PERSISTENCE_WRITE_UNCONFIRMED' })]);
+    expect((await runtime.shutdown({ stopManaged: true })).unresolved).toEqual(expect.arrayContaining([expect.stringContaining('legacy-recovered')]));
+    expect(f.row()).toEqual(running);
+    expect(f.lockRows()).toBe(1);
+    for (const db of connections) db.exec('DROP TRIGGER temp.ignore_exit');
+    if (retry === 'stop') expect(await runtime.stop()).toEqual({ ok: true, stopped: ['legacy-recovered'] });
+    expect(await runtime.shutdown({ stopManaged: true })).toEqual({ stopped: [], leftToSystem: [], unresolved: [] });
+    expect(f.row()).toEqual({ ...running, last_probe_status: 'exited' });
+    expect(f.lockRows()).toBe(0);
+    expect(probe.signals().every((signal: unknown) => signal === 0)).toBe(true);
+  } finally {
+    probe.state.result = 'absent';
+    if (runtime) await runtime.shutdown({ stopManaged: true });
+    probe.restore(); f.db.close(); fs.rmSync(f.env.root, { recursive: true, force: true });
+  }
+});
+
+// P1-2: the startup probe's ESRCH races a commit on another connection. State answers
+// A9_MANAGED_RECOVERY_STALE; an exact same-identity settlement must not isolate the old
+// handle (that blocked Stop, switching and close for good). Round 9: a replacing identity
+// is no longer accepted here; it is covered by the strict settle-race test below.
+it.each(['settled as stopped'] as const)(
+  'startup adoption whose settle is stale (row %s by another connection) does not isolate the old handle', async (variant) => {
+    const pid = 987654500 + Math.floor(Math.random() * 99);
+    const f = await legacyRecoveredEnv(pid); let runtime: any;
+    let fixture: Awaited<ReturnType<typeof startQuickFixture>> | undefined;
+    const realKill = process.kill.bind(process);
+    let raced = false;
+    const spy = jest.spyOn(process, 'kill').mockImplementation(((target: number, signal?: any) => {
+      if (target !== pid) return realKill(target, signal);
+      if (signal !== 0) throw new Error(`TEST_ONLY: signal ${signal} sent to synthetic PID`);
+      if (!raced) {
+        raced = true;
+        // Another SQLite connection commits before the Runtime writes the ESRCH terminal state.
+        f.db.prepare("UPDATE a9_managed_processes SET last_probe_status = 'stopped' WHERE handle_id = 'legacy-recovered'").run();
+      }
+      throw Object.assign(new Error('ESRCH'), { code: 'ESRCH' });
+    }) as any);
+    try {
+      runtime = makeRuntime(f.env);
+      expect(runtime.status).toBe('ready');
+      expect(raced).toBe(true);
+      expect(variant).toBe('settled as stopped');
+      {
+        expect(f.row()).toEqual({ pid, started_at: '2026-11-18T00:00:00.000Z', last_probe_status: 'stopped' });
+        expect(JSON.stringify(runtime.getSnapshot({ bypassCache: true }).persistenceDiagnostics)).toContain('A9_MANAGED_TERMINAL_ALREADY_SETTLED');
+        expect(runtime.getSnapshot().conversationControls.canSwitch).toBe(true);
+        expect(runtime.getSnapshot({ bypassCache: true }).conversationControls.canSwitch).toBe(true);
+        expect(runtime.canLeaveWorkspace().allowed).toBe(true);
+        // A row settled by another connection is no audit persistence failure:
+        // the current Runtime still dispatches new turns (P1-2).
+        fixture = await startQuickFixture();
+        fs.writeFileSync(path.join(f.env.workspaceRoot, 'note.txt'), 'after settled race');
+        expect(runtime.setMode('full_access')).toMatchObject({ ok: true, mode: 'full_access' });
+        await runtime.configureProvider({ baseUrl: fixture.baseUrl, model: 'fixture', skipProbe: true });
+        const turn = await runtime.submitTurn('dispatch after the settled startup race');
+        expect(turn).toMatchObject({ ok: true });
+        expect(JSON.stringify(turn)).not.toContain('A9_AUDIT_PERSISTENCE_FAILED');
+        expect(fixture.requests.length).toBeGreaterThan(0);
+        expect(JSON.stringify(runtime.getSnapshot({ bypassCache: true }))).not.toContain('A9_AUDIT_PERSISTENCE_FAILED');
+        expect(runtime.getSnapshot().controls).toEqual({ canStop: false, stopKind: 'none' });
+        expect(await runtime.stop()).toMatchObject({ ok: false, error: { code: 'NO_ACTIVE_TURN_OR_MANAGED_PROCESS' } });
+        expect(runtime.setMode('review')).toMatchObject({ ok: true, mode: 'review' });
+        expect(await runtime.shutdown({ stopManaged: true })).toEqual({ stopped: [], leftToSystem: [], unresolved: [] });
+        expect(f.lockRows()).toBe(0);
+        expect(f.row()).toEqual({ pid, started_at: '2026-11-18T00:00:00.000Z', last_probe_status: 'stopped' });
+      }
+      expect(spy.mock.calls.filter(([target]) => target === pid).every(([, signal]) => signal === 0)).toBe(true);
+    } finally {
+      if (runtime) { f.db.prepare("DELETE FROM a9_managed_processes WHERE handle_id = 'legacy-recovered'").run(); await runtime.shutdown({ stopManaged: true }); }
+      if (fixture) await fixture.close();
+      spy.mockRestore(); f.db.close(); fs.rmSync(f.env.root, { recursive: true, force: true });
+    }
+  });
+
+// P1 (round 9): a legacy handle whose startup probe answers ESRCH takes the settle
+// branch (settleManagedTerminal), not reconcile. When another connection commits a NULL
+// status, a `stopped` row with a damaged ownership record, or replaces the PID/start time
+// in that window, the STALE settle must run the same strict re-read as reconcile: the
+// handle stays isolated, switching/leaving stay blocked and close keeps the SQLite lock.
+it.each([
+  'a NULL status',
+  'stopped with a damaged ownership record',
+  // Round 10: the same identity already `exited` (the settle's own status) must not take
+  // the idempotent success path before ownership is verified.
+  'exited with a damaged ownership record',
+  'stopped with a different PID and start time',
+  'a new live identity',
+  // Round 12: the row is still `running` (no idempotent path) and another connection wrote a
+  // valid `owned` record for the same identity; the legacy settle must not UPDATE it to exited.
+  'a valid owned record for the same running identity',
+] as const)('startup settle race (legacy ESRCH) with %s keeps isolation and the lock', async (mutation) => {
+  const pid = 987655000 + Math.floor(Math.random() * 99);
+  const f = await legacyRecoveredEnv(pid); let runtime: any;
+  const realKill = process.kill.bind(process);
+  let raced = false; let raceError: unknown;
+  let other: any;
+  if (mutation === 'a valid owned record for the same running identity') {
+    const { A9PersistenceManager } = require('../../../state/dist/a9-persistence');
+    const opened = A9PersistenceManager.open({ databasePath: path.join(f.env.dataRoot, 'a9-state.db'), dataRoot: f.env.dataRoot,
+      openDatabase: (p: string) => new Database(p) });
+    if (opened.status !== 'ready') throw new Error(opened.status);
+    other = opened.manager;
+  }
+  const spy = jest.spyOn(process, 'kill').mockImplementation(((target: number, signal?: any) => {
+    if (target !== pid) return realKill(target, signal);
+    if (signal !== 0) throw new Error(`TEST_ONLY: signal ${signal} sent to synthetic PID`);
+    if (!raced) {
+      raced = true;
+      // Another SQLite connection commits before the Runtime writes the ESRCH terminal state.
+      if (mutation === 'a NULL status') {
+        f.db.prepare("UPDATE a9_managed_processes SET last_probe_status = NULL WHERE handle_id = 'legacy-recovered'").run();
+      } else if (mutation === 'a valid owned record for the same running identity') {
+        try {
+          const session = f.db.prepare('SELECT session_id FROM a9_sessions LIMIT 1').get() as { session_id: string };
+          other.upsertTask('race-task', session.session_id, 'active');
+          other.upsertTurn('race-turn', 'race-task', session.session_id, 'active');
+          const owner = { workspace: f.env.workspaceRoot, conversationId: session.session_id, taskId: 'race-task', turnId: 'race-turn', toolCallId: 'race-call' };
+          other.recordManagedOwnership({ handleId: 'legacy-recovered', workspacePath: f.env.workspaceRoot, pid, command: 'previous command',
+            cwd: f.env.workspaceRoot, startedAt: '2026-11-18T00:00:00.000Z', lastProbeStatus: 'running' },
+          { schemaVersion: 1, owner, requestId: 'race-request', ownershipState: 'owned' });
+        } catch (error) { raceError = error; }
+      } else if (mutation === 'stopped with a damaged ownership record' || mutation === 'exited with a damaged ownership record') {
+        f.db.prepare("UPDATE a9_managed_processes SET last_probe_status = ? WHERE handle_id = 'legacy-recovered'")
+          .run(mutation.startsWith('exited') ? 'exited' : 'stopped');
+        const session = f.db.prepare('SELECT session_id FROM a9_sessions LIMIT 1').get() as { session_id: string };
+        f.db.prepare(`INSERT INTO a9_events (session_id, turn_id, kind, event_type, payload_json, created_at)
+          VALUES (?, NULL, 'tool', 'managed_process_ownership', ?, '2026-11-19')`)
+          .run(session.session_id, JSON.stringify({ handleId: 'legacy-recovered', schemaVersion: 2, ownershipState: 'owned' }));
+      } else {
+        f.db.prepare(`UPDATE a9_managed_processes SET pid = ?, started_at = '2026-11-19T00:00:00.000Z', last_probe_status = ?
+          WHERE handle_id = 'legacy-recovered'`).run(pid + 1, mutation === 'a new live identity' ? 'running' : 'stopped');
+      }
+    }
+    throw Object.assign(new Error('ESRCH'), { code: 'ESRCH' });
+  }) as any);
+  const warn = jest.spyOn(process, 'emitWarning').mockImplementation(() => {});
+  try {
+    runtime = makeRuntime(f.env);
+    expect(raced).toBe(true);
+    expect(raceError).toBeUndefined();
+    const mutated = f.row();
+    const diagnostics = JSON.stringify(runtime.getSnapshot({ bypassCache: true }).persistenceDiagnostics);
+    expect(diagnostics).toContain('A9_MANAGED_HANDLE_ADOPT_FAILED');
+    expect(diagnostics).not.toContain('A9_MANAGED_TERMINAL_ALREADY_SETTLED');
+    if (mutation === 'a valid owned record for the same running identity') {
+      // The legacy settle answered UNCONFIRMED and wrote nothing: the owned row stays running.
+      expect(diagnostics).toContain('A9_MANAGED_OWNERSHIP_UNCONFIRMED');
+      expect(mutated).toEqual({ pid, started_at: '2026-11-18T00:00:00.000Z', last_probe_status: 'running' });
+    }
+    for (const options of [{}, { bypassCache: true }]) {
+      expect(runtime.getSnapshot(options).conversationControls.canSwitch).toBe(false);
+    }
+    expect(runtime.canLeaveWorkspace().allowed).toBe(false);
+    expect(() => runtime.createConversation()).toThrow('A9_CONVERSATION_BUSY');
+    expect(() => runtime.setMode('full_access')).toThrow('A9_MODE_CHANGE_BLOCKED_MANAGED_PROCESS');
+    for (const stopManaged of [true, false]) {
+      const closed = await runtime.shutdown({ stopManaged });
+      expect(closed.unresolved.length).toBeGreaterThan(0);
+      expect(f.lockRows()).toBe(1);
+    }
+    expect(f.row()).toEqual(mutated);
+    expect(spy.mock.calls.filter(([target]) => target === pid).every(([, signal]) => signal === 0)).toBe(true);
+  } finally {
+    if (runtime) await runtime.shutdown({ stopManaged: false });
+    warn.mockRestore(); spy.mockRestore(); other?.db.close(); f.db.close(); fs.rmSync(f.env.root, { recursive: true, force: true });
+  }
+});
+
+// P1 (round 12): the operation pre-checks (leave, new conversation, mode change) read
+// managed facts in 'recovery' mode. That read must load ordinary terminal ownership too:
+// after the Runtime starts, another connection commits a well-formed release_intent /
+// release_unknown for the `exited` row, and every pre-check must block like the final lock.
+it.each(['release_intent', 'release_unknown'] as const)(
+  'exited with a %s ownership committed by another connection blocks leave, new conversation and mode change', async (state) => {
+    const f = await recoveredCleanupEnv();
+    const { handleId } = f.fact;
+    f.db.prepare("UPDATE a9_managed_processes SET last_probe_status = 'exited' WHERE handle_id = ?").run(handleId);
+    const lockRows = () => (f.db.prepare('SELECT count(*) AS n FROM a9_workspace_locks').get() as { n: number }).n;
+    const warn = jest.spyOn(process, 'emitWarning').mockImplementation(() => {});
+    let runtime: any;
+    try {
+      runtime = f.open();
+      expect(runtime.status).toBe('ready');
+      // Control: exited with its `owned` record is settled.
+      expect(runtime.canLeaveWorkspace().allowed).toBe(true);
+      // Another SQLite connection commits a well-formed release record for the same handle.
+      const insert = f.db.prepare(`INSERT INTO a9_events (session_id, turn_id, kind, event_type, payload_json, created_at)
+        VALUES (?, ?, 'tool', 'managed_process_ownership', ?, '2026-11-19')`);
+      for (const ownershipState of state === 'release_unknown' ? ['release_intent', 'release_unknown'] : ['release_intent']) {
+        insert.run(f.owner.conversationId, f.owner.turnId, JSON.stringify({ handleId, schemaVersion: 1, owner: f.owner,
+          requestId: 'original-request', ownershipState, releaseId: 'other-release' }));
+      }
+      expect(runtime.canLeaveWorkspace().allowed).toBe(false);
+      expect(() => runtime.createConversation()).toThrow('A9_CONVERSATION_BUSY');
+      expect(() => runtime.setMode('full_access')).toThrow('A9_MODE_CHANGE_BLOCKED_MANAGED_PROCESS');
+      for (const options of [{}, { bypassCache: true }]) {
+        expect(runtime.getSnapshot(options).conversationControls.canSwitch).toBe(false);
+      }
+      for (const stopManaged of [true, false]) {
+        const closed = await runtime.shutdown({ stopManaged });
+        expect(JSON.stringify(closed.unresolved)).toContain(handleId);
+        expect(lockRows()).toBe(1);
+      }
+    } finally {
+      if (runtime) await runtime.shutdown({ stopManaged: false });
+      warn.mockRestore(); f.db.close(); fs.rmSync(f.env.root, { recursive: true, force: true });
+    }
+  });
+
+// P1-2 (round 7): the two adoption paths that skip the exited/settle branch also reach a
+// recovery-mode reconcile: an owned handle whose ESRCH keeps cleanupRequired (A9-34) and an
+// unowned handle whose probe is unknown (EINVAL). When another connection already committed
+// `stopped`, the STALE reconcile must re-read SQLite and withdraw the old handle instead of
+// isolating it and blocking audit; new turns dispatch and close releases the lock.
+it.each([
+  ['owned handle, ESRCH with cleanupRequired', 'ESRCH'],
+  ['unowned handle, unknown probe (EINVAL)', 'EINVAL'],
+] as const)('startup reconcile STALE after another connection committed stopped (%s) withdraws the stale handle', async (_name, errno) => {
+  let runtime: any; let fixture: Awaited<ReturnType<typeof startQuickFixture>> | undefined;
+  const owned = errno === 'ESRCH';
+  const cleanup = owned ? await recoveredCleanupEnv() : undefined;
+  const legacyPid = 987654800 + Math.floor(Math.random() * 99);
+  const legacy = owned ? undefined : await legacyRecoveredEnv(legacyPid);
+  const env = owned ? cleanup!.env : legacy!.env;
+  const db = owned ? cleanup!.db : legacy!.db;
+  const handleId = owned ? cleanup!.fact.handleId : 'legacy-recovered';
+  const pid = owned ? cleanup!.fact.pid : legacyPid;
+  const row = () => db.prepare('SELECT pid, started_at, last_probe_status FROM a9_managed_processes WHERE handle_id = ?').get(handleId);
+  const lockRows = () => (db.prepare('SELECT count(*) AS n FROM a9_workspace_locks').get() as { n: number }).n;
+  const before = row() as { pid: number; started_at: string };
+  const realKill = process.kill.bind(process);
+  let raced = false;
+  const spy = jest.spyOn(process, 'kill').mockImplementation(((target: number, signal?: any) => {
+    if (target !== pid) return realKill(target, signal);
+    if (signal !== 0) throw new Error(`TEST_ONLY: signal ${signal} sent to synthetic PID`);
+    if (!raced) {
+      raced = true;
+      // Another SQLite connection commits `stopped` before the Runtime's reconcile write.
+      db.prepare("UPDATE a9_managed_processes SET last_probe_status = 'stopped' WHERE handle_id = ?").run(handleId);
+    }
+    throw Object.assign(new Error(errno), { code: errno });
+  }) as any);
+  try {
+    runtime = makeRuntime(env);
+    expect(runtime.status).toBe('ready');
+    expect(raced).toBe(true);
+    const settled = { pid: before.pid, started_at: before.started_at, last_probe_status: 'stopped' };
+    expect(row()).toEqual(settled);
+    const diagnostics = JSON.stringify(runtime.getSnapshot({ bypassCache: true }).persistenceDiagnostics);
+    expect(diagnostics).toContain('A9_MANAGED_TERMINAL_ALREADY_SETTLED');
+    expect(diagnostics).not.toContain('A9_MANAGED_HANDLE_ADOPT_FAILED');
+    for (const options of [{}, { bypassCache: true }]) {
+      const snapshot = runtime.getSnapshot(options);
+      expect(snapshot.conversationControls.canSwitch).toBe(true);
+      expect(snapshot.controls).toEqual({ canStop: false, stopKind: 'none' });
+      expect(snapshot.managedProcesses.find((item: any) => item.handleId === handleId)).not.toHaveProperty('cleanupRequired', true);
+    }
+    expect(runtime.canLeaveWorkspace().allowed).toBe(true);
+    fixture = await startQuickFixture();
+    fs.writeFileSync(path.join(env.workspaceRoot, 'note.txt'), 'after settled reconcile race');
+    expect(runtime.setMode('full_access')).toMatchObject({ ok: true, mode: 'full_access' });
+    await runtime.configureProvider({ baseUrl: fixture.baseUrl, model: 'fixture', skipProbe: true });
+    const turn = await runtime.submitTurn('dispatch after the settled reconcile race');
+    expect(turn).toMatchObject({ ok: true });
+    expect(JSON.stringify(turn)).not.toContain('A9_AUDIT_PERSISTENCE_FAILED');
+    expect(fixture.requests.length).toBeGreaterThan(0);
+    expect(JSON.stringify(runtime.getSnapshot({ bypassCache: true }))).not.toContain('A9_AUDIT_PERSISTENCE_FAILED');
+    expect(await runtime.stop()).toMatchObject({ ok: false, error: { code: 'NO_ACTIVE_TURN_OR_MANAGED_PROCESS' } });
+    expect(runtime.setMode('review')).toMatchObject({ ok: true, mode: 'review' });
+    expect(await runtime.shutdown({ stopManaged: true })).toEqual({ stopped: [], leftToSystem: [], unresolved: [] });
+    expect(lockRows()).toBe(0);
+    expect(row()).toEqual(settled);
+    expect(spy.mock.calls.filter(([target]) => target === pid).every(([, signal]) => signal === 0)).toBe(true);
+  } finally {
+    if (runtime) await runtime.shutdown({ stopManaged: true });
+    if (fixture) await fixture.close();
+    spy.mockRestore(); db.close(); fs.rmSync(env.root, { recursive: true, force: true });
+  }
+});
+
+// P1 (round 8): the STALE/UNCONFIRMED re-read must prove the exact adopted identity.
+// Another connection's terminal row for a different PID/start time, a NULL status, or a
+// `stopped` row whose ownership record is damaged is no settlement of the old handle:
+// it stays isolated, Stop/close keep reporting it and the workspace lock is kept.
+it.each([
+  ['owned', 'stopped with a different PID and start time'],
+  ['owned', 'a NULL status'],
+  ['owned', 'stopped with a damaged ownership record'],
+  ['legacy', 'stopped with a different PID and start time'],
+  ['legacy', 'a NULL status'],
+  ['legacy', 'stopped with a damaged ownership record'],
+] as const)('startup reconcile race with %s handle and %s keeps isolation and the lock', async (kind, mutation) => {
+  let runtime: any;
+  const owned = kind === 'owned';
+  const cleanup = owned ? await recoveredCleanupEnv() : undefined;
+  const legacyPid = 987654900 + Math.floor(Math.random() * 99);
+  const legacy = owned ? undefined : await legacyRecoveredEnv(legacyPid);
+  const env = owned ? cleanup!.env : legacy!.env;
+  const db = owned ? cleanup!.db : legacy!.db;
+  const handleId = owned ? cleanup!.fact.handleId : 'legacy-recovered';
+  const pid = owned ? cleanup!.fact.pid : legacyPid;
+  const errno = owned ? 'ESRCH' : 'EINVAL';
+  const row = () => db.prepare('SELECT pid, started_at, last_probe_status FROM a9_managed_processes WHERE handle_id = ?').get(handleId);
+  const lockRows = () => (db.prepare('SELECT count(*) AS n FROM a9_workspace_locks').get() as { n: number }).n;
+  const realKill = process.kill.bind(process);
+  let raced = false;
+  const spy = jest.spyOn(process, 'kill').mockImplementation(((target: number, signal?: any) => {
+    if (target !== pid) return realKill(target, signal);
+    if (signal !== 0) throw new Error(`TEST_ONLY: signal ${signal} sent to synthetic PID`);
+    if (!raced) {
+      raced = true;
+      if (mutation === 'stopped with a different PID and start time') {
+        db.prepare("UPDATE a9_managed_processes SET pid = ?, started_at = '2026-11-19T01:00:00.000Z', last_probe_status = 'stopped' WHERE handle_id = ?")
+          .run(pid + 1, handleId);
+      } else if (mutation === 'a NULL status') {
+        db.prepare('UPDATE a9_managed_processes SET last_probe_status = NULL WHERE handle_id = ?').run(handleId);
+      } else {
+        db.prepare("UPDATE a9_managed_processes SET last_probe_status = 'stopped' WHERE handle_id = ?").run(handleId);
+        if (owned) {
+          db.prepare(`UPDATE a9_events SET payload_json = json_remove(payload_json, '$.requestId')
+            WHERE event_type = 'managed_process_ownership'`).run();
+        } else {
+          // The legacy reconcile answers STALE before it reads ownership; the re-read must not skip it.
+          const session = db.prepare('SELECT session_id FROM a9_sessions LIMIT 1').get() as { session_id: string };
+          db.prepare(`INSERT INTO a9_events (session_id, turn_id, kind, event_type, payload_json, created_at)
+            VALUES (?, NULL, 'tool', 'managed_process_ownership', ?, '2026-11-19')`)
+            .run(session.session_id, JSON.stringify({ handleId, schemaVersion: 2, ownershipState: 'owned' }));
+        }
+      }
+    }
+    throw Object.assign(new Error(errno), { code: errno });
+  }) as any);
+  const warn = jest.spyOn(process, 'emitWarning').mockImplementation(() => {});
+  try {
+    runtime = makeRuntime(env);
+    expect(raced).toBe(true);
+    const mutated = row();
+    const diagnostics = JSON.stringify(runtime.getSnapshot({ bypassCache: true }).persistenceDiagnostics);
+    expect(diagnostics).toContain('A9_MANAGED_HANDLE_ADOPT_FAILED');
+    expect(diagnostics).not.toContain('A9_MANAGED_TERMINAL_ALREADY_SETTLED');
+    for (const options of [{}, { bypassCache: true }]) {
+      expect(runtime.getSnapshot(options).conversationControls.canSwitch).toBe(false);
+    }
+    expect(runtime.canLeaveWorkspace().allowed).toBe(false);
+    expect(() => runtime.createConversation()).toThrow('A9_CONVERSATION_BUSY');
+    for (const stopManaged of [true, false]) {
+      const closed = await runtime.shutdown({ stopManaged });
+      expect(closed.unresolved.length).toBeGreaterThan(0);
+      expect(lockRows()).toBe(1);
+    }
+    expect(row()).toEqual(mutated);
+    expect(spy.mock.calls.filter(([target]) => target === pid).every(([, signal]) => signal === 0)).toBe(true);
+  } finally {
+    if (runtime) await runtime.shutdown({ stopManaged: false });
+    warn.mockRestore(); spy.mockRestore(); db.close(); fs.rmSync(env.root, { recursive: true, force: true });
+  }
+});
+
+// P1 (round 8), scenario A: while the startup probe runs, another connection commits a
+// verified terminal settlement of the same owned identity (user_dismissed through the
+// A9-34 disposition, or the owned -> release_intent -> released chain). The reconcile
+// answers A9_MANAGED_OWNERSHIP_UNCONFIRMED; the re-read proves the exact settlement, so
+// the old handle is withdrawn without isolation, new turns dispatch and close releases the lock.
+it.each(['user_dismissed', 'released'] as const)(
+  'startup reconcile UNCONFIRMED after another connection committed a verified %s withdraws the stale handle', async (settlement) => {
+    let runtime: any; let fixture: Awaited<ReturnType<typeof startQuickFixture>> | undefined;
+    const f = await recoveredCleanupEnv();
+    const { A9PersistenceManager } = require('../../../state/dist/a9-persistence');
+    const opened = A9PersistenceManager.open({ databasePath: path.join(f.env.dataRoot, 'a9-state.db'), dataRoot: f.env.dataRoot,
+      openDatabase: (p: string) => new Database(p) });
+    if (opened.status !== 'ready') throw new Error(opened.status);
+    const other = opened.manager;
+    const handleId = f.fact.handleId; const pid = f.fact.pid;
+    const row = () => f.db.prepare('SELECT pid, started_at, last_probe_status FROM a9_managed_processes WHERE handle_id = ?').get(handleId);
+    const lockRows = () => (f.db.prepare('SELECT count(*) AS n FROM a9_workspace_locks').get() as { n: number }).n;
+    const ownership = { schemaVersion: 1, owner: f.owner, requestId: 'original-request' };
+    const realKill = process.kill.bind(process);
+    let raced = false; let raceError: unknown;
+    const spy = jest.spyOn(process, 'kill').mockImplementation(((target: number, signal?: any) => {
+      if (target !== pid) return realKill(target, signal);
+      if (signal !== 0) throw new Error(`TEST_ONLY: signal ${signal} sent to synthetic PID`);
+      if (!raced) {
+        raced = true;
+        try {
+          if (settlement === 'user_dismissed') {
+            const lock = f.db.prepare('SELECT owner_id FROM a9_workspace_locks').get() as { owner_id: string };
+            const identity = other.getManagedProcessRecoveryIdentity(handleId);
+            other.dismissRecoveredManagedProcess({ workspace: f.env.workspaceRoot, conversationId: f.owner.conversationId,
+              lockOwnerId: lock.owner_id, handleId, recoveryRevision: identity.recoveryRevision,
+              identity: { owner: f.owner, requestId: 'original-request', pid, startedAt: f.fact.startedAt },
+              pidProbe: { pid, status: 'absent', checkedAt: new Date().toISOString() } });
+          } else {
+            other.recordManagedOwnership(f.fact, { ...ownership, ownershipState: 'release_intent', releaseId: 'other-release' });
+            other.recordManagedOwnership({ ...f.fact, lastProbeStatus: 'released', cleanupRequired: false },
+              { ...ownership, ownershipState: 'released', releaseId: 'other-release' });
+          }
+        } catch (error) { raceError = error; }
+      }
+      throw Object.assign(new Error('ESRCH'), { code: 'ESRCH' });
+    }) as any);
+    try {
+      runtime = makeRuntime(f.env);
+      expect(raceError).toBeUndefined();
+      expect(runtime.status).toBe('ready');
+      expect(raced).toBe(true);
+      const settled = { pid, started_at: f.fact.startedAt, last_probe_status: settlement };
+      expect(row()).toEqual(settled);
+      const diagnostics = JSON.stringify(runtime.getSnapshot({ bypassCache: true }).persistenceDiagnostics);
+      expect(diagnostics).toContain('A9_MANAGED_TERMINAL_ALREADY_SETTLED');
+      expect(diagnostics).not.toContain('A9_MANAGED_HANDLE_ADOPT_FAILED');
+      for (const options of [{}, { bypassCache: true }]) {
+        const snapshot = runtime.getSnapshot(options);
+        expect(snapshot.conversationControls.canSwitch).toBe(true);
+        expect(snapshot.controls).toEqual({ canStop: false, stopKind: 'none' });
+        expect(snapshot.managedProcesses.find((item: any) => item.handleId === handleId)).not.toHaveProperty('cleanupRequired', true);
+      }
+      expect(runtime.canLeaveWorkspace().allowed).toBe(true);
+      fixture = await startQuickFixture();
+      fs.writeFileSync(path.join(f.env.workspaceRoot, 'note.txt'), `after ${settlement} reconcile race`);
+      expect(runtime.setMode('full_access')).toMatchObject({ ok: true, mode: 'full_access' });
+      await runtime.configureProvider({ baseUrl: fixture.baseUrl, model: 'fixture', skipProbe: true });
+      const turn = await runtime.submitTurn(`dispatch after the ${settlement} reconcile race`);
+      expect(turn).toMatchObject({ ok: true });
+      expect(JSON.stringify(turn)).not.toContain('A9_AUDIT_PERSISTENCE_FAILED');
+      expect(fixture.requests.length).toBeGreaterThan(0);
+      expect(JSON.stringify(runtime.getSnapshot({ bypassCache: true }))).not.toContain('A9_AUDIT_PERSISTENCE_FAILED');
+      expect(await runtime.stop()).toMatchObject({ ok: false, error: { code: 'NO_ACTIVE_TURN_OR_MANAGED_PROCESS' } });
+      expect(runtime.setMode('review')).toMatchObject({ ok: true, mode: 'review' });
+      expect(await runtime.shutdown({ stopManaged: true })).toEqual({ stopped: [], leftToSystem: [], unresolved: [] });
+      expect(lockRows()).toBe(0);
+      expect(row()).toEqual(settled);
+      expect(spy.mock.calls.filter(([target]) => target === pid).every(([, signal]) => signal === 0)).toBe(true);
+    } finally {
+      if (runtime) await runtime.shutdown({ stopManaged: true });
+      if (fixture) await fixture.close();
+      spy.mockRestore(); other.db.close(); f.db.close(); fs.rmSync(f.env.root, { recursive: true, force: true });
+    }
+  });
+
+it('a pending terminal settlement blocks mode changes and keeps Stop after another connection settled the same identity', async () => {
+  const pid = 987654700 + Math.floor(Math.random() * 99);
+  const probe = scriptedPidProbe(pid);
+  const f = await legacyRecoveredEnv(pid); let runtime: any;
+  try {
+    runtime = makeRuntime(f.env);
+    probe.state.result = 'absent';
+    f.db.exec("CREATE TRIGGER ignore_exit BEFORE UPDATE ON a9_managed_processes WHEN NEW.last_probe_status='exited' BEGIN SELECT RAISE(IGNORE); END");
+    expect((await runtime.stop()).errors[0].code).toBe('A9_PERSISTENCE_WRITE_UNCONFIRMED');
+    f.db.exec('DROP TRIGGER ignore_exit');
+    // Another SQLite connection commits the same identity's terminal state.
+    f.db.prepare("UPDATE a9_managed_processes SET last_probe_status = 'exited', pid_reuse_possible = 0 WHERE handle_id = 'legacy-recovered'").run();
+    for (const options of [{}, { bypassCache: true }]) {
+      const snapshot = runtime.getSnapshot(options);
+      expect(snapshot.conversationControls.canSwitch).toBe(false);
+      expect(snapshot.controls).toEqual({ canStop: true, stopKind: 'managed_process' });
+    }
+    expect(() => runtime.createConversation()).toThrow('A9_CONVERSATION_BUSY');
+    expect(() => runtime.setMode('review')).toThrow('A9_MODE_CHANGE_BLOCKED_MANAGED_PROCESS');
+    expect(await runtime.stop()).toEqual({ ok: true, stopped: ['legacy-recovered'] });
+    expect(runtime.getSnapshot().controls).toEqual({ canStop: false, stopKind: 'none' });
+    expect(runtime.setMode('review')).toMatchObject({ ok: true, mode: 'review' });
+    expect(await runtime.shutdown({ stopManaged: true })).toEqual({ stopped: [], leftToSystem: [], unresolved: [] });
+    expect(f.lockRows()).toBe(0);
+  } finally {
+    probe.state.result = 'absent';
+    if (runtime) await runtime.shutdown({ stopManaged: true });
+    probe.restore(); f.db.close(); fs.rmSync(f.env.root, { recursive: true, force: true });
+  }
+});
+
+it('a helper-proven Stop whose terminal audit write is ignored fails Stop and close until the write is confirmed', async () => {
+  const env = makeEnv(); const fixture = await startBackgroundFixture(); const runtime = makeRuntime(env, true);
+  const db = new Database(path.join(env.dataRoot, 'a9-state.db'));
+  const lockRows = () => (db.prepare('SELECT count(*) AS n FROM a9_workspace_locks').get() as { n: number }).n;
+  try {
+    runtime.setMode('full_access');
+    await runtime.configureProvider({ baseUrl: fixture.baseUrl, model: 'fixture', skipProbe: true });
+    await runtime.submitTurn('start a managed background process');
+    const running = runtime.getSnapshot().managedProcesses.find((item: any) => item.lastProbeStatus === 'running');
+    expect(running).toBeDefined();
+    const row = () => db.prepare('SELECT last_probe_status FROM a9_managed_processes WHERE handle_id = ?').get(running.handleId);
+    db.exec("CREATE TRIGGER ignore_stop BEFORE INSERT ON a9_managed_processes WHEN NEW.last_probe_status='stopped' BEGIN SELECT RAISE(IGNORE); END");
+    const stopped = await runtime.stop();
+    expect(stopped).toMatchObject({ ok: false, errors: [expect.objectContaining({ handleId: running.handleId, code: 'A9_BACKGROUND_STATE_PERSIST_FAILED' })] });
+    // The process is gone, but neither stopped nor a cleanup_required substitute was persisted.
+    expect(() => process.kill(running.pid, 0)).toThrow();
+    expect(row()).toEqual({ last_probe_status: 'running' });
+    expect(runtime.getSnapshot().controls).toEqual({ canStop: true, stopKind: 'managed_process' });
+    expect(runtime.canLeaveWorkspace().allowed).toBe(false);
+    const closed = await runtime.shutdown();
+    expect(closed.unresolved.length).toBeGreaterThan(0);
+    expect(lockRows()).toBe(1);
+    expect(row()).toEqual({ last_probe_status: 'running' });
+    db.exec('DROP TRIGGER ignore_stop');
+    expect(await runtime.stop()).toEqual({ ok: true, stopped: [running.handleId] });
+    expect(row()).toEqual({ last_probe_status: 'stopped' });
+    expect(await runtime.shutdown()).toEqual({ stopped: [], leftToSystem: [], unresolved: [] });
+    expect(lockRows()).toBe(0);
+  } finally {
+    try { db.exec('DROP TRIGGER IF EXISTS ignore_stop'); } catch { /* closed */ }
+    await runtime.shutdown(); await fixture.close(); db.close(); fs.rmSync(env.root, { recursive: true, force: true });
+  }
+}, 30_000);
+
+it('shutdown with an ignored helper terminal write keeps unresolved and the lock, then settles on retry', async () => {
+  const env = makeEnv(); const fixture = await startBackgroundFixture(); const runtime = makeRuntime(env, true);
+  const db = new Database(path.join(env.dataRoot, 'a9-state.db'));
+  const lockRows = () => (db.prepare('SELECT count(*) AS n FROM a9_workspace_locks').get() as { n: number }).n;
+  try {
+    runtime.setMode('full_access');
+    await runtime.configureProvider({ baseUrl: fixture.baseUrl, model: 'fixture', skipProbe: true });
+    await runtime.submitTurn('start a managed background process');
+    const running = runtime.getSnapshot().managedProcesses.find((item: any) => item.lastProbeStatus === 'running');
+    db.exec("CREATE TRIGGER ignore_stop BEFORE INSERT ON a9_managed_processes WHEN NEW.last_probe_status='stopped' BEGIN SELECT RAISE(IGNORE); END");
+    const closed = await runtime.shutdown();
+    expect(closed.unresolved).toEqual(expect.arrayContaining([expect.stringContaining(running.handleId)]));
+    expect(lockRows()).toBe(1);
+    expect(runtime.getSnapshot().lock.held).toBe(true);
+    db.exec('DROP TRIGGER ignore_stop');
+    expect(await runtime.shutdown()).toMatchObject({ unresolved: [] });
+    expect(db.prepare('SELECT last_probe_status FROM a9_managed_processes WHERE handle_id = ?').get(running.handleId))
+      .toEqual({ last_probe_status: 'stopped' });
+    expect(lockRows()).toBe(0);
+  } finally {
+    try { db.exec('DROP TRIGGER IF EXISTS ignore_stop'); } catch { /* closed */ }
+    await runtime.shutdown(); await fixture.close(); db.close(); fs.rmSync(env.root, { recursive: true, force: true });
+  }
+}, 30_000);
+
+// P1 (round 12): a conversation legitimately rebound to another workspace leaves its
+// original ownership event in the old workspace. With that record damaged (schemaVersion),
+// the handle is not a legacy handle: the startup settle must not write `exited` (running)
+// or succeed idempotently (exited), and every pre-check plus the final lock must block.
+it.each(['running', 'exited'] as const)(
+  'a rebound conversation with a damaged original ownership record (fact %s) blocks leave, new conversation, mode change and close',
+  async (status) => {
+    const pid = 987655200 + Math.floor(Math.random() * 99);
+    const probe = scriptedPidProbe(pid);
+    const f = await legacyRecoveredEnv(pid); let runtime: any;
+    const warn = jest.spyOn(process, 'emitWarning').mockImplementation(() => {});
+    try {
+      const { A9PersistenceManager } = require('../../../state/dist/a9-persistence');
+      const opened = A9PersistenceManager.open({ databasePath: path.join(f.env.dataRoot, 'a9-state.db'), dataRoot: f.env.dataRoot,
+        openDatabase: (p: string) => new Database(p) });
+      if (opened.status !== 'ready') throw new Error(opened.status);
+      const p = opened.manager;
+      const session = f.db.prepare('SELECT session_id FROM a9_sessions LIMIT 1').get() as { session_id: string };
+      p.upsertTask('rebind-task', session.session_id, 'completed');
+      p.upsertTurn('rebind-turn', 'rebind-task', session.session_id, 'completed');
+      const owner = { workspace: f.env.workspaceRoot, conversationId: session.session_id, taskId: 'rebind-task', turnId: 'rebind-turn', toolCallId: 'rebind-call' };
+      p.recordManagedOwnership({ handleId: 'legacy-recovered', workspacePath: f.env.workspaceRoot, pid, command: 'previous command',
+        cwd: f.env.workspaceRoot, startedAt: '2026-11-18T00:00:00.000Z', lastProbeStatus: 'running' },
+      { schemaVersion: 1, owner, requestId: 'rebind-request', ownershipState: 'owned' });
+      p.db.close();
+      // Legitimate rebinding: the conversation now belongs to another workspace.
+      const otherRoot = path.join(f.env.root, 'rebound-ws'); fs.mkdirSync(otherRoot);
+      f.db.prepare('UPDATE a9_sessions SET workspace_path = ? WHERE session_id = ?').run(otherRoot, session.session_id);
+      // The original ownership record is damaged.
+      f.db.prepare(`UPDATE a9_events SET payload_json = json_set(payload_json, '$.schemaVersion', 2)
+        WHERE event_type = 'managed_process_ownership'`).run();
+      if (status === 'exited') {
+        f.db.prepare("UPDATE a9_managed_processes SET last_probe_status = 'exited' WHERE handle_id = 'legacy-recovered'").run();
+      }
+      const before = f.row();
+      probe.state.result = 'absent';
+      runtime = makeRuntime(f.env);
+      expect(runtime.status).toBe('ready');
+      expect(f.row()).toEqual(before);
+      expect(JSON.stringify(runtime.getSnapshot({ bypassCache: true }).persistenceDiagnostics)).toContain('A9_MANAGED_OWNERSHIP_CORRUPT');
+      if (status === 'running') {
+        // The isolated running handle keeps switching closed; Stop cannot confirm its cleanup.
+        for (const options of [{}, { bypassCache: true }]) {
+          expect(runtime.getSnapshot(options).conversationControls.canSwitch).toBe(false);
+        }
+        expect(await runtime.stop()).toMatchObject({ ok: false, error: { code: 'A9_MANAGED_PROCESS_CLEANUP_UNCONFIRMED' } });
+      }
+      expect(runtime.canLeaveWorkspace().allowed).toBe(false);
+      expect(() => runtime.createConversation()).toThrow('A9_CONVERSATION_BUSY');
+      expect(() => runtime.setMode('full_access')).toThrow('A9_MODE_CHANGE_BLOCKED_MANAGED_PROCESS');
+      for (const stopManaged of [true, false]) {
+        const closed = await runtime.shutdown({ stopManaged });
+        expect(closed.unresolved.length).toBeGreaterThan(0);
+        expect(f.lockRows()).toBe(1);
+      }
+      expect(f.row()).toEqual(before);
+      expect(probe.signals().every((signal: unknown) => signal === 0)).toBe(true);
+    } finally {
+      probe.state.result = 'absent';
+      if (runtime) await runtime.shutdown({ stopManaged: false });
+      warn.mockRestore(); probe.restore(); f.db.close(); fs.rmSync(f.env.root, { recursive: true, force: true });
+    }
+  });
+
+// P1 (round 13): the conversation is rebound with a real `changeWorkdir`; its ownership
+// record still names the original workspace. Another connection then (1) removes the
+// record's handleId or (2) points its owner task at a task that does not exist. Neither is
+// an unrelated foreign claim: the original workspace treats the handle as damaged/unconfirmed.
+// Round 14 (P1): (3) the record is truncated JSON -- no readable handleId and JSON.parse fails --
+// yet it still names the original workspace, so it is damaged evidence, never a legacy handle.
+// Round 15 (P1): (4) the top-level handleId survives but the truncation falls inside the
+// workspace path or before the workspace field; the record stays this handle's damaged evidence.
+it.each([
+  ['missing handleId', "UPDATE a9_events SET payload_json = json_remove(payload_json, '$.handleId') WHERE event_type = 'managed_process_ownership'",
+    'A9_MANAGED_OWNERSHIP_CORRUPT'],
+  ['stale owner task', `UPDATE a9_events SET payload_json = json_set(payload_json, '$.owner.taskId', 'missing-task')
+    WHERE event_type = 'managed_process_ownership'`, 'A9_MANAGED_OWNER_MISMATCH'],
+  ['truncated JSON (last brace lost)', `UPDATE a9_events SET payload_json = substr(payload_json, 1, length(payload_json) - 1)
+    WHERE event_type = 'managed_process_ownership'`, 'A9_MANAGED_OWNERSHIP_CORRUPT'],
+  ['truncated JSON (owner left open)', `UPDATE a9_events SET payload_json = '{"schemaVersion":1,"handleId":"' || json_extract(payload_json, '$.handleId')
+    || '","owner":{"workspace":' || json_quote(json_extract(payload_json, '$.owner.workspace')) WHERE event_type = 'managed_process_ownership'`,
+    'A9_MANAGED_OWNERSHIP_CORRUPT'],
+  ['truncated JSON (inside workspace path)', `UPDATE a9_events SET payload_json = '{"schemaVersion":1,"handleId":"' || json_extract(payload_json, '$.handleId')
+    || '","owner":{"workspace":' || substr(json_quote(json_extract(payload_json, '$.owner.workspace')), 1,
+      length(json_quote(json_extract(payload_json, '$.owner.workspace'))) - 2) WHERE event_type = 'managed_process_ownership'`,
+    'A9_MANAGED_OWNERSHIP_CORRUPT'],
+  ['truncated JSON (before workspace field)', `UPDATE a9_events SET payload_json = '{"schemaVersion":1,"handleId":"' || json_extract(payload_json, '$.handleId')
+    || '","owner":{' WHERE event_type = 'managed_process_ownership'`, 'A9_MANAGED_OWNERSHIP_CORRUPT'],
+] as const)('after changeWorkdir a damaged original ownership record (%s) blocks leave, mode change, settle and close',
+  async (_name, damage, code) => {
+    const pid = 987655300 + Math.floor(Math.random() * 99);
+    const probe = scriptedPidProbe(pid);
+    const f = await legacyRecoveredEnv(pid); let runtime: any;
+    const warn = jest.spyOn(process, 'emitWarning').mockImplementation(() => {});
+    const { A9PersistenceManager } = require('../../../state/dist/a9-persistence');
+    const openManager = () => {
+      const opened = A9PersistenceManager.open({ databasePath: path.join(f.env.dataRoot, 'a9-state.db'), dataRoot: f.env.dataRoot,
+        openDatabase: (p: string) => new Database(p) });
+      if (opened.status !== 'ready') throw new Error(opened.status);
+      return opened.manager;
+    };
+    try {
+      const p = openManager();
+      const session = f.db.prepare('SELECT session_id FROM a9_sessions LIMIT 1').get() as { session_id: string };
+      p.upsertTask('rebind-task', session.session_id, 'completed');
+      p.upsertTurn('rebind-turn', 'rebind-task', session.session_id, 'completed');
+      const owner = { workspace: f.env.workspaceRoot, conversationId: session.session_id, taskId: 'rebind-task', turnId: 'rebind-turn', toolCallId: 'rebind-call' };
+      const fact = { handleId: 'legacy-recovered', workspacePath: f.env.workspaceRoot, pid, command: 'previous command',
+        cwd: f.env.workspaceRoot, startedAt: '2026-11-18T00:00:00.000Z' };
+      p.recordManagedOwnership({ ...fact, lastProbeStatus: 'stopped' }, { schemaVersion: 1, owner, requestId: 'rebind-request', ownershipState: 'owned' });
+      const otherRoot = path.join(f.env.root, 'rebound-ws'); fs.mkdirSync(otherRoot);
+      p.changeWorkdir(session.session_id, f.env.workspaceRoot, otherRoot, false);
+      expect(p.listConversations(otherRoot).map((item: any) => item.sessionId)).toEqual([session.session_id]);
+      p.db.close();
+      // Another connection damages the original record and reports the identity running again.
+      f.db.exec(damage);
+      f.db.prepare("UPDATE a9_managed_processes SET last_probe_status = 'running' WHERE handle_id = 'legacy-recovered'").run();
+      const before = f.row();
+      probe.state.result = 'absent';
+      runtime = makeRuntime(f.env);
+      expect(runtime.status).toBe('ready');
+      expect(f.row()).toEqual(before);
+      expect(JSON.stringify(runtime.getSnapshot({ bypassCache: true }).persistenceDiagnostics)).toContain(code);
+      for (const options of [{}, { bypassCache: true }]) {
+        expect(runtime.getSnapshot(options).conversationControls.canSwitch).toBe(false);
+      }
+      expect(runtime.canLeaveWorkspace().allowed).toBe(false);
+      expect(() => runtime.setMode('full_access')).toThrow('A9_MODE_CHANGE_BLOCKED_MANAGED_PROCESS');
+      expect((await runtime.stop()).ok).toBe(false);
+      // A legacy settle from another connection rejects and never turns `running` into `exited`.
+      const q = openManager();
+      try {
+        expect(() => q.settleRecoveredManagedProcess({ ...fact, lastProbeStatus: 'exited', pidReusePossible: false })).toThrow(code);
+      } finally { q.db.close(); }
+      expect(f.row()).toEqual(before);
+      for (const stopManaged of [true, false]) {
+        const closed = await runtime.shutdown({ stopManaged });
+        expect(closed.unresolved.length).toBeGreaterThan(0);
+        expect(f.lockRows()).toBe(1);
+      }
+      expect(f.row()).toEqual(before);
+      expect((f.row() as any).last_probe_status).toBe('running');
+      expect(probe.signals().every((signal: unknown) => signal === 0)).toBe(true);
+    } finally {
+      probe.state.result = 'absent';
+      if (runtime) await runtime.shutdown({ stopManaged: false });
+      warn.mockRestore(); probe.restore(); f.db.close(); fs.rmSync(f.env.root, { recursive: true, force: true });
+    }
+  });
+
+// P1 (round 16): an older truncated ownership record of the handle is followed by complete
+// records (a later copy of the owned record, then the release chain for `released`). After a
+// real `changeWorkdir` the stable-history fallback must not skip that older damage: the
+// original workspace reports A9_MANAGED_OWNERSHIP_CORRUPT, leave stays blocked and both
+// shutdown modes keep the workspace lock.
+it.each([
+  ['stopped', 'last brace lost', `substr(payload_json, 1, length(payload_json) - 1)`],
+  ['stopped', 'before workspace field', `'{"schemaVersion":1,"handleId":"' || json_extract(payload_json, '$.handleId') || '","owner":{'`],
+  ['released', 'last brace lost', `substr(payload_json, 1, length(payload_json) - 1)`],
+  ['released', 'before workspace field', `'{"schemaVersion":1,"handleId":"' || json_extract(payload_json, '$.handleId') || '","owner":{'`],
+  // Round 17 (P1): the cut falls right after the handleId characters, before its closing quote.
+  ['stopped', 'handleId closing quote lost', `'{"schemaVersion":1,"handleId":"' || json_extract(payload_json, '$.handleId')`],
+  ['released', 'handleId closing quote lost', `'{"schemaVersion":1,"handleId":"' || json_extract(payload_json, '$.handleId')`],
+] as const)('after changeWorkdir an older truncated ownership record (%s fact, %s) blocks leave and close',
+  async (status, _name, truncated) => {
+    const pid = 987655400 + Math.floor(Math.random() * 99);
+    const probe = scriptedPidProbe(pid);
+    const f = await legacyRecoveredEnv(pid); let runtime: any;
+    const warn = jest.spyOn(process, 'emitWarning').mockImplementation(() => {});
+    try {
+      const { A9PersistenceManager } = require('../../../state/dist/a9-persistence');
+      const opened = A9PersistenceManager.open({ databasePath: path.join(f.env.dataRoot, 'a9-state.db'), dataRoot: f.env.dataRoot,
+        openDatabase: (p: string) => new Database(p) });
+      if (opened.status !== 'ready') throw new Error(opened.status);
+      const p = opened.manager;
+      const session = f.db.prepare('SELECT session_id FROM a9_sessions LIMIT 1').get() as { session_id: string };
+      p.upsertTask('rebind-task', session.session_id, 'completed');
+      p.upsertTurn('rebind-turn', 'rebind-task', session.session_id, 'completed');
+      const owner = { workspace: f.env.workspaceRoot, conversationId: session.session_id, taskId: 'rebind-task', turnId: 'rebind-turn', toolCallId: 'rebind-call' };
+      const ownership = { schemaVersion: 1, owner, requestId: 'rebind-request', ownershipState: 'owned' };
+      const fact = { handleId: 'legacy-recovered', workspacePath: f.env.workspaceRoot, pid, command: 'previous command',
+        cwd: f.env.workspaceRoot, startedAt: '2026-11-18T00:00:00.000Z', lastProbeStatus: 'running' };
+      p.recordManagedOwnership(fact, ownership);
+      // A later complete copy of the owned record: the history goes on past the damage.
+      f.db.prepare(`INSERT INTO a9_events (session_id, turn_id, kind, event_type, payload_json, created_at)
+        SELECT session_id, turn_id, kind, event_type, payload_json, created_at FROM a9_events
+        WHERE event_type = 'managed_process_ownership'`).run();
+      if (status === 'released') {
+        p.recordManagedOwnership(fact, { ...ownership, ownershipState: 'release_intent', releaseId: 'rel' });
+        p.recordManagedOwnership({ ...fact, lastProbeStatus: 'released' }, { ...ownership, ownershipState: 'released', releaseId: 'rel' });
+      } else {
+        p.recordManagedOwnership({ ...fact, lastProbeStatus: 'stopped' }, ownership);
+      }
+      const otherRoot = path.join(f.env.root, 'rebound-ws'); fs.mkdirSync(otherRoot);
+      p.changeWorkdir(session.session_id, f.env.workspaceRoot, otherRoot, false);
+      expect(p.listConversations(otherRoot).map((item: any) => item.sessionId)).toEqual([session.session_id]);
+      p.db.close();
+      // Another connection truncates only the oldest ownership record of the handle.
+      f.db.exec(`UPDATE a9_events SET payload_json = ${truncated} WHERE id = (SELECT min(id) FROM a9_events
+        WHERE event_type = 'managed_process_ownership')`);
+      const valid = f.db.prepare(`SELECT json_valid(payload_json) AS valid FROM a9_events
+        WHERE event_type = 'managed_process_ownership' ORDER BY id`).all().map((event: any) => event.valid);
+      expect(valid).toEqual(status === 'released' ? [0, 1, 1, 1] : [0, 1]);
+      const before = f.row();
+      expect((before as any).last_probe_status).toBe(status);
+      probe.state.result = 'absent';
+      runtime = makeRuntime(f.env);
+      expect(runtime.status).toBe('ready');
+      expect(JSON.stringify(runtime.getSnapshot({ bypassCache: true }).persistenceDiagnostics)).toContain('A9_MANAGED_OWNERSHIP_CORRUPT');
+      expect(runtime.canLeaveWorkspace().allowed).toBe(false);
+      for (const stopManaged of [true, false]) {
+        const closed = await runtime.shutdown({ stopManaged });
+        expect(closed.unresolved.length).toBeGreaterThan(0);
+        expect(f.lockRows()).toBe(1);
+      }
+      expect(f.row()).toEqual(before);
+      expect(probe.signals().every((signal: unknown) => signal === 0)).toBe(true);
+    } finally {
+      probe.state.result = 'absent';
+      if (runtime) await runtime.shutdown({ stopManaged: false });
+      warn.mockRestore(); probe.restore(); f.db.close(); fs.rmSync(f.env.root, { recursive: true, force: true });
+    }
+  });
+
+// P1 (round 17): the original conversation is rebound with a real `changeWorkdir` and its oldest
+// ownership record is truncated; another conversation of the original workspace then writes a
+// complete `owned` record of the same handle. That record must not shadow the older damaged
+// history of the stopped fact: leave stays blocked and both shutdown modes keep the lock.
+// P1 (round 18): the deduplicated real flow leaves the original conversation exactly one
+// ownership record; that single damaged record must fail closed as well as a duplicated one.
+// P1 (round 19): that single record cut before its handleId (or the value's first character)
+// names neither handle nor workspace; it still blocks stopped and exited facts.
+it.each(([
+  ['opening brace only', `'{'`],
+  ['handleId key only', `'{"handleId":"'`],
+  ['handleId closing quote lost', `'{"schemaVersion":1,"handleId":"' || json_extract(payload_json, '$.handleId')`],
+  ['before workspace field', `'{"schemaVersion":1,"handleId":"' || json_extract(payload_json, '$.handleId') || '","owner":{'`],
+] as const).flatMap(([name, truncated]) => (['stopped', 'exited'] as const).flatMap(status => [
+  [`${status}, ${name}, single original record`, truncated, false, status],
+  [`${status}, ${name}, duplicated original record`, truncated, true, status],
+] as const)))('a complete owned record of another conversation does not shadow older damage of a terminal fact (%s)',
+  async (_name, truncated, duplicated, status) => {
+    const pid = 987655500 + Math.floor(Math.random() * 99);
+    const probe = scriptedPidProbe(pid);
+    const f = await legacyRecoveredEnv(pid); let runtime: any;
+    const warn = jest.spyOn(process, 'emitWarning').mockImplementation(() => {});
+    try {
+      const { A9PersistenceManager } = require('../../../state/dist/a9-persistence');
+      const opened = A9PersistenceManager.open({ databasePath: path.join(f.env.dataRoot, 'a9-state.db'), dataRoot: f.env.dataRoot,
+        openDatabase: (p: string) => new Database(p) });
+      if (opened.status !== 'ready') throw new Error(opened.status);
+      const p = opened.manager;
+      const session = f.db.prepare('SELECT session_id FROM a9_sessions LIMIT 1').get() as { session_id: string };
+      p.upsertTask('rebind-task', session.session_id, 'completed');
+      p.upsertTurn('rebind-turn', 'rebind-task', session.session_id, 'completed');
+      const owner = { workspace: f.env.workspaceRoot, conversationId: session.session_id, taskId: 'rebind-task', turnId: 'rebind-turn', toolCallId: 'rebind-call' };
+      const ownership = { schemaVersion: 1, owner, requestId: 'rebind-request', ownershipState: 'owned' };
+      const fact = { handleId: 'legacy-recovered', workspacePath: f.env.workspaceRoot, pid, command: 'previous command',
+        cwd: f.env.workspaceRoot, startedAt: '2026-11-18T00:00:00.000Z', lastProbeStatus: 'running' };
+      p.recordManagedOwnership(fact, ownership);
+      if (duplicated) {
+        f.db.prepare(`INSERT INTO a9_events (session_id, turn_id, kind, event_type, payload_json, created_at)
+          SELECT session_id, turn_id, kind, event_type, payload_json, created_at FROM a9_events
+          WHERE event_type = 'managed_process_ownership'`).run();
+      }
+      p.recordManagedOwnership({ ...fact, lastProbeStatus: status }, ownership);
+      const otherRoot = path.join(f.env.root, 'rebound-ws'); fs.mkdirSync(otherRoot);
+      p.changeWorkdir(session.session_id, f.env.workspaceRoot, otherRoot, false);
+      expect(p.listConversations(otherRoot).map((item: any) => item.sessionId)).toEqual([session.session_id]);
+      // Another conversation of the original workspace writes a complete owned record of the handle.
+      p.createConversation('shadow-session', f.env.workspaceRoot);
+      p.upsertTask('shadow-task', 'shadow-session', 'completed');
+      p.upsertTurn('shadow-turn', 'shadow-task', 'shadow-session', 'completed');
+      p.recordToolEvent('shadow-session', 'shadow-turn', 'managed_process_ownership', { ...ownership, handleId: fact.handleId,
+        owner: { workspace: f.env.workspaceRoot, conversationId: 'shadow-session', taskId: 'shadow-task', turnId: 'shadow-turn', toolCallId: 'shadow-call' } });
+      p.db.close();
+      // Another connection truncates only the original conversation's oldest ownership record.
+      f.db.exec(`UPDATE a9_events SET payload_json = ${truncated} WHERE id = (SELECT min(id) FROM a9_events
+        WHERE event_type = 'managed_process_ownership')`);
+      const events = f.db.prepare(`SELECT session_id, json_valid(payload_json) AS valid FROM a9_events
+        WHERE event_type = 'managed_process_ownership' ORDER BY id`).all();
+      expect(events).toEqual([{ session_id: session.session_id, valid: 0 },
+        ...(duplicated ? [{ session_id: session.session_id, valid: 1 }] : []), { session_id: 'shadow-session', valid: 1 }]);
+      const before = f.row();
+      expect((before as any).last_probe_status).toBe(status);
+      probe.state.result = 'absent';
+      runtime = makeRuntime(f.env);
+      expect(runtime.status).toBe('ready');
+      expect(JSON.stringify(runtime.getSnapshot({ bypassCache: true }).persistenceDiagnostics)).toContain('A9_MANAGED_OWNERSHIP_CORRUPT');
+      expect(runtime.canLeaveWorkspace().allowed).toBe(false);
+      for (const stopManaged of [true, false]) {
+        const closed = await runtime.shutdown({ stopManaged });
+        expect(closed.unresolved.length).toBeGreaterThan(0);
+        expect(f.lockRows()).toBe(1);
+      }
+      expect(f.row()).toEqual(before);
+      expect(probe.signals().every((signal: unknown) => signal === 0)).toBe(true);
+    } finally {
+      probe.state.result = 'absent';
+      if (runtime) await runtime.shutdown({ stopManaged: false });
+      warn.mockRestore(); probe.restore(); f.db.close(); fs.rmSync(f.env.root, { recursive: true, force: true });
+    }
+  });
+
+// P1 (round 20): the original conversation is rebound more than once (A -> B -> C), or renamed in
+// place and then rebound, before its single ownership record of A is cut before its handleId.
+// Its ordered workspace history still places that record in A: a later complete record of
+// another conversation of A never shadows it, leave stays blocked and both shutdowns keep the lock.
+it.each((['A -> B -> C', 'rename A -> A2, then link A2 -> B'] as const).flatMap(route => (['stopped', 'exited'] as const).flatMap(status =>
+  ([['opening brace only', `'{'`], ['handleId key only', `'{"handleId":"'`]] as const).map(([name, truncated]) =>
+    [`${route}, ${status}, ${name}`, route, status, truncated] as const))))(
+  'round 20: repeated rebinds keep older damage of a terminal fact in its original workspace (%s)',
+  async (_name, route, status, truncated) => {
+    const pid = 987655600 + Math.floor(Math.random() * 99);
+    const probe = scriptedPidProbe(pid);
+    const f = await legacyRecoveredEnv(pid); let runtime: any;
+    const warn = jest.spyOn(process, 'emitWarning').mockImplementation(() => {});
+    try {
+      const { A9PersistenceManager } = require('../../../state/dist/a9-persistence');
+      const opened = A9PersistenceManager.open({ databasePath: path.join(f.env.dataRoot, 'a9-state.db'), dataRoot: f.env.dataRoot,
+        openDatabase: (p: string) => new Database(p) });
+      if (opened.status !== 'ready') throw new Error(opened.status);
+      const p = opened.manager;
+      const session = f.db.prepare('SELECT session_id FROM a9_sessions LIMIT 1').get() as { session_id: string };
+      p.upsertTask('rebind-task', session.session_id, 'completed');
+      p.upsertTurn('rebind-turn', 'rebind-task', session.session_id, 'completed');
+      const owner = { workspace: f.env.workspaceRoot, conversationId: session.session_id, taskId: 'rebind-task', turnId: 'rebind-turn', toolCallId: 'rebind-call' };
+      const ownership = { schemaVersion: 1, owner, requestId: 'rebind-request', ownershipState: 'owned' };
+      const fact = { handleId: 'legacy-recovered', workspacePath: f.env.workspaceRoot, pid, command: 'previous command',
+        cwd: f.env.workspaceRoot, startedAt: '2026-11-18T00:00:00.000Z', lastProbeStatus: 'running' };
+      p.recordManagedOwnership(fact, ownership);
+      p.recordManagedOwnership({ ...fact, lastProbeStatus: status }, ownership);
+      const firstRoot = path.join(f.env.root, 'rebound-ws-1'); fs.mkdirSync(firstRoot);
+      const secondRoot = path.join(f.env.root, 'rebound-ws-2'); fs.mkdirSync(secondRoot);
+      p.changeWorkdir(session.session_id, f.env.workspaceRoot, firstRoot, route !== 'A -> B -> C');
+      p.changeWorkdir(session.session_id, firstRoot, secondRoot, false);
+      expect(p.listConversations(secondRoot).map((item: any) => item.sessionId)).toEqual([session.session_id]);
+      expect(p.getConversationMetadata(session.session_id).workdir.workspaceHistory[0]).toMatchObject({ workspace: f.env.workspaceRoot });
+      // Another conversation of the original workspace writes a complete owned record of the handle.
+      p.createConversation('shadow-session', f.env.workspaceRoot);
+      p.upsertTask('shadow-task', 'shadow-session', 'completed');
+      p.upsertTurn('shadow-turn', 'shadow-task', 'shadow-session', 'completed');
+      p.recordToolEvent('shadow-session', 'shadow-turn', 'managed_process_ownership', { ...ownership, handleId: fact.handleId,
+        owner: { workspace: f.env.workspaceRoot, conversationId: 'shadow-session', taskId: 'shadow-task', turnId: 'shadow-turn', toolCallId: 'shadow-call' } });
+      p.db.close();
+      f.db.exec(`UPDATE a9_events SET payload_json = ${truncated} WHERE id = (SELECT min(id) FROM a9_events
+        WHERE event_type = 'managed_process_ownership')`);
+      expect(f.db.prepare(`SELECT session_id, json_valid(payload_json) AS valid FROM a9_events
+        WHERE event_type = 'managed_process_ownership' ORDER BY id`).all()).toEqual([
+        { session_id: session.session_id, valid: 0 }, { session_id: 'shadow-session', valid: 1 }]);
+      const before = f.row();
+      expect((before as any).last_probe_status).toBe(status);
+      probe.state.result = 'absent';
+      runtime = makeRuntime(f.env);
+      expect(runtime.status).toBe('ready');
+      expect(JSON.stringify(runtime.getSnapshot({ bypassCache: true }).persistenceDiagnostics)).toContain('A9_MANAGED_OWNERSHIP_CORRUPT');
+      expect(runtime.canLeaveWorkspace().allowed).toBe(false);
+      for (const stopManaged of [true, false]) {
+        const closed = await runtime.shutdown({ stopManaged });
+        expect(closed.unresolved.length).toBeGreaterThan(0);
+        expect(f.lockRows()).toBe(1);
+      }
+      expect(f.row()).toEqual(before);
+      expect(probe.signals().every((signal: unknown) => signal === 0)).toBe(true);
+    } finally {
+      probe.state.result = 'absent';
+      if (runtime) await runtime.shutdown({ stopManaged: false });
+      warn.mockRestore(); probe.restore(); f.db.close(); fs.rmSync(f.env.root, { recursive: true, force: true });
+    }
+  });
+
+// P1 (round 20): after the original conversation is rebound A -> B it writes an ownership record
+// of a new handle in B, which is cut before its handleId. Another conversation of A owns a healthy
+// handle there (stopped, or the full release chain), written before or after that damage. The
+// damage of B never blocks A: leave is allowed and both shutdown modes release A's lock.
+it.each((['stopped', 'released'] as const).flatMap(status => (['before', 'after'] as const).flatMap(order =>
+  ([['opening brace only', `'{'`], ['handleId key only', `'{"handleId":"'`]] as const).map(([name, truncated]) =>
+    [`${status}, healthy handle written ${order} the damage, ${name}`, status, order, truncated] as const))))(
+  'round 20: damage written in the new workspace never blocks a healthy handle of the old one (%s)',
+  async (_name, status, order, truncated) => {
+    const pid = 987655700 + Math.floor(Math.random() * 99);
+    const probe = scriptedPidProbe(pid);
+    const f = await legacyRecoveredEnv(pid); let runtime: any;
+    const warn = jest.spyOn(process, 'emitWarning').mockImplementation(() => {});
+    try {
+      const { A9PersistenceManager } = require('../../../state/dist/a9-persistence');
+      const opened = A9PersistenceManager.open({ databasePath: path.join(f.env.dataRoot, 'a9-state.db'), dataRoot: f.env.dataRoot,
+        openDatabase: (p: string) => new Database(p) });
+      if (opened.status !== 'ready') throw new Error(opened.status);
+      const p = opened.manager;
+      const session = f.db.prepare('SELECT session_id FROM a9_sessions LIMIT 1').get() as { session_id: string };
+      p.createConversation('healthy-session', f.env.workspaceRoot);
+      const healthy = () => {
+        p.upsertTask('healthy-task', 'healthy-session', 'active');
+        p.upsertTurn('healthy-turn', 'healthy-task', 'healthy-session', 'active');
+        const ownership = { schemaVersion: 1, requestId: 'healthy-request', ownershipState: 'owned',
+          owner: { workspace: f.env.workspaceRoot, conversationId: 'healthy-session', taskId: 'healthy-task', turnId: 'healthy-turn', toolCallId: 'healthy-call' } };
+        const fact = { handleId: 'legacy-recovered', workspacePath: f.env.workspaceRoot, pid, command: 'previous command',
+          cwd: f.env.workspaceRoot, startedAt: '2026-11-18T00:00:00.000Z', lastProbeStatus: 'running' };
+        p.recordManagedOwnership(fact, ownership);
+        if (status === 'released') {
+          p.recordManagedOwnership(fact, { ...ownership, ownershipState: 'release_intent', releaseId: 'healthy-release' });
+          p.recordManagedOwnership({ ...fact, lastProbeStatus: 'released', cleanupRequired: false },
+            { ...ownership, ownershipState: 'released', releaseId: 'healthy-release' });
+        } else {
+          p.recordManagedOwnership({ ...fact, lastProbeStatus: status }, ownership);
+        }
+        p.upsertTurn('healthy-turn', 'healthy-task', 'healthy-session', 'completed');
+        p.upsertTask('healthy-task', 'healthy-session', 'completed');
+      };
+      if (order === 'before') healthy();
+      // The seeded running row would keep A busy; the healthy handle is recorded afresh after the rebind.
+      else f.db.prepare("DELETE FROM a9_managed_processes WHERE handle_id = 'legacy-recovered'").run();
+      const newRoot = path.join(f.env.root, 'rebound-ws'); fs.mkdirSync(newRoot);
+      p.changeWorkdir(session.session_id, f.env.workspaceRoot, newRoot, false);
+      // The rebound conversation records a new handle in B; that record is damaged afterwards.
+      p.upsertTask('new-task', session.session_id, 'active'); p.upsertTurn('new-turn', 'new-task', session.session_id, 'active');
+      p.recordManagedOwnership({ handleId: 'new-handle', workspacePath: newRoot, pid: pid + 1000, command: 'new command', cwd: newRoot,
+        startedAt: '2026-11-19T00:00:00.000Z', lastProbeStatus: 'stopped' }, { schemaVersion: 1, requestId: 'new-request', ownershipState: 'owned',
+        owner: { workspace: newRoot, conversationId: session.session_id, taskId: 'new-task', turnId: 'new-turn', toolCallId: 'new-call' } });
+      const damagedId = (f.db.prepare(`SELECT max(id) AS id FROM a9_events WHERE event_type = 'managed_process_ownership'`).get() as { id: number }).id;
+      p.upsertTurn('new-turn', 'new-task', session.session_id, 'completed'); p.upsertTask('new-task', session.session_id, 'completed');
+      if (order === 'after') healthy();
+      p.db.close();
+      f.db.prepare(`UPDATE a9_events SET payload_json = ${truncated} WHERE id = ?`).run(damagedId);
+      expect((f.db.prepare('SELECT session_id, json_valid(payload_json) AS valid FROM a9_events WHERE id = ?').get(damagedId)))
+        .toEqual({ session_id: session.session_id, valid: 0 });
+      expect((f.row() as any).last_probe_status).toBe(status);
+      probe.state.result = 'absent';
+      for (const stopManaged of [true, false]) {
+        runtime = makeRuntime(f.env);
+        expect(runtime.status).toBe('ready');
+        expect(JSON.stringify(runtime.getSnapshot({ bypassCache: true }).persistenceDiagnostics || [])).not.toContain('A9_MANAGED_OWNERSHIP_CORRUPT');
+        expect(runtime.canLeaveWorkspace()).toMatchObject({ allowed: true });
+        expect(f.lockRows()).toBe(1);
+        const closed = await runtime.shutdown({ stopManaged });
+        runtime = null;
+        expect(closed.unresolved).toEqual([]);
+        expect(f.lockRows()).toBe(0);
+      }
+      expect((f.row() as any).last_probe_status).toBe(status);
+      expect(probe.signals().every((signal: unknown) => signal === 0)).toBe(true);
+    } finally {
+      probe.state.result = 'absent';
+      if (runtime) await runtime.shutdown({ stopManaged: false });
+      warn.mockRestore(); probe.restore(); f.db.close(); fs.rmSync(f.env.root, { recursive: true, force: true });
+    }
+  });
+
+// P1 (round 21): the same conversation owns a settled handle in A (stopped, or the full release
+// chain), is rebound A -> B (or A -> B -> C -> D) and writes an ownership record of a new handle
+// in B, which is cut before its handleId. That anonymous record of the anchor's own conversation
+// was written in B, never in A: leave of A is allowed and both shutdown modes release A's lock.
+it.each((['A -> B', 'A -> B -> C -> D'] as const).flatMap(route => (['stopped', 'released'] as const).flatMap(status =>
+  ([['opening brace only', `'{'`], ['handleId key only', `'{"handleId":"'`]] as const).map(([name, truncated]) =>
+    [`${route}, ${status}, ${name}`, route, status, truncated] as const))))(
+  'round 21: damage the same conversation writes in a new workspace never blocks its settled handle of the old one (%s)',
+  async (_name, route, status, truncated) => {
+    const pid = 987655800 + Math.floor(Math.random() * 99);
+    const probe = scriptedPidProbe(pid);
+    const f = await legacyRecoveredEnv(pid); let runtime: any;
+    const warn = jest.spyOn(process, 'emitWarning').mockImplementation(() => {});
+    try {
+      const { A9PersistenceManager } = require('../../../state/dist/a9-persistence');
+      const opened = A9PersistenceManager.open({ databasePath: path.join(f.env.dataRoot, 'a9-state.db'), dataRoot: f.env.dataRoot,
+        openDatabase: (p: string) => new Database(p) });
+      if (opened.status !== 'ready') throw new Error(opened.status);
+      const p = opened.manager;
+      const session = f.db.prepare('SELECT session_id FROM a9_sessions LIMIT 1').get() as { session_id: string };
+      p.upsertTask('own-task', session.session_id, 'active');
+      p.upsertTurn('own-turn', 'own-task', session.session_id, 'active');
+      const ownership = { schemaVersion: 1, requestId: 'own-request', ownershipState: 'owned',
+        owner: { workspace: f.env.workspaceRoot, conversationId: session.session_id, taskId: 'own-task', turnId: 'own-turn', toolCallId: 'own-call' } };
+      const fact = { handleId: 'legacy-recovered', workspacePath: f.env.workspaceRoot, pid, command: 'previous command',
+        cwd: f.env.workspaceRoot, startedAt: '2026-11-18T00:00:00.000Z', lastProbeStatus: 'running' };
+      p.recordManagedOwnership(fact, ownership);
+      if (status === 'released') {
+        p.recordManagedOwnership(fact, { ...ownership, ownershipState: 'release_intent', releaseId: 'own-release' });
+        p.recordManagedOwnership({ ...fact, lastProbeStatus: 'released', cleanupRequired: false },
+          { ...ownership, ownershipState: 'released', releaseId: 'own-release' });
+      } else {
+        p.recordManagedOwnership({ ...fact, lastProbeStatus: status, cleanupRequired: false }, ownership);
+      }
+      p.upsertTurn('own-turn', 'own-task', session.session_id, 'completed');
+      p.upsertTask('own-task', session.session_id, 'completed');
+      const roots = ['rebound-ws-b', 'rebound-ws-c', 'rebound-ws-d'].map(name => {
+        const dir = path.join(f.env.root, name); fs.mkdirSync(dir); return dir;
+      });
+      const hops = route === 'A -> B' ? [roots[0]] : roots;
+      let current = f.env.workspaceRoot;
+      // The new handle is recorded in B; on the long route the conversation then moves on to C and D.
+      p.changeWorkdir(session.session_id, current, hops[0], false); current = hops[0];
+      p.upsertTask('new-task', session.session_id, 'active'); p.upsertTurn('new-turn', 'new-task', session.session_id, 'active');
+      p.recordManagedOwnership({ handleId: 'new-handle', workspacePath: current, pid: pid + 1000, command: 'new command', cwd: current,
+        startedAt: '2026-11-19T00:00:00.000Z', lastProbeStatus: 'stopped', cleanupRequired: false }, { schemaVersion: 1, requestId: 'new-request',
+        ownershipState: 'owned', owner: { workspace: current, conversationId: session.session_id, taskId: 'new-task', turnId: 'new-turn', toolCallId: 'new-call' } });
+      const damagedId = (f.db.prepare(`SELECT max(id) AS id FROM a9_events WHERE event_type = 'managed_process_ownership'`).get() as { id: number }).id;
+      p.upsertTurn('new-turn', 'new-task', session.session_id, 'completed'); p.upsertTask('new-task', session.session_id, 'completed');
+      for (const next of hops.slice(1)) { p.changeWorkdir(session.session_id, current, next, false); current = next; }
+      expect(p.listConversations(current).map((item: any) => item.sessionId)).toEqual([session.session_id]);
+      p.db.close();
+      f.db.prepare(`UPDATE a9_events SET payload_json = ${truncated} WHERE id = ?`).run(damagedId);
+      expect((f.db.prepare('SELECT session_id, json_valid(payload_json) AS valid FROM a9_events WHERE id = ?').get(damagedId)))
+        .toEqual({ session_id: session.session_id, valid: 0 });
+      expect((f.row() as any).last_probe_status).toBe(status);
+      probe.state.result = 'absent';
+      for (const stopManaged of [true, false]) {
+        runtime = makeRuntime(f.env);
+        expect(runtime.status).toBe('ready');
+        expect(JSON.stringify(runtime.getSnapshot({ bypassCache: true }).persistenceDiagnostics || [])).not.toContain('A9_MANAGED_OWNERSHIP_CORRUPT');
+        expect(runtime.canLeaveWorkspace()).toMatchObject({ allowed: true });
+        expect(f.lockRows()).toBe(1);
+        const closed = await runtime.shutdown({ stopManaged });
+        runtime = null;
+        expect(closed.unresolved).toEqual([]);
+        expect(f.lockRows()).toBe(0);
+      }
+      expect((f.row() as any).last_probe_status).toBe(status);
+      expect(probe.signals().every((signal: unknown) => signal === 0)).toBe(true);
+    } finally {
+      probe.state.result = 'absent';
+      if (runtime) await runtime.shutdown({ stopManaged: false });
+      warn.mockRestore(); probe.restore(); f.db.close(); fs.rmSync(f.env.root, { recursive: true, force: true });
+    }
+  });
+
+// P1 (round 22): the same conversation owns a settled handle in A (stopped, or the full release
+// chain) and, still in A, records and stops a new handle. A legacy build then rebinds it to B
+// (`workdir: { origin: 'linked' }` without segments or previousWorkspace), or its session metadata
+// is damaged, and the record of the new handle written in A is truncated. No segment proves that
+// record was written outside A, so it stays damage of A: leave is refused and both shutdown modes
+// keep A's lock with a non-empty `unresolved`.
+it.each(([
+  ['legacy linked metadata', JSON.stringify({ workdir: { version: 1, origin: 'linked', createdAt: null } })],
+  ['damaged metadata_json', '{'],
+] as const).flatMap(([route, metadata]) => (['stopped', 'released'] as const).flatMap(status =>
+  ([['opening brace only', `'{'`], ['handleId key only', `'{"handleId":"'`]] as const).map(([name, truncated]) =>
+    [`${route}, ${status}, ${name}`, metadata, status, truncated] as const))))(
+  'round 22: damage the same conversation wrote in A before a legacy rebind keeps blocking leave of A (%s)',
+  async (_name, metadata, status, truncated) => {
+    const pid = 987655900 + Math.floor(Math.random() * 99);
+    const probe = scriptedPidProbe(pid);
+    const f = await legacyRecoveredEnv(pid); let runtime: any;
+    const warn = jest.spyOn(process, 'emitWarning').mockImplementation(() => {});
+    try {
+      const { A9PersistenceManager } = require('../../../state/dist/a9-persistence');
+      const opened = A9PersistenceManager.open({ databasePath: path.join(f.env.dataRoot, 'a9-state.db'), dataRoot: f.env.dataRoot,
+        openDatabase: (p: string) => new Database(p) });
+      if (opened.status !== 'ready') throw new Error(opened.status);
+      const p = opened.manager;
+      const session = f.db.prepare('SELECT session_id FROM a9_sessions LIMIT 1').get() as { session_id: string };
+      p.upsertTask('own-task', session.session_id, 'active');
+      p.upsertTurn('own-turn', 'own-task', session.session_id, 'active');
+      const ownership = { schemaVersion: 1, requestId: 'own-request', ownershipState: 'owned',
+        owner: { workspace: f.env.workspaceRoot, conversationId: session.session_id, taskId: 'own-task', turnId: 'own-turn', toolCallId: 'own-call' } };
+      const fact = { handleId: 'legacy-recovered', workspacePath: f.env.workspaceRoot, pid, command: 'previous command',
+        cwd: f.env.workspaceRoot, startedAt: '2026-11-18T00:00:00.000Z', lastProbeStatus: 'running' };
+      p.recordManagedOwnership(fact, ownership);
+      if (status === 'released') {
+        p.recordManagedOwnership(fact, { ...ownership, ownershipState: 'release_intent', releaseId: 'own-release' });
+        p.recordManagedOwnership({ ...fact, lastProbeStatus: 'released', cleanupRequired: false },
+          { ...ownership, ownershipState: 'released', releaseId: 'own-release' });
+      } else {
+        p.recordManagedOwnership({ ...fact, lastProbeStatus: status, cleanupRequired: false }, ownership);
+      }
+      p.upsertTurn('own-turn', 'own-task', session.session_id, 'completed');
+      p.upsertTask('own-task', session.session_id, 'completed');
+      // The new handle is recorded and stopped while the conversation is still bound to A.
+      p.upsertTask('new-task', session.session_id, 'active'); p.upsertTurn('new-turn', 'new-task', session.session_id, 'active');
+      p.recordManagedOwnership({ handleId: 'new-handle', workspacePath: f.env.workspaceRoot, pid: pid + 1000, command: 'new command',
+        cwd: f.env.workspaceRoot, startedAt: '2026-11-19T00:00:00.000Z', lastProbeStatus: 'stopped', cleanupRequired: false }, {
+        schemaVersion: 1, requestId: 'new-request', ownershipState: 'owned',
+        owner: { workspace: f.env.workspaceRoot, conversationId: session.session_id, taskId: 'new-task', turnId: 'new-turn', toolCallId: 'new-call' } });
+      const damagedId = (f.db.prepare(`SELECT max(id) AS id FROM a9_events WHERE event_type = 'managed_process_ownership'`).get() as { id: number }).id;
+      p.upsertTurn('new-turn', 'new-task', session.session_id, 'completed'); p.upsertTask('new-task', session.session_id, 'completed');
+      p.db.close();
+      // A legacy rebind to B: no workspaceHistory segments and no previousWorkspace (or damaged metadata).
+      const reboundRoot = path.join(f.env.root, 'rebound-ws-b'); fs.mkdirSync(reboundRoot);
+      f.db.prepare('UPDATE a9_sessions SET workspace_path = ?, metadata_json = ? WHERE session_id = ?').run(reboundRoot, metadata, session.session_id);
+      f.db.prepare(`UPDATE a9_events SET payload_json = ${truncated} WHERE id = ?`).run(damagedId);
+      expect((f.db.prepare('SELECT session_id, json_valid(payload_json) AS valid FROM a9_events WHERE id = ?').get(damagedId)))
+        .toEqual({ session_id: session.session_id, valid: 0 });
+      const before = f.row();
+      expect((before as any).last_probe_status).toBe(status);
+      probe.state.result = 'absent';
+      runtime = makeRuntime(f.env);
+      expect(runtime.status).toBe('ready');
+      expect(JSON.stringify(runtime.getSnapshot({ bypassCache: true }).persistenceDiagnostics)).toContain('A9_MANAGED_OWNERSHIP_CORRUPT');
+      expect(runtime.canLeaveWorkspace().allowed).toBe(false);
+      for (const stopManaged of [true, false]) {
+        const closed = await runtime.shutdown({ stopManaged });
+        expect(closed.unresolved.length).toBeGreaterThan(0);
+        expect(f.lockRows()).toBe(1);
+      }
+      expect(f.row()).toEqual(before);
+      expect(probe.signals().every((signal: unknown) => signal === 0)).toBe(true);
+    } finally {
+      probe.state.result = 'absent';
+      if (runtime) await runtime.shutdown({ stopManaged: false });
+      warn.mockRestore(); probe.restore(); f.db.close(); fs.rmSync(f.env.root, { recursive: true, force: true });
+    }
+  });
+
+// P1 (round 23): shared fixture. A9's own (settled) handle `ownHandle` of the seeded conversation in
+// A (stopped, or the full release chain) and a second handle of the same conversation, recorded by
+// `recordOther` before or after it. The fact row of the seed is renamed to `ownHandle`.
+async function round23Env(pid: number, ownHandle: string) {
+  const f = await legacyRecoveredEnv(pid);
+  f.db.prepare("UPDATE a9_managed_processes SET handle_id = ? WHERE handle_id = 'legacy-recovered'").run(ownHandle);
+  const row = () => f.db.prepare('SELECT pid, started_at, last_probe_status FROM a9_managed_processes WHERE handle_id = ?').get(ownHandle);
+  const { A9PersistenceManager } = require('../../../state/dist/a9-persistence');
+  const opened = A9PersistenceManager.open({ databasePath: path.join(f.env.dataRoot, 'a9-state.db'), dataRoot: f.env.dataRoot,
+    openDatabase: (p: string) => new Database(p) });
+  if (opened.status !== 'ready') throw new Error(opened.status);
+  const p = opened.manager;
+  const session = (f.db.prepare('SELECT session_id FROM a9_sessions LIMIT 1').get() as { session_id: string }).session_id;
+  const recordOwn = (status: 'stopped' | 'released', turn = 'own-turn') => {
+    p.upsertTask(`${turn}-task`, session, 'active'); p.upsertTurn(turn, `${turn}-task`, session, 'active');
+    const ownership = { schemaVersion: 1, requestId: 'own-request', ownershipState: 'owned',
+      owner: { workspace: f.env.workspaceRoot, conversationId: session, taskId: `${turn}-task`, turnId: turn, toolCallId: 'own-call' } };
+    const fact = { handleId: ownHandle, workspacePath: f.env.workspaceRoot, pid, command: 'previous command',
+      cwd: f.env.workspaceRoot, startedAt: '2026-11-18T00:00:00.000Z', lastProbeStatus: 'running' };
+    p.recordManagedOwnership(fact, ownership);
+    if (status === 'released') {
+      p.recordManagedOwnership(fact, { ...ownership, ownershipState: 'release_intent', releaseId: 'own-release' });
+      p.recordManagedOwnership({ ...fact, lastProbeStatus: 'released', cleanupRequired: false },
+        { ...ownership, ownershipState: 'released', releaseId: 'own-release' });
+    } else {
+      p.recordManagedOwnership({ ...fact, lastProbeStatus: status, cleanupRequired: false }, ownership);
+    }
+    p.upsertTurn(turn, `${turn}-task`, session, 'completed'); p.upsertTask(`${turn}-task`, session, 'completed');
+  };
+  /** Records and stops `handleId` in `workspace`; returns its ownership event ids. */
+  const recordOther = (handleId: string, workspace: string, turn = 'new-turn') => {
+    p.upsertTask(`${turn}-task`, session, 'active'); p.upsertTurn(turn, `${turn}-task`, session, 'active');
+    p.recordManagedOwnership({ handleId, workspacePath: workspace, pid: pid + 1000, command: 'new command', cwd: workspace,
+      startedAt: '2026-11-19T00:00:00.000Z', lastProbeStatus: 'stopped', cleanupRequired: false }, { schemaVersion: 1, requestId: 'new-request',
+      ownershipState: 'owned', owner: { workspace, conversationId: session, taskId: `${turn}-task`, turnId: turn, toolCallId: 'new-call' } });
+    p.upsertTurn(turn, `${turn}-task`, session, 'completed'); p.upsertTask(`${turn}-task`, session, 'completed');
+    return (f.db.prepare(`SELECT id FROM a9_events WHERE event_type = 'managed_process_ownership'
+      AND json_extract(payload_json, '$.handleId') = ?`).all(handleId) as Array<{ id: number }>).map(item => item.id);
+  };
+  const mkdir = (name: string) => { const dir = path.join(f.env.root, name); fs.mkdirSync(dir); return dir; };
+  const truncate = (ids: number[], payload: string) => {
+    for (const id of ids) f.db.prepare('UPDATE a9_events SET payload_json = ? WHERE id = ?').run(payload, id);
+  };
+  return { ...f, row, p, session, recordOwn, recordOther, mkdir, truncate };
+}
+
+async function expectLeaveBlocked(f: Awaited<ReturnType<typeof round23Env>>) {
+  const before = f.row();
+  const runtime = makeRuntime(f.env);
+  try {
+    expect(runtime.status).toBe('ready');
+    expect(JSON.stringify(runtime.getSnapshot({ bypassCache: true }).persistenceDiagnostics)).toContain('A9_MANAGED_OWNERSHIP_CORRUPT');
+    expect(runtime.canLeaveWorkspace().allowed).toBe(false);
+    for (const stopManaged of [true, false]) {
+      const closed = await runtime.shutdown({ stopManaged });
+      expect(closed.unresolved.length).toBeGreaterThan(0);
+      expect(f.lockRows()).toBe(1);
+    }
+  } finally { await runtime.shutdown({ stopManaged: false }); }
+  expect(f.row()).toEqual(before);
+}
+
+// (1) The conversation settles its own handle and then a new handle in A; a legacy build rebinds
+// it to B (`workdir: { origin: 'linked' }`, no segments) and the new handle's records are cut.
+// The current build then rebinds it B -> C (the registry's State call). The events written before
+// that are closed in an unknown prior segment, never attributed to B: leave of A stays refused and
+// both shutdown modes keep A's lock.
+it.each((['stopped', 'released'] as const).flatMap(status =>
+  ([['opening brace only', '{'], ['handleId key only', '{"handleId":"']] as const).map(([name, truncated]) =>
+    [`${status}, ${name}`, status, truncated] as const)))(
+  'round 23: a rebind B -> C after a legacy rebind A -> B keeps damage written in A blocking leave of A (%s)',
+  async (_name, status, truncated) => {
+    const pid = 987656000 + Math.floor(Math.random() * 99);
+    const probe = scriptedPidProbe(pid);
+    const f = await round23Env(pid, 'legacy-recovered');
+    const warn = jest.spyOn(process, 'emitWarning').mockImplementation(() => {});
+    try {
+      f.recordOwn(status);
+      const damaged = f.recordOther('new-handle', f.env.workspaceRoot);
+      const b = f.mkdir('rebound-ws-b'); const c = f.mkdir('rebound-ws-c');
+      f.db.prepare('UPDATE a9_sessions SET workspace_path = ?, metadata_json = ? WHERE session_id = ?')
+        .run(b, JSON.stringify({ workdir: { version: 1, origin: 'linked', createdAt: null } }), f.session);
+      f.truncate(damaged, truncated);
+      f.p.changeWorkdir(f.session, b, c, false);
+      expect(f.p.listConversations(c).map((item: any) => item.sessionId)).toEqual([f.session]);
+      expect((f.p.getConversationMetadata(f.session).workdir as any).workspaceHistory.map((entry: any) => entry.workspace))
+        .toEqual(['#a9-unknown-prior', b]);
+      f.p.db.close();
+      expect((f.row() as any).last_probe_status).toBe(status);
+      probe.state.result = 'absent';
+      await expectLeaveBlocked(f);
+      expect(probe.signals().every((signal: unknown) => signal === 0)).toBe(true);
+    } finally {
+      probe.state.result = 'absent';
+      warn.mockRestore(); probe.restore(); f.db.close(); fs.rmSync(f.env.root, { recursive: true, force: true });
+    }
+  });
+
+// (2) The conversation stops a new handle in turn 1 and settles its own handle in turn 2, both in
+// A. It stays in A, or is rebound A -> B -> C and its first segment is damaged; the new handle's
+// older records (another turn) are cut. That damage is not proven written outside A: leave of A
+// stays refused and both shutdown modes keep A's lock.
+it.each((['stopped', 'released'] as const).flatMap(status =>
+  ([['opening brace only', '{'], ['handleId key only', '{"handleId":"']] as const).flatMap(([name, truncated]) =>
+    (['no rebind', 'A -> B -> C, damaged first segment'] as const).map(route =>
+      [`${status}, ${name}, ${route}`, status, truncated, route] as const))))(
+  'round 23: an older damaged record of another turn of the same conversation keeps blocking leave of A (%s)',
+  async (_name, status, truncated, route) => {
+    const pid = 987656100 + Math.floor(Math.random() * 99);
+    const probe = scriptedPidProbe(pid);
+    const f = await round23Env(pid, 'legacy-recovered');
+    const warn = jest.spyOn(process, 'emitWarning').mockImplementation(() => {});
+    try {
+      const damaged = f.recordOther('new-handle', f.env.workspaceRoot, 'turn-1');
+      f.recordOwn(status, 'turn-2');
+      if (route !== 'no rebind') {
+        const b = f.mkdir('rebound-ws-b'); const c = f.mkdir('rebound-ws-c');
+        f.p.changeWorkdir(f.session, f.env.workspaceRoot, b, false); f.p.changeWorkdir(f.session, b, c, false);
+        const workdir = f.p.getConversationMetadata(f.session).workdir as any;
+        f.p.mergeConversationMetadata(f.session, { workdir: { ...workdir,
+          workspaceHistory: [{ workspace: f.env.workspaceRoot }, workdir.workspaceHistory[1]] } });
+      }
+      f.p.db.close();
+      f.truncate(damaged, truncated);
+      // Only the settled handle's history decides: the new handle has no fact row of its own left.
+      f.db.prepare("DELETE FROM a9_managed_processes WHERE handle_id = 'new-handle'").run();
+      expect((f.row() as any).last_probe_status).toBe(status);
+      probe.state.result = 'absent';
+      await expectLeaveBlocked(f);
+      expect(probe.signals().every((signal: unknown) => signal === 0)).toBe(true);
+    } finally {
+      probe.state.result = 'absent';
+      warn.mockRestore(); probe.restore(); f.db.close(); fs.rmSync(f.env.root, { recursive: true, force: true });
+    }
+  });
+
+// (3) The conversation settles `sh-aaa` in A, is rebound A -> B and records `sh-bbb` there, whose
+// record is cut to `{"handleId":"sh-` (a prefix of both). Segments prove it was written in B, so it
+// is never damage of A: leave of A is allowed and both shutdown modes release A's lock. The same
+// damage written while still bound to A keeps blocking (control).
+it.each((['stopped', 'released'] as const).flatMap(status => (['written in B', 'written in A (control)'] as const).map(where =>
+  [`${status}, ${where}`, status, where] as const)))(
+  'round 23: a handleId prefix cut from a record written in B never blocks leave of A (%s)',
+  async (_name, status, where) => {
+    const pid = 987656200 + Math.floor(Math.random() * 99);
+    const probe = scriptedPidProbe(pid);
+    const f = await round23Env(pid, 'sh-aaa'); let runtime: any;
+    const warn = jest.spyOn(process, 'emitWarning').mockImplementation(() => {});
+    try {
+      f.recordOwn(status);
+      let workspace = f.env.workspaceRoot;
+      if (where === 'written in B') {
+        workspace = f.mkdir('rebound-ws-b');
+        f.p.changeWorkdir(f.session, f.env.workspaceRoot, workspace, false);
+      }
+      const damaged = f.recordOther('sh-bbb', workspace);
+      f.p.db.close();
+      f.truncate(damaged, '{"handleId":"sh-');
+      expect((f.row() as any).last_probe_status).toBe(status);
+      probe.state.result = 'absent';
+      if (where !== 'written in B') { await expectLeaveBlocked(f); return; }
+      for (const stopManaged of [true, false]) {
+        runtime = makeRuntime(f.env);
+        expect(runtime.status).toBe('ready');
+        expect(JSON.stringify(runtime.getSnapshot({ bypassCache: true }).persistenceDiagnostics || [])).not.toContain('A9_MANAGED_OWNERSHIP_CORRUPT');
+        expect(runtime.canLeaveWorkspace()).toMatchObject({ allowed: true });
+        expect(f.lockRows()).toBe(1);
+        const closed = await runtime.shutdown({ stopManaged });
+        runtime = null;
+        expect(closed.unresolved).toEqual([]);
+        expect(f.lockRows()).toBe(0);
+      }
+      expect((f.row() as any).last_probe_status).toBe(status);
+      expect(probe.signals().every((signal: unknown) => signal === 0)).toBe(true);
+    } finally {
+      probe.state.result = 'absent';
+      if (runtime) await runtime.shutdown({ stopManaged: false });
+      warn.mockRestore(); probe.restore(); f.db.close(); fs.rmSync(f.env.root, { recursive: true, force: true });
+    }
+  });

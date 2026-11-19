@@ -48,6 +48,12 @@ export interface BackgroundProcessHandle {
   pidReusePossible?: boolean;
   /** Helper 已结束但 Job Object 清理尚未证实时，仍须向产品暴露 Stop 重试入口。 */
   cleanupRequired?: boolean;
+  /**
+   * The Runner confirmed this terminal state but its required persistence callback
+   * failed. It is not a cleanup doubt: Stop/dispose retry the same terminal write and
+   * fail until it is confirmed (ADR-0346).
+   */
+  statePersistencePending?: boolean;
 }
 
 export interface PollResult {
@@ -62,7 +68,8 @@ export interface PollResult {
 }
 
 export interface ProbeFact {
-  pid: number;
+  /** Persisted PID as stored; null/0/negative are invalid identities and are never probed. */
+  pid: number | null;
   command: string;
   cwd: string;
   startTime: string;
@@ -104,6 +111,14 @@ export class BackgroundProcessManager {
     logDecoders: { stdout: StringDecoder; stderr: StringDecoder };
   }>();
 
+  /**
+   * Handles whose ownership the Runner confirmed handed over to the system. Their
+   * late lifecycle callbacks (for example a direct child's natural close) describe a
+   * process this Runner no longer owns and must never rewrite persistent facts: the
+   * exact handover credential is verified by the final lock transaction instead.
+   */
+  private readonly persistenceDetached = new WeakSet<BackgroundProcessHandle>();
+
   constructor(
     private readonly helperTransport?: HelperTransport,
     private readonly redactText: (text: string) => string = (text) => text,
@@ -112,6 +127,7 @@ export class BackgroundProcessManager {
   ) {}
 
   private notifyStateChange(handle: BackgroundProcessHandle): Error | undefined {
+    if (this.persistenceDetached.has(handle)) return undefined;
     try {
       this.onStateChange({ ...handle, logs: { stdout: [...handle.logs.stdout], stderr: [...handle.logs.stderr] } });
       return undefined;
@@ -321,7 +337,7 @@ export class BackgroundProcessManager {
       } catch (error) {
         handle.status = 'failed'; handle.cleanupRequired = true;
         this.appendRedactedText(handle, 'stderr', 'A9_MANAGED_OUTPUT_AUDIT_FAILED');
-        const failure = this.notifyStateChange(handle); if (failure) handle.cleanupRequired = true;
+        this.persistTerminalState(handle);
       }
     });
     try {
@@ -358,8 +374,9 @@ export class BackgroundProcessManager {
       handle.cleanupRequired = !cleanupConfirmed;
       handle.status = 'failed';
       const detail = handle.logs.stderr.join('\n') || 'D-013 helper failed to prove managed execution readiness';
-      const persistenceError = this.notifyStateChange(handle);
-      if (persistenceError) this.appendRedactedText(handle, 'stderr', `managed process state persistence failed: ${persistenceError.message}`);
+      // This is a Runner-confirmed terminal write like any other: a failed or ignored
+      // write must stay pending so Stop/shutdown retry it and the workspace lock is kept.
+      const persistenceError = this.persistTerminalState(handle);
       throw Object.assign(new Error(detail), {
         code: 'A9_BACKGROUND_HELPER_START_FAILED',
         cause: error,
@@ -371,6 +388,7 @@ export class BackgroundProcessManager {
         cleanupConfirmed,
         cleanupRequired: !cleanupConfirmed,
         residueRisk: !cleanupConfirmed,
+        ...(persistenceError ? { statePersistencePending: true } : {}),
       });
     }
     const persistenceError = this.notifyStateChange(handle);
@@ -427,7 +445,7 @@ export class BackgroundProcessManager {
         'utf8',
       ));
       this.flushPendingLog(entry, 'stderr');
-      this.notifyStateChange(handle);
+      this.persistTerminalState(handle);
       return;
     }
     const response = result.response;
@@ -444,7 +462,7 @@ export class BackgroundProcessManager {
       handle.status = 'failed';
       this.appendLog(entry, 'stderr', Buffer.from(String(error), 'utf8'));
       this.flushPendingLog(entry, 'stderr');
-      this.notifyStateChange(handle);
+      this.persistTerminalState(handle);
       return;
     }
     this.flushPendingLog(entry, 'stdout');
@@ -453,8 +471,33 @@ export class BackgroundProcessManager {
     handle.status = entry.helperCleanupConfirmed
       ? response.canceled ? 'stopped' : response.timedOut || response.idleTimedOut ? 'failed' : 'exited'
       : 'failed';
-    const persistenceError = this.notifyStateChange(handle);
-    if (persistenceError) handle.cleanupRequired = true;
+    // A failed terminal audit is not folded into cleanupRequired: the helper proof
+    // stays truthful and Stop/dispose must retry this exact terminal write.
+    this.persistTerminalState(handle);
+  }
+
+  /** Persists a Runner-confirmed terminal state; a failure marks it pending for retry. */
+  private persistTerminalState(handle: BackgroundProcessHandle): Error | undefined {
+    delete handle.statePersistencePending;
+    const error = this.notifyStateChange(handle);
+    if (error) {
+      handle.statePersistencePending = true;
+      this.appendRedactedText(handle, 'stderr', `managed process terminal state persistence failed: ${error.message}`);
+    }
+    return error;
+  }
+
+  /** Retries a pending terminal write; never reports a terminal handle whose write is unconfirmed. */
+  private confirmTerminalPersistence(handle: BackgroundProcessHandle): BackgroundProcessHandle {
+    if (handle.statePersistencePending === true) {
+      const error = this.persistTerminalState(handle);
+      if (error) {
+        throw Object.assign(new Error(`A9_BACKGROUND_STATE_PERSIST_FAILED: 后台进程 ${handle.handleId} 的终态审计未能写入：${error.message}`), {
+          code: 'A9_BACKGROUND_STATE_PERSIST_FAILED', cause: error,
+        });
+      }
+    }
+    return { ...handle, logs: { stdout: [...handle.logs.stdout], stderr: [...handle.logs.stderr] } };
   }
 
   private appendLog(
@@ -569,15 +612,29 @@ export class BackgroundProcessManager {
       }
       const terminalStatus = handle.status as BackgroundProcessHandle['status'];
       if (!entry.helperCleanupConfirmed || (terminalStatus !== 'stopped' && terminalStatus !== 'exited')) {
+        // Keep the persisted state current even though cleanup stays unconfirmed.
+        if (handle.statePersistencePending === true) this.persistTerminalState(handle);
         throw Object.assign(new Error(`后台进程 ${handleId} 的 D-013 Job Object 清理无法确认。`), {
           code: 'A9_MANAGED_PROCESS_CLEANUP_UNCONFIRMED',
         });
       }
-      return { ...handle, logs: { stdout: [...handle.logs.stdout], stderr: [...handle.logs.stderr] } };
+      return this.confirmTerminalPersistence(handle);
+    }
+    if (handle.statePersistencePending === true && handle.status !== 'running' && handle.status !== 'starting') {
+      return this.confirmTerminalPersistence(handle);
     }
     if (handle.status === 'running' || handle.status === 'starting') {
       if (entry.recoveredFact) {
-        if (!handle.pid || !BackgroundProcessManager.probeProcessAlive(handle.pid)) {
+        // Only ESRCH of a valid PID proves the recovered process is gone. EPERM keeps the
+        // PID-reuse guard below; a missing/invalid PID or any other probe error (e.g. EINVAL)
+        // is unknown and writes no terminal state.
+        const presence = BackgroundProcessManager.probeProcessPresence(handle.pid ?? Number.NaN);
+        if (presence === 'unknown') {
+          throw Object.assign(new Error(
+            `后台进程 ${handleId} (PID ${handle.pid}) 的存活探测结果未知；应用不会据此判定进程已结束，请在系统中核对后重试。`,
+          ), { code: 'A9_MANAGED_PID_PROBE_UNKNOWN' });
+        }
+        if (presence === 'absent') {
           handle.status = 'exited';
           handle.pidReusePossible = false;
           return { ...handle, logs: { stdout: [...handle.logs.stdout], stderr: [...handle.logs.stderr] } };
@@ -610,19 +667,24 @@ export class BackgroundProcessManager {
     if (this.processes.has(handleId)) {
       throw new Error(`后台进程句柄已存在: ${handleId}`);
     }
-    const alive = BackgroundProcessManager.probeProcessAlive(fact.pid);
+    // Only ESRCH of a valid PID settles the fact as exited. A missing or invalid PID is
+    // never probed and, like any unknown presence (anything but ESRCH/EPERM), stays an
+    // unconfirmed live fact. The persisted PID value is kept as the fact's identity.
+    const validPid = typeof fact.pid === 'number' && Number.isSafeInteger(fact.pid) && fact.pid > 0;
+    const alive = !validPid || BackgroundProcessManager.probeProcessPresence(fact.pid as number) !== 'absent';
     const handle: BackgroundProcessHandle = {
       handleId,
       command: fact.command,
       cwd: fact.cwd,
-      pid: fact.pid || undefined,
+      // 0 and other invalid PIDs stay the persisted identity; only a missing PID is undefined.
+      pid: typeof fact.pid === 'number' ? fact.pid : undefined,
       requestId: fact.requestId,
       startTime: fact.startTime,
       status: alive ? 'running' : 'exited',
       exitCode: alive ? null : null,
       logs: { stdout: [], stderr: [] },
       droppedLogLines: { stdout: 0, stderr: 0 },
-      pidReusePossible: alive,
+      pidReusePossible: alive && validPid,
       recoveryStatus: alive ? 'running_unknown' : 'exited',
       ...(fact.owner ? { owner: { ...fact.owner } } : {}),
       ...(fact.ownershipState ? { ownershipState: fact.ownershipState } : {}),
@@ -662,6 +724,20 @@ export class BackgroundProcessManager {
   dismissRecoveredFact(handleId: string, owner: Pick<ManagedProcessOwner, 'workspace' | 'conversationId'>): void {
     this.inspectRecoveredCleanup(handleId, owner);
     this.processes.delete(handleId);
+  }
+
+  /**
+   * P1-2: withdraws a restart-adopted fact after the caller re-read SQLite and found
+   * its row already settled by another connection. Only a recovered fact without a
+   * child or helper, matching the exact adopted identity, is removed; no Stop, release
+   * or state callback runs. Returns false (and keeps the handle) otherwise.
+   */
+  withdrawRecoveredFact(handleId: string, identity: { pid: number | null; startTime: string }): boolean {
+    const entry = this.processes.get(handleId);
+    if (!entry || !entry.recoveredFact || entry.child || entry.helperInvocation
+      || (entry.handle.pid ?? null) !== (identity.pid ?? null) || entry.handle.startTime !== identity.startTime) return false;
+    this.processes.delete(handleId);
+    return true;
   }
 
   /** 只有 ESRCH 证明 PID 不存在；权限失败和其他错误保持未知。 */
@@ -707,7 +783,7 @@ export class BackgroundProcessManager {
   }): boolean {
     if (entry.handle.ownershipState === 'released') return false;
     return entry.handle.status === 'running' || entry.handle.status === 'starting'
-      || entry.handle.cleanupRequired === true
+      || entry.handle.cleanupRequired === true || entry.handle.statePersistencePending === true
       || Boolean(entry.helperInvocation && entry.helperCleanupConfirmed !== true);
   }
 
@@ -716,12 +792,16 @@ export class BackgroundProcessManager {
    * 清理无法确认的活动项必须保留，以便上层阻止退出并允许再次处置。
    * false 将进程留给系统（仅忘记句柄，不发送信号）。
    */
-  async dispose(options: { stopManaged: boolean }): Promise<{ stopped: string[]; leftToSystem: string[]; unresolved: string[] }> {
+  async dispose(options: { stopManaged: boolean }): Promise<{ stopped: string[]; leftToSystem: string[]; unresolved: string[];
+    stoppedHandles: BackgroundProcessHandle[] }> {
     const stopped: string[] = [], leftToSystem: string[] = [], unresolved: string[] = [];
+    // The Runner's own terminal state of each stopped handle, so callers never persist a pre-stop snapshot.
+    const stoppedHandles: BackgroundProcessHandle[] = [];
     for (const [id, entry] of this.processes) {
       if (!this.requiresCleanupAttention(entry)) continue;
       try {
-        if (options.stopManaged) { await this.stop(id); stopped.push(id); }
+        // A pending terminal write is retried under either policy; the process already ended.
+        if (options.stopManaged || entry.handle.statePersistencePending === true) { stoppedHandles.push(await this.stop(id)); stopped.push(id); }
         else if (entry.helperInvocation) {
           if (entry.recoveredFact || !entry.helperInvocation.release || entry.handle.status !== 'running'
             || entry.handle.ownershipState === 'release_unknown') throw managedError('A9_RELEASE_UNAVAILABLE');
@@ -730,9 +810,12 @@ export class BackgroundProcessManager {
           const failure = this.notifyStateChange(entry.handle); if (failure) { entry.handle.ownershipState = 'owned'; throw managedError('A9_RELEASE_AUDIT_FAILED'); }
           await entry.helperInvocation.release(entry.handle.releaseId); await entry.terminal;
           if (entry.handle.ownershipState as string !== 'released') throw managedError('A9_RELEASE_UNKNOWN');
+          this.persistenceDetached.add(entry.handle);
           leftToSystem.push(id);
         } else if (!entry.recoveredFact && !entry.handle.owner && entry.child?.pid) {
-          // Legacy direct-spawn profile has no Job ownership to release.
+          // Legacy direct-spawn profile has no Job ownership to release. Detach first:
+          // the child's later natural exit must not persist an uncredentialed 'released'.
+          this.persistenceDetached.add(entry.handle);
           leftToSystem.push(id); entry.handle.ownershipState = 'released';
         } else throw managedError('A9_RELEASE_UNAVAILABLE');
       } catch (error) {
@@ -746,7 +829,7 @@ export class BackgroundProcessManager {
       }
     }
     for (const [id, entry] of this.processes) if (!this.requiresCleanupAttention(entry)) this.processes.delete(id);
-    return { stopped, leftToSystem, unresolved };
+    return { stopped, leftToSystem, unresolved, stoppedHandles };
   }
 
   private ownedEntry(handleId: string, owner: Pick<ManagedProcessOwner, 'workspace' | 'conversationId'>) {

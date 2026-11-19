@@ -15,7 +15,7 @@ function testPlatform(value: NodeJS.Platform) {
 }
 
 async function scenario(auditFailure = false, releaseFailure = false, options: {
-  workspace?: string; canonicalize?: (workspace: string) => string; startingAuditFailure?: boolean;
+  workspace?: string; canonicalize?: (workspace: string) => string; startingAuditFailure?: boolean | 'ignore-event' | 'ignore-fact';
   startFailure?: 'confirmed' | 'unknown'; terminalAuditFailure?: boolean; builtRunner?: boolean; commandCwd?: string; queuedPrompt?: string; recoveredQueueBlock?: boolean;
 } = {}) {
   const workspace = options.workspace ?? '/memory/workspace';
@@ -87,7 +87,10 @@ async function scenario(auditFailure = false, releaseFailure = false, options: {
           return { status: 'background_started', backgroundHandle: 'h', exitCode: null, stdout: '', stderr: '', durationMs: 1, timedOut: false };
         } }) } }, openDatabase: () => { db = new Database(':memory:'); return db; } });
   await runtime.configureProvider({ baseUrl: 'http://example.invalid', model: 'fixture', skipProbe: true });
-  if (options.startingAuditFailure) db.exec("CREATE TRIGGER fail_intent BEFORE INSERT ON a9_events WHEN NEW.event_type='managed_process_ownership' BEGIN SELECT RAISE(FAIL,'intent disk failed'); END");
+  if (options.startingAuditFailure === true) db.exec("CREATE TRIGGER fail_intent BEFORE INSERT ON a9_events WHEN NEW.event_type='managed_process_ownership' BEGIN SELECT RAISE(FAIL,'intent disk failed'); END");
+  // RAISE(IGNORE) reports success with zero rows; State must still refuse the write (ADR-0344).
+  if (options.startingAuditFailure === 'ignore-event') db.exec("CREATE TRIGGER fail_intent BEFORE INSERT ON a9_events WHEN NEW.event_type='managed_process_ownership' BEGIN SELECT RAISE(IGNORE); END");
+  if (options.startingAuditFailure === 'ignore-fact') db.exec("CREATE TRIGGER fail_intent BEFORE INSERT ON a9_managed_processes WHEN NEW.last_probe_status='starting' BEGIN SELECT RAISE(IGNORE); END");
   if (options.terminalAuditFailure) db.exec("CREATE TRIGGER fail_terminal BEFORE INSERT ON a9_managed_processes WHEN NEW.last_probe_status='failed' BEGIN SELECT RAISE(FAIL,'terminal disk failed'); END");
   if (options.queuedPrompt) await runtime.probeProvider();
   if (options.recoveredQueueBlock) manager.adoptRecoveredFact('recovered', { pid: process.pid, command: 'recovered fact', cwd: workspace,
@@ -316,4 +319,146 @@ it('A9-50 refuses automatic queue dispatch beside a recovered live PID even with
     // this test is stopped; memory-only recovered facts are left to the OS.
     await f.manager.stop('h'); await f.runtime.shutdown({ stopManaged: false }); f.close();
   }
+});
+
+it.each([
+  ['stop', 'late cleanup fact', 'stop'],
+  ['release', 'late cleanup fact', 'release'],
+  ['stop', 'late unowned running fact', 'stop'],
+  ['release', 'late unowned running fact', 'release'],
+  ['release', 'released fact changed to cleanup_required', 'stop'],
+  ['release', 'released fact changed to cleanup_required', 'release'],
+] as const)('final lock release re-reads SQLite after real dispose (%s, %s, retry %s)', async (choice, mutation, retryChoice) => {
+  const f = await scenario(); try {
+    const dispose = f.manager.dispose.bind(f.manager);
+    jest.spyOn(f.manager, 'dispose').mockImplementationOnce(async (options) => {
+      const result = await dispose(options);
+      if (mutation !== 'released fact changed to cleanup_required') {
+        // Committed after the in-memory checks, with no in-memory handle at all.
+        f.db.prepare(`INSERT INTO a9_managed_processes (handle_id, workspace_path, pid, command, cwd, started_at, last_probe_status, pid_reuse_possible)
+          VALUES ('late', '/memory/workspace', 7, 'late', '/memory/workspace', '2026-11-19', ?, 0)`)
+          .run(mutation === 'late cleanup fact' ? 'cleanup_required' : 'running');
+      } else f.db.prepare("UPDATE a9_managed_processes SET last_probe_status = 'cleanup_required' WHERE handle_id = 'h'").run();
+      return result;
+    });
+    const blocked = await f.runtime.shutdown({ stopManaged: choice === 'stop' });
+    expect(f.manager.dispose).toHaveBeenCalledTimes(1);
+    expect(blocked.unresolved).toEqual([expect.stringContaining(mutation.startsWith('late') ? 'late' : 'h')]);
+    expect(f.db.prepare('SELECT owner_id FROM a9_workspace_locks').get()).toEqual({ owner_id: 'managed-test' });
+    expect(f.runtime.getSnapshot().lock.held).toBe(true);
+    // The refusal stays retryable for both exit choices while the fact is unresolved.
+    for (const stopManaged of [true, false]) expect((await f.runtime.shutdown({ stopManaged })).unresolved).toHaveLength(1);
+    expect(f.db.prepare('SELECT owner_id FROM a9_workspace_locks').get()).toEqual({ owner_id: 'managed-test' });
+    // Once SQLite again proves a settled fact (the late fact is gone, or the exact
+    // released identity and its release chain verify), the next retry releases the lock.
+    if (mutation.startsWith('late')) f.db.prepare("DELETE FROM a9_managed_processes WHERE handle_id = 'late'").run();
+    else {
+      // A corrected status with another persisted identity does not clear the isolation.
+      const { pid } = f.db.prepare("SELECT pid FROM a9_managed_processes WHERE handle_id = 'h'").get();
+      f.db.prepare("UPDATE a9_managed_processes SET last_probe_status = 'released', pid = 999 WHERE handle_id = 'h'").run();
+      expect((await f.runtime.shutdown({ stopManaged: retryChoice === 'stop' })).unresolved).toHaveLength(1);
+      expect(f.db.prepare('SELECT count(*) AS n FROM a9_workspace_locks').get()).toEqual({ n: 1 });
+      f.db.prepare("UPDATE a9_managed_processes SET pid = ? WHERE handle_id = 'h'").run(pid);
+    }
+    const retried = await f.runtime.shutdown({ stopManaged: retryChoice === 'stop' });
+    expect(retried.unresolved).toEqual([]);
+    expect(f.db.prepare('SELECT count(*) AS n FROM a9_workspace_locks').get()).toEqual({ n: 0 });
+    if (!mutation.startsWith('late')) {
+      expect(f.runtime.getSnapshot().persistenceDiagnostics).toEqual(expect.arrayContaining([
+        expect.objectContaining({ code: 'A9_MANAGED_OWNERSHIP_CORRUPT' }), expect.objectContaining({ code: 'A9_MANAGED_QUARANTINE_CLEARED' })]));
+    }
+  } finally { f.close(); }
+});
+
+it.each(['ignore-event', 'ignore-fact'] as const)('an ignored mandatory starting audit (%s) dispatches nothing and commits nothing', async (mode) => {
+  const f = await scenario(false, false, { startingAuditFailure: mode });
+  try {
+    expect(f.result).toMatchObject({ ok: false, error: { code: 'A9_AUDIT_PERSISTENCE_FAILED' } });
+    expect(f.trace().nativeStarts).toBe(0);
+    expect(f.manager.list()).toEqual([]);
+    expect(f.db.prepare('SELECT count(*) AS n FROM a9_managed_processes').get()).toEqual({ n: 0 });
+    expect(f.db.prepare("SELECT count(*) AS n FROM a9_events WHERE event_type IN ('managed_process_ownership','tool_output')").get()).toEqual({ n: 0 });
+    const requests = f.trace().requests;
+    expect((await f.runtime.submitTurn('retry')).error.code).toBe('A9_AUDIT_PERSISTENCE_FAILED');
+    expect(f.trace().requests).toBe(requests);
+    expect(f.trace().nativeStarts).toBe(0);
+  } finally { await f.runtime.shutdown({ stopManaged: true }); f.close(); }
+});
+
+async function waitForPidGone(pid: number) {
+  for (let i = 0; i < 250; i++) {
+    try { process.kill(pid, 0); } catch (error: any) { if (error?.code === 'ESRCH') break; }
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+  // Let the child's close callback (stdio drained after exit) run before asserting.
+  await new Promise(resolve => setTimeout(resolve, 150));
+}
+
+it.each(['same identity', 'identity replaced while waiting'] as const)(
+  'a handed-over legacy child exiting naturally after an ignored lock DELETE never rewrites persistent facts (%s)', async (variant) => {
+    const f = await scenario();
+    // TEST_ONLY controlled legacy direct-spawn handle: a real short child that exits on its own.
+    const child = await f.manager.start('legacy', 'legacy child', process.execPath, ['-e', 'setTimeout(() => {}, 400)'], process.cwd());
+    const row = () => f.db.prepare("SELECT pid, started_at, last_probe_status FROM a9_managed_processes WHERE handle_id = 'legacy'").get();
+    try {
+      await new Promise(resolve => setTimeout(resolve, 50));
+      const original = row();
+      expect(original).toEqual({ pid: child.pid, started_at: child.startTime, last_probe_status: 'running' });
+      f.db.exec('CREATE TRIGGER keep_lock BEFORE DELETE ON a9_workspace_locks BEGIN SELECT RAISE(IGNORE); END');
+      const blocked = await f.runtime.shutdown({ stopManaged: false });
+      expect(blocked.leftToSystem).toEqual(expect.arrayContaining(['legacy']));
+      expect(blocked.unresolved).toEqual(['workspace lock release could not be confirmed']);
+      const replaced = { pid: child.pid! + 100000, started_at: '2026-11-20T00:00:00.000Z', last_probe_status: 'running' };
+      if (variant === 'identity replaced while waiting') {
+        f.db.prepare("UPDATE a9_managed_processes SET pid = ?, started_at = ? WHERE handle_id = 'legacy'").run(replaced.pid, replaced.started_at);
+      }
+      await waitForPidGone(child.pid!);
+      // The old Runner callback wrote neither an uncredentialed 'released' nor the old identity.
+      expect(row()).toEqual(variant === 'same identity' ? original : replaced);
+      f.db.exec('DROP TRIGGER keep_lock');
+      const retried = await f.runtime.shutdown({ stopManaged: false });
+      if (variant === 'same identity') {
+        expect(retried).toEqual({ stopped: [], leftToSystem: [], unresolved: [] });
+        expect(f.db.prepare('SELECT count(*) AS n FROM a9_workspace_locks').get()).toEqual({ n: 0 });
+      } else {
+        expect(retried.unresolved).toEqual([expect.stringContaining('legacy')]);
+        expect(f.db.prepare('SELECT count(*) AS n FROM a9_workspace_locks').get()).toEqual({ n: 1 });
+      }
+      expect(row()).toEqual(variant === 'same identity' ? original : replaced);
+    } finally {
+      try { process.kill(child.pid!, 'SIGKILL'); } catch (_error) { /* already gone */ }
+      await waitForPidGone(child.pid!); f.close();
+    }
+  });
+
+it('a legacy handover credential survives an ignored lock DELETE and is re-verified on retry', async () => {
+  const f = await scenario();
+  // TEST_ONLY controlled legacy direct-spawn handle: a real short child that this test always reaps.
+  const child = await f.manager.start('legacy', 'legacy child', process.execPath, ['-e', 'setTimeout(() => {}, 20000)'], process.cwd());
+  const reap = async () => {
+    try { process.kill(child.pid!, 'SIGKILL'); } catch (_error) { /* already gone */ }
+    // After a confirmed handover the Runner writes nothing; only wait for the child to go.
+    await waitForPidGone(child.pid!);
+  };
+  try {
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(f.db.prepare("SELECT last_probe_status FROM a9_managed_processes WHERE handle_id = 'legacy'").get()).toEqual({ last_probe_status: 'running' });
+    f.db.exec('CREATE TRIGGER keep_lock BEFORE DELETE ON a9_workspace_locks BEGIN SELECT RAISE(IGNORE); END');
+    const blocked = await f.runtime.shutdown({ stopManaged: false });
+    expect(blocked.leftToSystem).toEqual(expect.arrayContaining(['h', 'legacy']));
+    expect(blocked.unresolved).toEqual(['workspace lock release could not be confirmed']);
+    expect(f.db.prepare('SELECT owner_id FROM a9_workspace_locks').get()).toEqual({ owner_id: 'managed-test' });
+    // The Runner already forgot the handle; the exact identity is still exempt on retry.
+    expect(f.manager.list().map(handle => handle.handleId)).not.toContain('legacy');
+    f.db.exec('DROP TRIGGER keep_lock');
+    // A changed identity under the same handle is never exempt.
+    const { pid } = f.db.prepare("SELECT pid FROM a9_managed_processes WHERE handle_id = 'legacy'").get();
+    f.db.prepare("UPDATE a9_managed_processes SET pid = ? WHERE handle_id = 'legacy'").run(pid + 1);
+    expect((await f.runtime.shutdown({ stopManaged: false })).unresolved).toEqual([expect.stringContaining('legacy')]);
+    expect(f.db.prepare('SELECT count(*) AS n FROM a9_workspace_locks').get()).toEqual({ n: 1 });
+    f.db.prepare("UPDATE a9_managed_processes SET pid = ? WHERE handle_id = 'legacy'").run(pid);
+    expect(await f.runtime.shutdown({ stopManaged: false })).toEqual({ stopped: [], leftToSystem: [], unresolved: [] });
+    expect(f.db.prepare('SELECT count(*) AS n FROM a9_workspace_locks').get()).toEqual({ n: 0 });
+    expect(f.db.prepare("SELECT last_probe_status FROM a9_managed_processes WHERE handle_id = 'legacy'").get()).toEqual({ last_probe_status: 'running' });
+  } finally { await reap(); f.close(); }
 });

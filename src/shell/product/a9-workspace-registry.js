@@ -435,7 +435,10 @@ function createA9WorkspaceRegistry(options) {
     closing.add(id);
     try {
       const result = await entry.runtime.shutdown({ ...shutdownOptions, cancelPending: true });
-      if (result && ((result.unresolved || []).length || (shutdownOptions?.stopManaged !== false && (result.leftToSystem || []).length))) {
+      // A Runtime that still holds its workspace lock never loses its entry, even if it
+      // reported nothing unresolved (ADR-0346).
+      const lockKept = typeof entry.runtime.isWorkspaceLockReleased === 'function' && !entry.runtime.isWorkspaceLockReleased();
+      if (lockKept || (result && ((result.unresolved || []).length || (shutdownOptions?.stopManaged !== false && (result.leftToSystem || []).length)))) {
         throw failure('A9_WORKSPACE_CLEANUP_UNCONFIRMED', '工作区清理尚未确认，已保留入口和诊断。');
       }
       entries.delete(id);
@@ -449,11 +452,17 @@ function createA9WorkspaceRegistry(options) {
     if (providerChanging) throw failure('A9_APPLICATION_BUSY', '模型配置仍在验证，请完成后再退出。');
     closingAll = true;
     try {
-      const results = await Promise.allSettled(Array.from(entries.values(), entry => entry.runtime.shutdown({ ...options, cancelPending: true })));
+      const runtimes = Array.from(entries.values(), entry => entry.runtime);
+      const results = await Promise.allSettled(runtimes.map(runtime => runtime.shutdown({ ...options, cancelPending: true })));
       const summary = { unresolved: [], leftToSystem: [], stopped: [] };
       results.forEach((result, index) => {
         if (result.status === 'rejected') summary.unresolved.push(`workspace ${index + 1}: shutdown failed`);
-        else for (const key of Object.keys(summary)) summary[key].push(...(result.value && result.value[key] || []));
+        else {
+          for (const key of Object.keys(summary)) summary[key].push(...(result.value && result.value[key] || []));
+          const runtime = runtimes[index];
+          if (typeof runtime.isWorkspaceLockReleased === 'function' && !runtime.isWorkspaceLockReleased()
+            && !(result.value && (result.value.unresolved || []).length)) summary.unresolved.push(`workspace ${index + 1}: workspace lock remains held`);
+        }
       });
       return summary;
     } finally { closingAll = false; }

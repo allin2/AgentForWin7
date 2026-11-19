@@ -52,6 +52,18 @@ describe('A9 workspace lock lifecycle', () => {
     expect(p.acquire).toHaveBeenCalledTimes(1);
   });
 
+  test('a refused persistent release keeps the lock held and retryable', () => {
+    const p = port([{ acquired: true, holder: 'me' }]);
+    p.release.mockReturnValueOnce({ released: false, blockers: ['h'] } as any);
+    const lock = createWorkspaceLock(p);
+    expect(lock.release()).toEqual({ released: false, blockers: ['h'] });
+    expect(lock.state).toBe(LOCK_STATE.ACQUIRED);
+    expect(lock.isHeld()).toBe(true);
+    expect(lock.release()).toEqual({ released: true });
+    expect(lock.isReleased()).toBe(true);
+    expect(p.release).toHaveBeenCalledTimes(2);
+  });
+
   test('releasing a lock that was never held does not touch persistence or re-acquire', () => {
     const p = port([{ acquired: false, holder: 'other' }]);
     const lock = createWorkspaceLock(p);

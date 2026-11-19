@@ -70,6 +70,8 @@ function createSqliteUnavailableRuntime(reason) {
     reopenConversation() { return { ok: false, error: { code: 'ELECTRON_SQLITE_UNAVAILABLE' } }; },
     visitConversation() { return { ok: false, error: { code: 'ELECTRON_SQLITE_UNAVAILABLE' } }; },
     canLeaveWorkspace() { return { allowed: true, reason: null }; },
+    // A restricted runtime never acquired a workspace lock, so there is none to keep.
+    isWorkspaceLockReleased() { return true; },
     getWorkdirInfo() { return {}; },
     getTransferWorkspace() { throw Object.assign(new Error('ELECTRON_SQLITE_UNAVAILABLE'), { code: 'ELECTRON_SQLITE_UNAVAILABLE' }); },
     getWorkdirConversationId() { return null; },
@@ -135,6 +137,8 @@ function createDiagnosticsRuntime(outcome) {
     reopenConversation() { return { ok: false, error: { code: 'A9_DIAGNOSTICS_MODE' } }; },
     visitConversation() { return { ok: false, error: { code: 'A9_DIAGNOSTICS_MODE' } }; },
     canLeaveWorkspace() { return { allowed: true, reason: null }; },
+    // A restricted runtime never acquired a workspace lock, so there is none to keep.
+    isWorkspaceLockReleased() { return true; },
     getWorkdirInfo() { return {}; },
     getTransferWorkspace() { throw Object.assign(new Error('A9_DIAGNOSTICS_MODE'), { code: 'A9_DIAGNOSTICS_MODE' }); },
     getWorkdirConversationId() { return null; },

@@ -70,9 +70,9 @@ function createComposerState(storage) {
       ...(value.error ? { error: { ...value.error } } : {}) };
   }
   // Presence only: never decrypts, so directory rows can mark unsent drafts cheaply.
-  function hasContent(id) {
+  function hasContent(id, persistedPresence) {
     if (conversations.has(id)) { const value = conversations.get(id); return Boolean(value.text || value.items.length); }
-    return Boolean(storage.read(id));
+    return typeof persistedPresence === 'boolean' ? persistedPresence : Boolean(storage.read(id));
   }
   return {
     draft, snapshot, hasContent,

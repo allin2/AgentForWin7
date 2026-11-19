@@ -80,6 +80,15 @@ function a9PersistenceError(code: string, message: string): Error & { code: stri
   return error;
 }
 
+export interface A9ManagedOwnershipRecord {
+  schemaVersion: 1;
+  owner: { workspace: string; conversationId: string; taskId: string; turnId: string; toolCallId: string };
+  requestId: string;
+  ownershipState: 'owned' | 'release_intent' | 'released' | 'release_unknown';
+  releaseId?: string;
+  recoveryStatus?: 'running_unknown' | 'identity_mismatch' | 'exited';
+}
+
 export interface A9ConversationRecord {
   sessionId: string;
   workspacePath: string;
@@ -172,6 +181,7 @@ export interface A9QuestionResolution extends A9QuestionReplyFact {
 
 export class A9PersistenceManager {
   private readonly diagnosticBuffer = new PersistenceDiagnosticBuffer();
+  private snapshotRevisions?: Map<string, number> | null;
 
   private constructor(
     readonly db: SqliteDatabase,
@@ -182,6 +192,106 @@ export class A9PersistenceManager {
   getDiagnostics(): A9PersistenceDiagnostic[] { return this.diagnosticBuffer.snapshot(); }
 
   addDiagnostic(diagnostic: A9PersistenceDiagnostic): void { this.diagnosticBuffer.add(diagnostic); }
+
+  /** Connection-local counters keep unrelated writes out of the snapshot cache keys. */
+  readSnapshotRevisions(workspace: string, sessionId: string, managedWorkspace: string) {
+    const db = this.db as SqliteDatabase & {
+      inTransaction?: boolean;
+      function?: (name: string, fn: (...args: string[]) => void) => void;
+    };
+    if (db.inTransaction !== false || typeof db.function !== 'function') return null;
+    if (this.snapshotRevisions === undefined) {
+      const revisions = new Map<string, number>();
+      try {
+        db.function('a9_snapshot_changed', (projection, key) => {
+          const id = projection + key;
+          revisions.set(id, (revisions.get(id) ?? 0) + 1);
+        });
+        const sources = [
+          { table: 'a9_sessions', id: 'session_id', projection: 'directory:', key: (row: string) => row + '.workspace_path' },
+          ...[{ table: 'a9_tasks', id: 'task_id' }, { table: 'a9_runs', id: 'run_id' },
+            { table: 'a9_approvals', id: 'approval_id' }].map(source => ({
+            ...source, projection: 'directory:',
+            key: (row: string) => `(SELECT workspace_path FROM a9_sessions WHERE session_id = ${row}.session_id)`,
+          })),
+          { table: 'a9_events', id: 'id', projection: 'directory:',
+            key: (row: string) => `CASE WHEN ${row}.event_type IN ('approval_required', 'question_pending', 'question_resolved')
+              THEN (SELECT workspace_path FROM a9_sessions WHERE session_id = ${row}.session_id) END` },
+          { table: 'a9_events', id: 'id', projection: 'managedEvents:',
+            key: (row: string) => `CASE WHEN ${row}.event_type IN ('managed_process_ownership', 'managed_process_disposition')
+              THEN COALESCE((SELECT a9_snapshot_workspace_key(CAST(workspace_path AS TEXT))
+                FROM a9_managed_processes WHERE handle_id = CASE WHEN json_valid(${row}.payload_json)
+                  THEN CASE WHEN json_type(${row}.payload_json, '$.handleId') = 'text'
+                    THEN json_extract(${row}.payload_json, '$.handleId') END END), '') END` },
+          // Ownership validity also depends on its session/task/turn origin. Only origin
+          // columns referenced by an ownership event invalidate managed projections.
+          // A disposition record's trust is its session's workspace binding (ADR-0344), so
+          // session origin edits also invalidate when the session holds a disposition record.
+          ...[{ table: 'a9_sessions', id: 'session_id', columns: ['session_id', 'workspace_path', 'state'], match: '',
+            eventTypes: "'managed_process_ownership', 'managed_process_disposition'" },
+            { table: 'a9_tasks', id: 'task_id', columns: ['task_id', 'session_id'],
+              match: `AND CASE WHEN json_valid(e.payload_json) THEN json_extract(e.payload_json, '$.owner.taskId') END = {row}.task_id` },
+            { table: 'a9_turns', id: 'turn_id', columns: ['turn_id', 'task_id', 'session_id'], match: 'AND e.turn_id = {row}.turn_id' },
+          ].map(source => ({
+            table: source.table, id: source.id, columns: source.columns, projection: 'managedEvents:',
+            key: (row: string) => `CASE WHEN EXISTS (SELECT 1 FROM a9_events e WHERE e.session_id = ${row}.session_id
+              AND e.event_type IN (${source.eventTypes ?? "'managed_process_ownership'"}) ${source.match.replace('{row}', row)}) THEN '' END`,
+          })),
+          { table: 'a9_checkpoints', id: 'turn_id', projection: 'checkpoints:', key: (row: string) => row + '.session_id' },
+          { table: 'a9_managed_processes', id: 'handle_id', projection: 'managed:',
+            key: (row: string) => `a9_snapshot_workspace_key(CAST(${row}.workspace_path AS TEXT))` },
+        ] as Array<{ table: string; id: string; projection: string; key: (row: string) => string; columns?: string[] }>;
+        db.function('a9_snapshot_workspace_key', (workspace): string =>
+          process.platform === 'win32' ? path.win32.resolve(workspace).toLowerCase() : workspace);
+        db.transaction(() => {
+          for (const [index, source] of sources.entries()) {
+            // REPLACE can remove a row without firing DELETE triggers.
+            for (const [operation, changedId] of [['INSERT', '1'], ['UPDATE', `OLD.${source.id} IS NOT NEW.${source.id}`]]) {
+              db.exec(`CREATE TEMP TRIGGER a9_snapshot_${index}_REPLACE_${operation}
+                BEFORE ${operation} ON main.${source.table} WHEN ${changedId} BEGIN
+                  SELECT a9_snapshot_changed('${source.projection}', key)
+                    FROM (SELECT ${source.key('previous')} AS key FROM main.${source.table} previous
+                      WHERE previous.${source.id} = NEW.${source.id}) WHERE key IS NOT NULL;
+                END`);
+            }
+            for (const operation of ['INSERT', 'UPDATE', 'DELETE']) {
+              const keys = operation === 'UPDATE' ? [source.key('OLD'), source.key('NEW')]
+                : [source.key(operation === 'INSERT' ? 'NEW' : 'OLD')];
+              const columns = operation === 'UPDATE' && source.columns
+                ? ` OF ${source.columns.join(', ')}` : '';
+              const changed = operation === 'UPDATE' && source.columns
+                ? ` WHEN ${source.columns.map(column => `OLD.${column} IS NOT NEW.${column}`).join(' OR ')}` : '';
+              db.exec(`CREATE TEMP TRIGGER a9_snapshot_${index}_${operation}
+                AFTER ${operation}${columns} ON main.${source.table}${changed} BEGIN
+                  ${keys.map(key => `SELECT a9_snapshot_changed('${source.projection}', key)
+                    FROM (SELECT ${key} AS key) WHERE key IS NOT NULL;`).join('\n')}
+                END`);
+            }
+          }
+        })();
+        this.snapshotRevisions = revisions;
+      } catch (_error) {
+        this.snapshotRevisions = null;
+        this.addDiagnostic({ code: 'A9_SNAPSHOT_REVISION_UNAVAILABLE', detail: 'Snapshot cache disabled: connection-local revision setup failed.' });
+      }
+    }
+    if (!this.snapshotRevisions) return null;
+    const revisions = this.snapshotRevisions;
+    let dataVersion: number;
+    try {
+      dataVersion = readDataVersion(db);
+    } catch (_error) {
+      this.snapshotRevisions = null;
+      this.addDiagnostic({ code: 'A9_SNAPSHOT_REVISION_UNAVAILABLE', detail: 'Snapshot cache disabled: SQLite data_version is unavailable.' });
+      return null;
+    }
+    const managedKey = process.platform === 'win32' ? path.win32.resolve(managedWorkspace).toLowerCase() : managedWorkspace;
+    return {
+      checkpoints: `${dataVersion}:${revisions.get('checkpoints:' + sessionId) ?? 0}`,
+      directory: `${dataVersion}:${revisions.get('directory:' + workspace) ?? 0}`,
+      managed: `${dataVersion}:${revisions.get('managed:' + managedKey) ?? 0}:${revisions.get('managedEvents:' + managedKey) ?? 0}:${revisions.get('managedEvents:') ?? 0}`,
+    };
+  }
 
   /**
    * 打开/迁移 A9 数据库。任何失败都返回结构化结果，不覆盖旧库。
@@ -519,6 +629,7 @@ export class A9PersistenceManager {
       CREATE INDEX IF NOT EXISTS idx_a9_events_created ON a9_events (created_at);
       CREATE INDEX IF NOT EXISTS idx_a9_events_session_type ON a9_events (session_id, event_type);
     `);
+    this.ensureEventTypeIndex();
 
     const now = new Date().toISOString();
     const existing = this.db.prepare('SELECT schema_version FROM a9_meta WHERE id = 1').get() as any;
@@ -528,6 +639,26 @@ export class A9PersistenceManager {
     } else if (existing.schema_version < A9_SCHEMA_VERSION) {
       this.db.prepare('UPDATE a9_meta SET schema_version = ?, updated_at = ? WHERE id = 1')
         .run(A9_SCHEMA_VERSION, now);
+    }
+  }
+
+  private ensureEventTypeIndex(): void {
+    const schemaObject = this.db.prepare('SELECT type, tbl_name FROM sqlite_master WHERE name = ? COLLATE NOCASE');
+    for (let suffix = 0; ; suffix += 1) {
+      const name = 'idx_a9_events_type_id' + (suffix ? '_' + suffix : '');
+      const existing = schemaObject.get(name) as { type: string; tbl_name: string } | undefined;
+      if (!existing) {
+        this.db.exec(`CREATE INDEX ${name} ON a9_events (event_type, id)`);
+        return;
+      }
+      if (existing.type !== 'index' || existing.tbl_name !== 'a9_events') continue;
+      const index = (this.db.prepare('PRAGMA index_list(a9_events)').all() as any[])
+        .find(row => String(row.name).toLowerCase() === name);
+      const keys = (this.db.prepare(`PRAGMA index_xinfo(${name})`).all() as any[])
+        .filter(row => row.key === 1);
+      if (index?.unique === 0 && index.partial === 0 && keys.length === 2
+        && keys[0].name === 'event_type' && keys[1].name === 'id'
+        && keys.every(key => key.coll === 'BINARY' && key.desc === 0)) return;
     }
   }
 
@@ -953,16 +1084,78 @@ export class A9PersistenceManager {
         throw a9PersistenceError('A9_WORKSPACE_LOCKED', '路径更新要求先关闭 Runtime。');
       }
       const now = new Date().toISOString();
+      // Round 20 (P1): every binding change closes the conversation's current segment at the
+      // newest event id. AUTOINCREMENT ids are never reused, so every event written from now
+      // on lies above this bound and belongs to the new binding.
+      // Round 21 (P1): retention may delete the newest events, lowering MAX(id); the bound is the
+      // AUTOINCREMENT high-water mark (`sqlite_sequence`, never lowered by DELETE), and never
+      // below the conversation's previous segment, so segments stay monotonic.
+      const seqRow = this.db.prepare("SELECT seq FROM sqlite_sequence WHERE name = 'a9_events'").get() as { seq?: number } | undefined;
+      const maxRow = this.db.prepare('SELECT COALESCE(MAX(id), 0) AS m FROM a9_events').get() as { m?: number } | undefined;
+      const currentEventSeq = Math.max(Number(seqRow?.seq ?? 0), Number(maxRow?.m ?? 0));
+      const segmentBound = (history: A9WorkspaceHistoryEntry[]) => Math.max(currentEventSeq,
+        history.length ? Number(history[history.length - 1].maxEventId) : 0);
+      const historyOf = (workdir: unknown): A9WorkspaceHistoryEntry[] => {
+        const segments = parseWorkspaceHistory((workdir as { workspaceHistory?: unknown } | undefined)?.workspaceHistory);
+        if (segments === 'damaged') {
+          throw a9PersistenceError('A9_WORKDIR_HISTORY_CORRUPT', '对话的工作区历史已损坏，无法安全更新路径。');
+        }
+        return segments ?? [];
+      };
+      // Round 23 (P1): a conversation with no segments yet that was rebound before (a legacy
+      // build's `origin: 'linked'`, a Round 19 scalar `previousWorkspace`) or whose metadata is
+      // damaged may have written its events so far in an earlier workspace; the boundary is
+      // unknown. They are closed in one unknown segment (fail-closed for every workspace) instead
+      // of being attributed to `source`. No timestamp heuristic: a wrong bound would misattribute.
+      const withUnknownPrior = (id: string, workdir: unknown, history: A9WorkspaceHistoryEntry[]): A9WorkspaceHistoryEntry[] => {
+        if (history.length) return history;
+        const value = (workdir ?? {}) as { origin?: unknown; previousWorkspace?: unknown };
+        const metadataDamaged = (this.db.prepare('SELECT json_valid(metadata_json) AS valid FROM a9_sessions WHERE session_id = ?')
+          .get(id) as { valid?: number | null } | undefined)?.valid === 0;
+        return metadataDamaged || value.origin === 'linked' || typeof value.previousWorkspace === 'string'
+          ? [{ workspace: A9_UNKNOWN_PRIOR_WORKSPACE, maxEventId: segmentBound(history) }] : history;
+      };
       if (rename) {
         if (this.listReservedWorkspacePaths().some(value => value.toLowerCase() === target.toLowerCase())) {
           throw a9PersistenceError('A9_WORKDIR_NAME_CONFLICT', '目录名已被预留。');
+        }
+        // Round 20 (P1): the default directory keeps its facts under the source path (ADR-0343),
+        // so every conversation renamed with it records that its events up to now were written
+        // in `source`; segments of any conversation that name `source` note the later name.
+        const sessions = this.db.prepare(`SELECT session_id, workspace_path, metadata_json FROM a9_sessions
+          WHERE workspace_path = ? OR (json_valid(metadata_json)
+            AND json_type(metadata_json, '$.workdir.workspaceHistory') = 'array')`).all(source) as Array<{
+          session_id: string; workspace_path: string; metadata_json: string }>;
+        const histories = new Map<string, { workdir: Record<string, unknown>; history: A9WorkspaceHistoryEntry[] }>();
+        for (const session of sessions) {
+          const moved = session.workspace_path === source;
+          const workdir = (this.getConversationMetadata(session.session_id).workdir ?? {}) as Record<string, unknown>;
+          // A damaged history of a conversation outside `source` stays as it is (readers treat it
+          // as ambiguous, fail-closed); a moved conversation's damaged history refuses the rename.
+          if (!moved && parseWorkspaceHistory(workdir.workspaceHistory) === 'damaged') continue;
+          const history = (moved ? withUnknownPrior(session.session_id, workdir, historyOf(workdir)) : historyOf(workdir)).map(entry => sameWorkspacePath(entry.renamedTo ?? entry.workspace, source)
+            ? { ...entry, renamedTo: target } : entry);
+          if (moved) history.push({ workspace: source, renamedTo: target, maxEventId: segmentBound(history) });
+          histories.set(session.session_id, { workdir, history });
         }
         this.db.prepare('UPDATE a9_workspaces SET workspace_path = ?, display_name = ?, updated_at = ? WHERE workspace_path = ?')
           .run(target, displayNameFor(target), now, source);
         this.db.prepare('UPDATE a9_sessions SET workspace_path = ?, updated_at = ? WHERE workspace_path = ?').run(target, now, source);
         this.db.prepare('UPDATE a9_workspace_conversation_state SET workspace_path = ?, updated_at = ? WHERE workspace_path = ?').run(target, now, source);
+        const updateMetadata = this.db.prepare('UPDATE a9_sessions SET metadata_json = ? WHERE session_id = ?');
+        for (const [id, { workdir, history }] of histories) {
+          if (!history.length) continue;
+          updateMetadata.run(JSON.stringify({ ...this.getConversationMetadata(id), workdir: { ...workdir, workspaceHistory: history } }), id);
+        }
       } else {
-        this.saveSession(sessionId, target, { workdir: { version: 1, origin: 'linked', createdAt: null } });
+        // Round 19 (P1): the source workspace is kept so this conversation's older ownership
+        // records (and their damage) stay evidence of that workspace after the rebind.
+        // Round 20 (P1): the scalar is only kept for compatibility. The ordered segments keep
+        // every earlier workspace across repeated rebinds (A -> B -> C), each bounded by event id.
+        const workdir = this.getConversationMetadata(sessionId).workdir;
+        const previous = withUnknownPrior(sessionId, workdir, historyOf(workdir));
+        const workspaceHistory = [...previous, { workspace: source, maxEventId: segmentBound(previous) }];
+        this.saveSession(sessionId, target, { workdir: { version: 1, origin: 'linked', previousWorkspace: source, workspaceHistory, createdAt: null } });
         const remaining = this.listConversations(source).find(item => item.state === 'active');
         if (remaining) this.setActiveConversation(source, remaining.sessionId, now);
         else this.db.prepare('DELETE FROM a9_workspace_conversation_state WHERE workspace_path = ?').run(source);
@@ -972,9 +1165,12 @@ export class A9PersistenceManager {
     })();
   }
 
-  listConversations(workspacePath: string): A9ConversationRecord[] {
+  listConversations(workspacePath: string, options: { includeDraftPresence?: boolean } = {}):
+    Array<A9ConversationRecord & { hasPersistedDraft?: boolean }> {
     return (this.db.prepare(`
-      SELECT s.*,
+      SELECT s.session_id, s.workspace_path, s.title, s.title_source, s.state,
+        s.created_at, s.updated_at, s.last_activated_at,
+        ${options.includeDraftPresence ? "typeof(s.draft_ciphertext) = 'text' AND length(CAST(s.draft_ciphertext AS BLOB)) > 0 AS has_draft," : ''}
         CASE
           WHEN EXISTS (SELECT 1 FROM a9_approvals a WHERE a.session_id = s.session_id AND a.decision = 'pending') THEN 'waiting_approval'
           WHEN EXISTS (SELECT 1 FROM a9_events e WHERE e.session_id = s.session_id AND e.event_type = 'question_pending'
@@ -989,7 +1185,10 @@ export class A9PersistenceManager {
       FROM a9_sessions s WHERE s.workspace_path = ?
       ORDER BY CASE WHEN s.state = 'active' THEN 0 ELSE 1 END,
         s.last_activated_at DESC, s.updated_at DESC
-    `).all(workspacePath) as any[]).map(conversationFromRow);
+    `).all(workspacePath) as any[]).map(row => ({
+      ...conversationFromRow(row),
+      ...(options.includeDraftPresence ? { hasPersistedDraft: row.has_draft === 1 } : {}),
+    }));
   }
 
   getActiveConversationId(workspacePath: string): string | null {
@@ -1048,6 +1247,30 @@ export class A9PersistenceManager {
     return parseConversationInbox(inbox);
   }
 
+  private buildConversationInboxSummary(
+    row: {
+      created_at: string;
+      completed_at?: string | null;
+      started_at?: string | null;
+      ended_at?: string | null;
+      approval_at?: string | null;
+      pending_at?: string | null;
+    },
+    inbox: A9ConversationInbox,
+  ): {
+    settledAt: string | null; lastVisitedAt: string | null; lastCompletedAt: string | null; lastActivityAt: string;
+  } {
+    const activity = [row.started_at, row.ended_at, row.approval_at, row.pending_at,
+      inbox.activeSince, inbox.lastVisitedAt].filter((value): value is string => typeof value === 'string' && Number.isFinite(Date.parse(value)));
+    activity.sort((left, right) => Date.parse(right) - Date.parse(left));
+    return {
+      settledAt: inbox.settledAt,
+      lastVisitedAt: inbox.lastVisitedAt,
+      lastCompletedAt: row.completed_at || null,
+      lastActivityAt: activity[0] || row.created_at,
+    };
+  }
+
   getConversationInboxSummary(sessionId: string): {
     settledAt: string | null; lastVisitedAt: string | null; lastCompletedAt: string | null; lastActivityAt: string;
   } {
@@ -1068,11 +1291,57 @@ export class A9PersistenceManager {
       ) r ON r.session_id = s.session_id
       WHERE s.session_id = ?
     `).get(sessionId, sessionId) as any;
-    const activity = [row.started_at, row.ended_at, row.approval_at, row.pending_at,
-      inbox.activeSince, inbox.lastVisitedAt].filter((value): value is string => typeof value === 'string' && Number.isFinite(Date.parse(value)));
-    activity.sort((left, right) => Date.parse(right) - Date.parse(left));
-    return { settledAt: inbox.settledAt, lastVisitedAt: inbox.lastVisitedAt,
-      lastCompletedAt: row.completed_at || null, lastActivityAt: activity[0] || row.created_at };
+    return this.buildConversationInboxSummary(row, inbox);
+  }
+
+  /**
+   * 批量读取工作区下全部会话的收件箱摘要，消除快照路径上的 1 + 2N 查询。
+   * 返回值与畸形 metadata_json 诊断行为与逐条 getConversationInboxSummary 等价。
+   */
+  listConversationInboxSummaries(workspacePath: string): Map<string, {
+    settledAt: string | null; lastVisitedAt: string | null; lastCompletedAt: string | null; lastActivityAt: string;
+  }> {
+    const rows = this.db.prepare(`
+      WITH ws AS (
+        SELECT session_id, created_at, metadata_json, state, last_activated_at, updated_at
+        FROM a9_sessions WHERE workspace_path = ?
+      )
+      SELECT ws.session_id, ws.created_at, ws.metadata_json,
+        r.completed_at, r.started_at, r.ended_at,
+        a.approval_at, e.pending_at
+      FROM ws
+      LEFT JOIN (
+        SELECT session_id,
+          MAX(CASE WHEN status = 'completed' THEN updated_at END) AS completed_at,
+          MAX(created_at) AS started_at,
+          MAX(CASE WHEN status <> 'active' THEN updated_at END) AS ended_at
+        FROM a9_runs WHERE session_id IN (SELECT session_id FROM ws) GROUP BY session_id
+      ) r ON r.session_id = ws.session_id
+      LEFT JOIN (
+        SELECT session_id, MAX(created_at) AS approval_at
+        FROM a9_approvals WHERE decision = 'pending' AND session_id IN (SELECT session_id FROM ws) GROUP BY session_id
+      ) a ON a.session_id = ws.session_id
+      LEFT JOIN (
+        SELECT session_id, MAX(created_at) AS pending_at
+        FROM a9_events WHERE event_type IN ('approval_required', 'question_pending')
+          AND session_id IN (SELECT session_id FROM ws) GROUP BY session_id
+      ) e ON e.session_id = ws.session_id
+      ORDER BY CASE WHEN ws.state = 'active' THEN 0 ELSE 1 END,
+        ws.last_activated_at DESC, ws.updated_at DESC
+    `).all(workspacePath) as any[];
+    const summaries = new Map<string, {
+      settledAt: string | null; lastVisitedAt: string | null; lastCompletedAt: string | null; lastActivityAt: string;
+    }>();
+    for (const row of rows) {
+      const metadata = safeParse(typeof row.metadata_json === 'string' ? row.metadata_json : '{}', {
+        buffer: this.diagnosticBuffer,
+        table: 'a9_sessions',
+        rowId: row.session_id,
+      });
+      const inbox = parseConversationInbox(metadata.inbox);
+      summaries.set(row.session_id, this.buildConversationInboxSummary(row, inbox));
+    }
+    return summaries;
   }
 
   private requireConversation(sessionId: string): A9ConversationRecord {
@@ -1909,6 +2178,7 @@ export class A9PersistenceManager {
     };
     // Advance by existing keys, so retention gaps do not turn a small database
     // into a scan of its historical numeric identifier space.
+    const requestKeys = this.db.prepare("SELECT id AS key FROM a9_events WHERE event_type = 'conversation.request' AND id > ? AND id <= ? ORDER BY id LIMIT ?");
     const eventKeys = this.db.prepare('SELECT id AS key FROM a9_events WHERE id > ? AND id <= ? ORDER BY id LIMIT ?');
     const checkpointKeys = this.db.prepare('SELECT turn_id AS key FROM a9_checkpoints WHERE (? IS NULL OR turn_id > ?) AND turn_id <= ? ORDER BY turn_id LIMIT ?');
     const nextUpper = (keys: { all: (...args: any[]) => unknown[] }, low: number, max: number): number | null => {
@@ -1933,7 +2203,7 @@ export class A9PersistenceManager {
     let low = 0;
     for (;;) {
       assertOpen();
-      const upper = nextUpper(eventKeys, low, maxEvent);
+      const upper = nextUpper(requestKeys, low, maxEvent);
       if (upper === null) break;
       for (const row of requestBatch.all(workspace, low, upper) as any[]) {
         if (typeof row.taskId === 'string') requestedTasks.add(`${row.sessionId}\u0000${row.taskId}`);
@@ -2183,69 +2453,626 @@ export class A9PersistenceManager {
     pidReusePossible?: boolean;
     cleanupRequired?: boolean;
   }): void {
-    this.db.prepare(`
+    const normalizedPid = fact.pid ?? null;
+    const normalizedStatus = fact.cleanupRequired === true ? 'cleanup_required' : fact.lastProbeStatus ?? null;
+    const normalizedPidReuse = fact.pidReusePossible ? 1 : 0;
+    const existing = this.db.prepare(
+      'SELECT workspace_path, pid, command, cwd, started_at, last_probe_status, pid_reuse_possible FROM a9_managed_processes WHERE handle_id = ?',
+    ).get(fact.handleId) as {
+      workspace_path: string;
+      pid: number | null;
+      command: string;
+      cwd: string;
+      started_at: string;
+      last_probe_status: string | null;
+      pid_reuse_possible: number;
+    } | undefined;
+    if (
+      existing
+      && existing.workspace_path === fact.workspacePath
+      && (existing.pid ?? null) === normalizedPid
+      && existing.command === fact.command
+      && existing.cwd === fact.cwd
+      && existing.started_at === fact.startedAt
+      && (existing.last_probe_status ?? null) === normalizedStatus
+      && existing.pid_reuse_possible === normalizedPidReuse
+    ) {
+      return;
+    }
+    const written = this.db.prepare(`
       INSERT OR REPLACE INTO a9_managed_processes
         (handle_id, workspace_path, pid, command, cwd, started_at, last_probe_status, pid_reuse_possible)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       fact.handleId,
       fact.workspacePath,
-      fact.pid ?? null,
+      normalizedPid,
       fact.command,
       fact.cwd,
       fact.startedAt,
-      fact.cleanupRequired === true ? 'cleanup_required' : fact.lastProbeStatus ?? null,
-      fact.pidReusePossible ? 1 : 0,
+      normalizedStatus,
+      normalizedPidReuse,
     );
+    // The equal-row early return above is the only legitimate zero-row write.
+    assertWrittenRows(written, 1, 'managed process fact');
   }
 
   /** Versioned owner/release events plus legacy fact update share one SQLite transaction. */
-  recordManagedOwnership(fact: Parameters<A9PersistenceManager['recordManagedProcess']>[0], ownership: {
-    schemaVersion: 1; owner: { workspace: string; conversationId: string; taskId: string; turnId: string; toolCallId: string };
-    requestId: string; ownershipState: 'owned' | 'release_intent' | 'released' | 'release_unknown'; releaseId?: string;
-    recoveryStatus?: 'running_unknown' | 'identity_mismatch' | 'exited';
-  }): void {
+  recordManagedOwnership(fact: Parameters<A9PersistenceManager['recordManagedProcess']>[0], ownership: A9ManagedOwnershipRecord,
+    options: { mode?: 'register' | 'update' | 'reconcile' } = {}): void {
     const owner = ownership.owner;
     if (ownership.schemaVersion !== 1 || !owner || Object.values(owner).some((v) => typeof v !== 'string' || !v.trim())
       || !ownership.requestId || !fact.handleId || !['owned', 'release_intent', 'released', 'release_unknown'].includes(ownership.ownershipState)
       || (ownership.ownershipState !== 'owned' && !/^[a-zA-Z0-9_-]{1,128}$/.test(ownership.releaseId ?? ''))) throw new Error('A9_MANAGED_OWNERSHIP_INVALID');
     this.db.transaction(() => {
-      const origin = this.db.prepare(`SELECT s.workspace_path, s.state FROM a9_sessions s JOIN a9_tasks t ON t.session_id=s.session_id
-        JOIN a9_turns tr ON tr.task_id=t.task_id AND tr.session_id=s.session_id
-        WHERE s.session_id=? AND t.task_id=? AND tr.turn_id=?`).get(owner.conversationId, owner.taskId, owner.turnId) as any;
-      const canonical = process.platform === 'win32' ? path.win32.resolve(fact.workspacePath.replace(/\//g, '\\')).toLowerCase() : path.posix.resolve(fact.workspacePath.replace(/\\/g, '/'));
-      if (!origin || !sameWorkspacePath(origin.workspace_path, fact.workspacePath) || owner.workspace !== canonical || origin.state !== 'active') throw new Error('A9_MANAGED_OWNER_MISMATCH');
-      const previous = this.getManagedOwnership(fact.handleId);
+      this.assertManagedOwnershipOrigin(fact.workspacePath, owner);
+      const previous = this.getManagedOwnership(fact.handleId, fact.workspacePath);
+      const stored = this.db.prepare(`SELECT workspace_path, pid, command, cwd, started_at, last_probe_status, pid_reuse_possible
+        FROM a9_managed_processes WHERE handle_id = ?`).get(fact.handleId) as {
+        workspace_path: string; pid: number | null; command: string; cwd: string;
+        started_at: string; last_probe_status: string | null; pid_reuse_possible: number;
+      } | undefined;
+      if (options.mode && options.mode !== 'register' && (!previous || !stored || stored.last_probe_status === 'user_dismissed')) {
+        throw a9PersistenceError('A9_MANAGED_OWNERSHIP_UNCONFIRMED', '持久化归属或待清理事实不存在');
+      }
       if (previous && (JSON.stringify(previous.owner) !== JSON.stringify(owner) || previous.requestId !== ownership.requestId)) throw new Error('A9_MANAGED_OWNER_IMMUTABLE');
+      if (options.mode === 'update' && stored && (!sameWorkspacePath(stored.workspace_path, fact.workspacePath)
+        || stored.started_at !== fact.startedAt || (stored.pid !== null && stored.pid !== (fact.pid ?? null)))) {
+        throw a9PersistenceError('A9_MANAGED_RECOVERY_STALE', '后台进程身份与持久事实不符');
+      }
+      if (options.mode === 'reconcile') {
+        if (ownership.ownershipState === 'released' || previous?.ownershipState !== ownership.ownershipState
+          || previous.releaseId !== ownership.releaseId) {
+          throw a9PersistenceError('A9_MANAGED_OWNERSHIP_UNCONFIRMED', '恢复探测不能确认或改变释放归属');
+        }
+        if (!stored || !sameWorkspacePath(stored.workspace_path, fact.workspacePath)
+          || stored.pid !== (fact.pid ?? null) || stored.started_at !== fact.startedAt
+          || !['starting', 'running', 'running_unknown', 'identity_mismatch', 'cleanup_required'].includes(stored.last_probe_status ?? '')) {
+          throw a9PersistenceError('A9_MANAGED_RECOVERY_STALE', '恢复探测与当前持久事实不符');
+        }
+        this.updateManagedRecoveryProbe(fact);
+        return;
+      }
       if (previous?.ownershipState === 'released' && ownership.ownershipState !== 'released') throw new Error('A9_MANAGED_RELEASE_TERMINAL');
       if (ownership.ownershipState === 'released' && !['release_intent', 'released'].includes(previous?.ownershipState ?? '')) throw new Error('A9_MANAGED_RELEASE_INTENT_MISSING');
+      if (ownership.ownershipState === 'released' && previous?.releaseId !== ownership.releaseId) throw new Error('A9_MANAGED_RELEASE_ID_MISMATCH');
+      if (ownership.ownershipState === 'released' && (fact.lastProbeStatus !== 'released' || fact.cleanupRequired === true)) {
+        throw a9PersistenceError('A9_MANAGED_OWNERSHIP_UNCONFIRMED', '释放归属缺少一致的终态事实');
+      }
+      if (previous?.ownershipState === 'released') {
+        if (stored?.last_probe_status !== 'released' || !sameWorkspacePath(stored.workspace_path, fact.workspacePath)
+          || stored.pid !== (fact.pid ?? null) || stored.started_at !== fact.startedAt
+          || stored.command !== fact.command || stored.cwd !== fact.cwd
+          || stored.pid_reuse_possible !== (fact.pidReusePossible ? 1 : 0)
+          || JSON.stringify(previous) !== JSON.stringify(ownership)) {
+          throw a9PersistenceError('A9_MANAGED_OWNERSHIP_UNCONFIRMED', '持久化释放事实不一致');
+        }
+        return;
+      }
       // An owned live process needs future cleanup; this is not a failed-cleanup status.
       // Keep the legacy residual representation for every uncertain/terminal failure.
       const storedFact = ownership.ownershipState === 'owned' && ['starting', 'running'].includes(fact.lastProbeStatus ?? '')
         ? { ...fact, cleanupRequired: false } : fact;
-      if (previous && JSON.stringify(previous) === JSON.stringify(ownership)) { this.recordManagedProcess(storedFact); return; }
       this.recordManagedProcess(storedFact);
+      if (previous && JSON.stringify(previous) === JSON.stringify(ownership)) return;
       this.insertEvent(owner.conversationId, owner.turnId, 'tool', 'managed_process_ownership', { handleId: fact.handleId, ...ownership });
     })();
   }
 
-  getManagedOwnership(handleId: string): {
-    schemaVersion: 1; owner: { workspace: string; conversationId: string; taskId: string; turnId: string; toolCallId: string };
-    requestId: string; ownershipState: 'owned' | 'release_intent' | 'released' | 'release_unknown'; releaseId?: string;
-    recoveryStatus?: 'running_unknown' | 'identity_mismatch' | 'exited';
-  } | undefined {
-    const row = this.db.prepare("SELECT id, payload_json FROM a9_events WHERE event_type='managed_process_ownership' AND json_extract(payload_json, '$.handleId')=? ORDER BY id DESC LIMIT 1").get(handleId) as any;
-    if (!row) return undefined;
-    const payload = safeParse(row.payload_json, { buffer: this.diagnosticBuffer, table: 'a9_events', rowId: row.id }) as any;
-    if (!payload || payload.schemaVersion !== 1 || !payload.owner) throw new Error('A9_MANAGED_OWNERSHIP_CORRUPT');
-    const { handleId: _handleId, ...ownership } = payload; return ownership;
+  /** Refresh a legacy recovery probe without manufacturing ownership or replacing the row. */
+  recordLegacyManagedRecoveryProbe(fact: Parameters<A9PersistenceManager['recordManagedProcess']>[0]): void {
+    this.db.transaction(() => {
+      const stored = this.db.prepare(`SELECT workspace_path, pid, started_at, last_probe_status
+        FROM a9_managed_processes WHERE handle_id = ?`).get(fact.handleId) as {
+        workspace_path: string; pid: number | null; started_at: string; last_probe_status: string | null;
+      } | undefined;
+      if (!stored || !sameWorkspacePath(stored.workspace_path, fact.workspacePath)
+        || stored.pid !== (fact.pid ?? null) || stored.started_at !== fact.startedAt
+        || !['starting', 'running', 'running_unknown', 'identity_mismatch', 'cleanup_required'].includes(stored.last_probe_status ?? '')) {
+        throw a9PersistenceError('A9_MANAGED_RECOVERY_STALE', '恢复探测与当前持久事实不符');
+      }
+      if (this.getManagedOwnership(fact.handleId, fact.workspacePath)) {
+        throw a9PersistenceError('A9_MANAGED_OWNERSHIP_UNCONFIRMED', '旧句柄的持久归属已变化');
+      }
+      this.updateManagedRecoveryProbe(fact);
+    })();
+  }
+
+  private updateManagedRecoveryProbe(fact: Parameters<A9PersistenceManager['recordManagedProcess']>[0]): void {
+    const status = fact.cleanupRequired === true ? 'cleanup_required' : fact.lastProbeStatus ?? null;
+    const reuse = fact.pidReusePossible ? 1 : 0;
+    const updated = this.db.prepare(`UPDATE a9_managed_processes SET last_probe_status = ?, pid_reuse_possible = ?
+      WHERE handle_id = ? AND (last_probe_status IS NOT ? OR pid_reuse_possible IS NOT ?)`)
+      .run(status, reuse, fact.handleId, status, reuse);
+    if (Number(updated.changes ?? 0) === 1) return;
+    // Zero rows is idempotent only when the row already holds exactly these values.
+    const row = this.db.prepare('SELECT last_probe_status, pid_reuse_possible FROM a9_managed_processes WHERE handle_id = ?')
+      .get(fact.handleId) as { last_probe_status: string | null; pid_reuse_possible: number } | undefined;
+    if (!row || (row.last_probe_status ?? null) !== status || row.pid_reuse_possible !== reuse) {
+      throw a9PersistenceError('A9_PERSISTENCE_WRITE_UNCONFIRMED', '恢复探测事实未写入预期行');
+    }
+  }
+
+  /**
+   * Terminal write for a legacy (unowned) PID fact this Runtime adopted after a
+   * restart. Only the adopted identity may settle the row: another connection may
+   * have replaced the handle row with a new PID/start time, and that new fact must
+   * never be overwritten with the old identity's terminal state.
+   */
+  settleRecoveredManagedProcess(fact: Parameters<A9PersistenceManager['recordManagedProcess']>[0]): void {
+    const status = fact.lastProbeStatus ?? '';
+    if (!['exited', 'stopped', 'failed'].includes(status) || fact.cleanupRequired === true) {
+      throw a9PersistenceError('A9_MANAGED_RECOVERY_STALE', '恢复事实缺少 Runner 确认的终态');
+    }
+    const reuse = fact.pidReusePossible ? 1 : 0;
+    this.db.transaction(() => {
+      const stored = this.db.prepare(`SELECT workspace_path, pid, started_at, last_probe_status, pid_reuse_possible
+        FROM a9_managed_processes WHERE handle_id = ?`).get(fact.handleId) as {
+        workspace_path: string; pid: number | null; started_at: string; last_probe_status: string | null; pid_reuse_possible: number;
+      } | undefined;
+      const sameIdentity = Boolean(stored) && sameWorkspacePath(stored!.workspace_path, fact.workspacePath)
+        && stored!.pid === (fact.pid ?? null) && stored!.started_at === fact.startedAt;
+      if (!sameIdentity) {
+        throw a9PersistenceError('A9_MANAGED_RECOVERY_STALE', '恢复事实已被另一身份取代或不再处于活动状态');
+      }
+      // Ownership is verified before both the idempotent success and the terminal
+      // UPDATE: a damaged record throws its own error, and any ownership at all
+      // (another connection may have owned this identity while it is still running)
+      // means this is no longer a legacy handle that a legacy settle may overwrite.
+      if (this.getManagedOwnership(fact.handleId, fact.workspacePath)) {
+        throw a9PersistenceError('A9_MANAGED_OWNERSHIP_UNCONFIRMED', '旧句柄的持久归属已变化');
+      }
+      if (stored!.last_probe_status === status && stored!.pid_reuse_possible === reuse) return;
+      if (!['starting', 'running', 'running_unknown', 'identity_mismatch'].includes(stored!.last_probe_status ?? '')) {
+        throw a9PersistenceError('A9_MANAGED_RECOVERY_STALE', '恢复事实已被另一身份取代或不再处于活动状态');
+      }
+      const updated = this.db.prepare(`UPDATE a9_managed_processes SET last_probe_status = ?, pid_reuse_possible = ?
+        WHERE handle_id = ? AND pid IS ? AND started_at = ? AND last_probe_status = ?`)
+        .run(status, reuse, fact.handleId, stored!.pid, stored!.started_at, stored!.last_probe_status);
+      assertWrittenRows(updated, 1, 'recovered managed process terminal fact');
+    })();
+  }
+
+  private assertManagedOwnershipOrigin(workspacePath: string, owner: A9ManagedOwnershipRecord['owner'], {
+    requireActive = true, previousWorkspace,
+  }: { requireActive?: boolean; previousWorkspace?: string } = {}): void {
+    const origin = this.db.prepare(`SELECT s.workspace_path, s.state FROM a9_sessions s JOIN a9_tasks t ON t.session_id=s.session_id
+      JOIN a9_turns tr ON tr.task_id=t.task_id AND tr.session_id=s.session_id
+      WHERE s.session_id=? AND t.task_id=? AND tr.turn_id=?`).get(owner.conversationId, owner.taskId, owner.turnId) as any;
+    const canonical = process.platform === 'win32' ? path.win32.resolve(workspacePath.replace(/\//g, '\\')).toLowerCase() : path.posix.resolve(workspacePath.replace(/\\/g, '/'));
+    const workspaceMatches = owner.workspace === canonical
+      || (previousWorkspace !== undefined && sameWorkspacePath(owner.workspace, previousWorkspace));
+    if (!origin || !sameWorkspacePath(origin.workspace_path, workspacePath) || !workspaceMatches
+      || (requireActive && origin.state !== 'active')) {
+      throw a9PersistenceError('A9_MANAGED_OWNER_MISMATCH', '无法验证归属对应的工作区、会话与任务');
+    }
+  }
+
+  getManagedOwnership(handleId: string, workspacePath?: string): A9ManagedOwnershipRecord | undefined {
+    return this.readManagedOwnerships([handleId], undefined, workspacePath).get(handleId);
+  }
+
+  private parseManagedOwnership(row: {
+    id: number; payload_json: string; session_id: string; turn_id: string | null; handle_id: string | null; turn_valid: number;
+  }): A9ManagedOwnershipRecord {
+    const payload = safeParse(row.payload_json, {
+      buffer: this.diagnosticBuffer, table: 'a9_events', rowId: row.id,
+    });
+    const owner = payload?.owner as Record<string, unknown> | undefined;
+    const hasText = (value: unknown) => typeof value === 'string' && Boolean(value.trim());
+    if (!payload || payload.schemaVersion !== 1 || payload.handleId !== row.handle_id || row.turn_valid !== 1
+      || !owner || typeof owner !== 'object' || Array.isArray(owner)) {
+      throw a9PersistenceError('A9_MANAGED_OWNERSHIP_CORRUPT', '归属记录格式不受支持');
+    }
+    if (!['workspace', 'conversationId', 'taskId', 'turnId', 'toolCallId'].every(key => hasText(owner[key]))
+      || !Object.values(owner).every(hasText) || !hasText(payload.requestId)
+      || typeof payload.ownershipState !== 'string'
+      || !['owned', 'release_intent', 'released', 'release_unknown'].includes(payload.ownershipState)
+      || (payload.ownershipState !== 'owned'
+        && (typeof payload.releaseId !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(payload.releaseId)))
+      || (payload.recoveryStatus !== undefined
+        && (typeof payload.recoveryStatus !== 'string'
+          || !['running_unknown', 'identity_mismatch', 'exited'].includes(payload.recoveryStatus)))) {
+      throw a9PersistenceError('A9_MANAGED_OWNERSHIP_UNCONFIRMED', '归属未确认');
+    }
+    if (owner.conversationId !== row.session_id || owner.turnId !== row.turn_id) {
+      throw a9PersistenceError('A9_MANAGED_HANDLE_WRONG_OWNER', '归属与事件来源不符');
+    }
+    const { handleId: _handleId, ...ownership } = payload;
+    return ownership as unknown as A9ManagedOwnershipRecord;
+  }
+
+  /** Only the latest event per requested handle and uncertain scope is returned from SQLite. */
+  listManagedOwnerships(handleIds: string[], onError?: (handleId: string, error: Error) => void, workspacePath?: string):
+    Map<string, A9ManagedOwnershipRecord> {
+    return this.readManagedOwnerships(handleIds, onError, workspacePath);
+  }
+
+  private readManagedOwnerships(handleIds: string[], onError?: (handleId: string, error: Error) => void, workspacePath?: string):
+    Map<string, A9ManagedOwnershipRecord> {
+    const targets = [...new Set(handleIds)];
+    const ownerships = new Map<string, A9ManagedOwnershipRecord>();
+    if (!targets.length) return ownerships;
+    const ids = JSON.stringify(targets);
+    const ownershipCandidates = `
+      WITH candidates AS (
+        SELECT id, session_id, turn_id, kind,
+          CASE WHEN json_valid(payload_json) THEN CASE WHEN json_type(payload_json, '$.handleId') = 'text'
+            THEN NULLIF(json_extract(payload_json, '$.handleId'), '') END END AS handle_id
+        FROM a9_events WHERE event_type = 'managed_process_ownership'
+      ), relevant AS (
+        SELECT id, handle_id,
+          (SELECT workspace_path FROM a9_sessions WHERE session_id = candidates.session_id) AS workspace_path,
+          (SELECT json_extract(s.metadata_json, '$.workdir.previousWorkspace') FROM a9_sessions s
+            WHERE s.session_id = candidates.session_id AND json_valid(s.metadata_json)) AS previous_workspace,
+          (SELECT json_extract(s.metadata_json, '$.workdir.workspaceHistory') FROM a9_sessions s
+            WHERE s.session_id = candidates.session_id AND json_valid(s.metadata_json)) AS workspace_history,
+          (SELECT ${WORKDIR_ORIGIN_SQL} FROM a9_sessions s WHERE s.session_id = candidates.session_id) AS workdir_origin
+        FROM candidates
+        -- Only tool audit events are ownership evidence (ADR-0343); a non-tool record,
+        -- with or without a handleId, is neither evidence nor damaged evidence.
+        WHERE kind = 'tool' AND (handle_id IS NULL OR handle_id IN (SELECT value FROM json_each(?)))
+      )`;
+    // Every relevant record, ascending. Grouping is by canonical workspace in JS:
+    // equivalent Windows spellings of one workspace are one scope (ADR-0344), so a
+    // second spelling can never start its own "first" record and re-own a handle.
+    const rows = this.db.prepare(`${ownershipCandidates}
+      SELECT relevant.handle_id, relevant.workspace_path, relevant.previous_workspace, relevant.workspace_history,
+        relevant.workdir_origin, e.id, e.payload_json, e.session_id, e.turn_id,
+        EXISTS (SELECT 1 FROM a9_turns t WHERE t.turn_id = e.turn_id AND t.session_id = e.session_id) AS turn_valid
+      FROM relevant JOIN a9_events e ON e.id = relevant.id ORDER BY e.id ASC`).all(ids) as Array<{
+      handle_id: string | null; workspace_path: string | null; previous_workspace: unknown; workspace_history: unknown;
+      workdir_origin: unknown; id: number; payload_json: string; session_id: string; turn_id: string | null; turn_valid: number }>;
+    const byHandle = new Map<string | null, typeof rows>();
+    // Damaged (invalid JSON) records attributed to a handle only through its salvaged handleId.
+    const recoveredRows = new WeakSet<(typeof rows)[number]>();
+    const group = (key: string | null, row: (typeof rows)[number]) => {
+      const candidates = byHandle.get(key);
+      if (candidates) candidates.push(row);
+      else byHandle.set(key, [row]);
+    };
+    for (const row of rows) {
+      group(row.handle_id, row);
+      // Round 15 (P1): SQLite reads no handleId from invalid (e.g. truncated) JSON, yet a
+      // complete top-level `"handleId":"…"` may survive. Such a record is that handle's own
+      // candidate, so its damage fails closed (A9_MANAGED_OWNERSHIP_CORRUPT) even when the
+      // truncation hid the owner workspace. It also stays in the unattributable group.
+      // Round 17 (P1): a handleId cut before its closing quote names each requested handle
+      // it is (a non-empty prefix of) as well.
+      if (row.handle_id === null) {
+        for (const recovered of damagedPayloadHandleTargets(row.payload_json, targets)) {
+          const attributed = { ...row, handle_id: recovered };
+          recoveredRows.add(attributed);
+          group(recovered, attributed);
+        }
+      }
+    }
+    const workspaces = workspacePath === undefined && rows.length
+      ? new Map((this.db.prepare(`SELECT handle_id, workspace_path FROM a9_managed_processes
+          WHERE handle_id IN (SELECT value FROM json_each(?))`).all(ids) as Array<{ handle_id: string; workspace_path: string }>)
+        .map(row => [row.handle_id, row.workspace_path]))
+      : null;
+    for (const handleId of targets) {
+      try {
+        const scope = workspacePath ?? workspaces?.get(handleId);
+        const belongsToScope = (candidate: (typeof rows)[number]) =>
+          !scope || !candidate.workspace_path || sameWorkspacePath(scope, candidate.workspace_path);
+        // Round 19 (P1): a conversation rebound elsewhere came from the workspace in its
+        // `workdir.previousWorkspace`; its unattributable records stay damage of that scope.
+        // Its complete records keep their foreign-origin verification below.
+        // Round 20 (P1): an unattributable record is damage of the workspace its conversation
+        // was bound to when it was written (`workdir.workspaceHistory` event-id segments): an
+        // early record stays damage of A across A -> B -> C and a default-directory rename,
+        // while a record written after the rebind (in B) is never damage of A.
+        const writtenInScope = (candidate: (typeof rows)[number]) => !scope
+          || managedEventWrittenIn(candidate, candidate.workspace_path, scope);
+        const candidates = byHandle.get(handleId);
+        const scoped = candidates?.filter(belongsToScope) ?? [];
+        const row = scoped[scoped.length - 1];
+        // Round 13 (P1): a record without a usable handleId whose payload still names
+        // this workspace as owner (e.g. the original record of a conversation rebound
+        // elsewhere) is damaged evidence of this scope, whatever its session points to now.
+        const namesScope = (candidate: (typeof rows)[number]) =>
+          Boolean(scope) && namesManagedOwnerWorkspace(candidate.payload_json, scope!);
+        // Round 19 (P1): an unattributable record of this scope older than the first in-scope
+        // record and of another conversation (e.g. the only record of a rebound conversation,
+        // cut before its handleId) is never shadowed by that later conversation: it fails closed.
+        // Older damage of the anchor's own conversation keeps the earlier sibling semantics.
+        const malformed = byHandle.get(null)
+          ?.filter(candidate => writtenInScope(candidate) || namesScope(candidate))
+          .reverse().find(candidate => !row || candidate.id > row.id
+            || (candidate.id < scoped[0].id && candidate.session_id !== scoped[0].session_id));
+        if (malformed) {
+          safeParse(malformed.payload_json, { buffer: this.diagnosticBuffer, table: 'a9_events', rowId: malformed.id });
+          throw a9PersistenceError('A9_MANAGED_OWNERSHIP_CORRUPT', '无法确认归属记录的句柄');
+        }
+        if (row) {
+          // Round 17 (P1): a complete record of another session in this scope never shadows
+          // damaged evidence of this handle from outside it: a record of a session that names
+          // this workspace as owner (e.g. the original conversation, rebound elsewhere) or that
+          // itself names this workspace. Such damage fails closed whatever comes later.
+          // Round 18 (P1): a damaged record attributed to this handle by its salvaged handleId
+          // is its own damage whatever its session -- also the only (deduplicated) record of a
+          // conversation rebound elsewhere, which neither names this workspace nor shares a
+          // session with the scope. A valid foreign record naming the handle stays no evidence.
+          const scopeSessions = new Set(candidates!.filter(candidate => belongsToScope(candidate) || namesScope(candidate))
+            .map(candidate => candidate.session_id));
+          for (const candidate of candidates!) {
+            if (belongsToScope(candidate)
+              || !(recoveredRows.has(candidate) || namesScope(candidate) || scopeSessions.has(candidate.session_id))) continue;
+            try { this.parseManagedOwnership(candidate); }
+            catch (error) {
+              if ((error as { code?: unknown }).code === 'A9_MANAGED_OWNERSHIP_CORRUPT') throw error;
+            }
+          }
+          // The first in-scope record is the owned anchor; every later record keeps
+          // its owner five-tuple and requestId. Arrival order is not authority.
+          const anchor = this.parseManagedOwnership(scoped[0]);
+          if (anchor.ownershipState !== 'owned') {
+            throw a9PersistenceError('A9_MANAGED_OWNERSHIP_UNCONFIRMED', '缺少最初有效的持久归属记录');
+          }
+          let latest = anchor;
+          for (const later of scoped.slice(1)) {
+            latest = this.parseManagedOwnership(later);
+            if (!sameManagedOwner(anchor.owner, latest.owner) || anchor.requestId !== latest.requestId) {
+              throw a9PersistenceError('A9_MANAGED_OWNERSHIP_UNCONFIRMED', '归属记录与最初归属不一致');
+            }
+          }
+          ownerships.set(handleId, latest);
+        } else if (candidates?.length) {
+          // Only on a foreign-only claim, check older candidates too. A newer
+          // malformed claim must not obscure a previously verified origin.
+          // Round 12 (P1): only an origin mismatch (an unrelated foreign claim) is
+          // ignorable. A claim that cannot be parsed -- e.g. the original record of a
+          // rebound conversation with a damaged schemaVersion -- is damaged evidence
+          // for this handle and fails closed; it is never read as "no ownership".
+          let damaged: Error | undefined;
+          for (const candidate of [...candidates].reverse()) {
+            if (!candidate.workspace_path || belongsToScope(candidate)) continue;
+            let claim: A9ManagedOwnershipRecord;
+            try { claim = this.parseManagedOwnership(candidate); }
+            catch (error) { damaged ??= error as Error; continue; }
+            try {
+              this.assertManagedOwnershipOrigin(candidate.workspace_path!, claim.owner, {
+                requireActive: false, previousWorkspace: scope,
+              });
+            }
+            catch (error) {
+              // Round 13 (P1): only a claim naming another workspace is an unrelated
+              // foreign claim. A claim that names this workspace but whose origin cannot
+              // be verified is this handle's own damaged provenance: fail closed.
+              if (error instanceof Error && 'code' in error && error.code === 'A9_MANAGED_OWNER_MISMATCH'
+                && !namesScope(candidate) && !(scope && sameWorkspacePath(claim.owner.workspace, scope))) continue;
+              throw error;
+            }
+            throw a9PersistenceError('A9_MANAGED_HANDLE_WRONG_OWNER', '句柄属于另一工作区');
+          }
+          if (damaged) throw damaged;
+        }
+      } catch (error) {
+        if (!onError) throw error;
+        onError(handleId, error as Error);
+      }
+    }
+    return ownerships;
+  }
+
+  /**
+   * ADR-0343: terminal released/user_dismissed facts are verified from their
+   * stable history, not from the conversation's current workspace binding.
+   * One query returns every tool ownership event of the requested handles plus
+   * malformed ownership events, ascending.
+   */
+  private readManagedOwnershipHistories(handleIds: string[]) {
+    const rows = this.db.prepare(`
+      SELECT id, session_id, turn_id, payload_json, handle_id, turn_valid, session_known, session_workspace, previous_workspace,
+        workspace_history, workdir_origin FROM (
+        SELECT e.id, e.session_id, e.turn_id, e.payload_json, e.kind,
+          CASE WHEN json_valid(e.payload_json) THEN CASE WHEN json_type(e.payload_json, '$.handleId') = 'text'
+            THEN NULLIF(json_extract(e.payload_json, '$.handleId'), '') END END AS handle_id,
+          EXISTS (SELECT 1 FROM a9_turns t WHERE t.turn_id = e.turn_id AND t.session_id = e.session_id) AS turn_valid,
+          EXISTS (SELECT 1 FROM a9_sessions s WHERE s.session_id = e.session_id) AS session_known,
+          (SELECT s.workspace_path FROM a9_sessions s WHERE s.session_id = e.session_id) AS session_workspace,
+          (SELECT json_extract(s.metadata_json, '$.workdir.previousWorkspace') FROM a9_sessions s
+            WHERE s.session_id = e.session_id AND json_valid(s.metadata_json)) AS previous_workspace,
+          (SELECT json_extract(s.metadata_json, '$.workdir.workspaceHistory') FROM a9_sessions s
+            WHERE s.session_id = e.session_id AND json_valid(s.metadata_json)) AS workspace_history,
+          (SELECT ${WORKDIR_ORIGIN_SQL} FROM a9_sessions s WHERE s.session_id = e.session_id) AS workdir_origin
+        FROM a9_events e WHERE e.event_type = 'managed_process_ownership')
+      WHERE kind = 'tool' AND (handle_id IS NULL OR handle_id IN (SELECT value FROM json_each(?)))
+      ORDER BY id ASC
+    `).all(JSON.stringify(handleIds)) as Array<{ id: number; session_id: string; turn_id: string | null; payload_json: string;
+      handle_id: string | null; turn_valid: number; session_known: number; session_workspace: string | null;
+      previous_workspace: unknown; workspace_history: unknown; workdir_origin: unknown; recovered_handle_ids?: string[] }>;
+    const byHandle = new Map<string, typeof rows>();
+    const malformed: typeof rows = [];
+    for (const row of rows) {
+      if (row.handle_id === null) {
+        // Round 16 (P1): exactly like the scoped reads (Round 15), a damaged record whose
+        // top-level handleId survives is this handle's own history entry, wherever it sits
+        // in that history. It joins the handle's list (its parse fails closed) and stays
+        // in the unattributable group, marked with the handle it names.
+        // Round 17 (P1): including a handleId cut before its closing quote.
+        const attributed = damagedPayloadHandleTargets(row.payload_json, handleIds);
+        malformed.push({ ...row, recovered_handle_ids: attributed });
+        for (const handleId of attributed) {
+          const list = byHandle.get(handleId) ?? [];
+          list.push({ ...row, handle_id: handleId, recovered_handle_ids: attributed });
+          byHandle.set(handleId, list);
+        }
+        continue;
+      }
+      const list = byHandle.get(row.handle_id) ?? [];
+      list.push(row);
+      byHandle.set(row.handle_id, list);
+    }
+    return { byHandle, malformed };
+  }
+
+  /**
+   * The first valid tool record is the owned anchor. Every later record keeps its
+   * owner and requestId; the session/task/turn origin must still exist, and the
+   * anchor workspace must be the fact row's own workspace (stable source).
+   */
+  private verifyStableManagedHistory(row: { handle_id: string; workspace_path: string },
+    histories: ReturnType<A9PersistenceManager['readManagedOwnershipHistories']>, { requireOwnedAnchor = true } = {}) {
+    // ADR-0346: a record is a source of this fact's history only when it comes from an
+    // unknown session, a session of the fact's own workspace, or names the fact's own
+    // workspace as owner (the ADR-0343 relink context). A record of another workspace
+    // that merely names the same handleId is neither anchor nor damage.
+    const events = (histories.byHandle.get(row.handle_id) ?? []).filter(event => event.session_workspace === null
+      || sameWorkspacePath(event.session_workspace, row.workspace_path)
+      || namesManagedOwnerWorkspace(event.payload_json, row.workspace_path));
+    const parsed = events.map(event => ({ id: event.id, record: this.parseManagedOwnership(event) }));
+    const anchor = parsed[0]?.record;
+    if (!anchor || (requireOwnedAnchor && anchor.ownershipState !== 'owned')) {
+      throw a9PersistenceError('A9_MANAGED_OWNERSHIP_UNCONFIRMED', '缺少最初有效的持久归属记录');
+    }
+    if (!sameWorkspacePath(anchor.owner.workspace, row.workspace_path)) {
+      throw a9PersistenceError('A9_MANAGED_HANDLE_WRONG_OWNER', '最初归属与托管事实工作区不符');
+    }
+    const origin = this.db.prepare(`SELECT 1 FROM a9_sessions s JOIN a9_tasks t ON t.session_id=s.session_id
+      JOIN a9_turns tr ON tr.task_id=t.task_id AND tr.session_id=s.session_id
+      WHERE s.session_id=? AND t.task_id=? AND tr.turn_id=?`).get(anchor.owner.conversationId, anchor.owner.taskId, anchor.owner.turnId);
+    if (!origin) throw a9PersistenceError('A9_MANAGED_OWNER_MISMATCH', '无法验证最初归属的会话与任务');
+    for (const { record } of parsed) {
+      if (!sameManagedOwner(record.owner, anchor.owner) || record.requestId !== anchor.requestId) {
+        throw a9PersistenceError('A9_MANAGED_OWNERSHIP_UNCONFIRMED', '归属记录与最初归属不一致');
+      }
+    }
+    const latestId = parsed[parsed.length - 1].id;
+    // Unattributable records of the anchor session, or of an unknown session, newer
+    // than the history keep it fail-closed exactly like the scoped latest read.
+    // Round 16 (P1): a damaged record naming this handle is damage of its history at any
+    // position -- an older one followed by complete records is never skipped, even when
+    // the truncation hid the owner workspace of a conversation rebound elsewhere.
+    // Round 17 (P1): a malformed record of the anchor's own conversation and turn (or with no
+    // turn) is damage of this history at any position, even when no handleId is readable.
+    // Round 18 (P1): a damaged record naming this handle is its damage whatever its session
+    // (e.g. the only record of a conversation rebound elsewhere, with a later anchor of another).
+    // Round 19 (P1): an unattributable record of this workspace (an unknown session, a session
+    // of this workspace or rebound from it, or a payload naming it) older than the anchor and of
+    // another conversation is damage too: a later conversation can never be confirmed as the
+    // original anchor over it.
+    // Round 20 (P1): "of this workspace" means written while its conversation was bound to it
+    // (`workdir.workspaceHistory` event-id segments), not its current or last previous binding:
+    // a record of A survives A -> B -> C and a rename, one written in B is never damage of A.
+    const malformedInScope = (event: (typeof histories.malformed)[number]) => event.session_known !== 1
+      || managedEventWrittenIn(event, event.session_workspace, row.workspace_path)
+      || namesManagedOwnerWorkspace(event.payload_json, row.workspace_path);
+    // Round 21 (P1): an anonymous record (no handle of this history readable) is damage of this
+    // workspace only when written in it: once the anchor's conversation is rebound elsewhere, its
+    // newer (or turn-less) records there are never damage of a history kept in this workspace.
+    // Round 22 (P1): the anchor's conversation was active in this workspace, so its anonymous
+    // record is excluded only when well-formed segments prove it was written outside. A legacy
+    // rebind (no segments), damaged segments or damaged session metadata prove nothing: fail closed.
+    const provenOutside = (event: (typeof histories.malformed)[number]) => {
+      const segments = parseWorkspaceHistory(event.workspace_history);
+      return Array.isArray(segments) && segments.length > 0
+        && !managedEventWrittenIn(event, event.session_workspace, row.workspace_path);
+    };
+    // Round 23 (P1): a record is attributable to this history only when it is in scope or not
+    // proven written outside this workspace. (1) A record whose salvaged (possibly prefix-only,
+    // e.g. `sh-`) handleId names this handle but that segments prove was written in another
+    // workspace is that workspace's record, never damage here (ADR-0346). (2) A malformed record
+    // of the anchor's own conversation that is attributable is damage at any position and of
+    // any turn: an older record of another turn written in A is not skipped.
+    const attributable = (event: (typeof histories.malformed)[number]) => malformedInScope(event) || !provenOutside(event);
+    const damaged = histories.malformed.find(event => (event.recovered_handle_ids?.includes(row.handle_id) && attributable(event))
+      || (malformedInScope(event) && (
+        (event.id < parsed[0].id && event.session_id !== events[0].session_id)
+        || (event.id > latestId && event.session_known !== 1)))
+      || (event.session_id === anchor.owner.conversationId && attributable(event)));
+    if (damaged) {
+      safeParse(damaged.payload_json, { buffer: this.diagnosticBuffer, table: 'a9_events', rowId: damaged.id });
+      throw a9PersistenceError('A9_MANAGED_OWNERSHIP_CORRUPT', '无法确认归属记录的句柄');
+    }
+    return { anchor, records: parsed.map(item => item.record), latest: parsed[parsed.length - 1].record };
+  }
+
+  /** released: owned anchor -> release_intent(R) -> released(R), all one identity. */
+  private verifyManagedReleaseHistory(row: { handle_id: string; workspace_path: string },
+    histories: ReturnType<A9PersistenceManager['readManagedOwnershipHistories']>): A9ManagedOwnershipRecord {
+    const { records, latest } = this.verifyStableManagedHistory(row, histories);
+    const receiptIndex = records.findIndex(record => record.ownershipState === 'released');
+    const receipt = records[receiptIndex];
+    const intent = records[receiptIndex - 1];
+    if (!receipt || latest.ownershipState !== 'released' || !intent || intent.ownershipState !== 'release_intent'
+      || intent.releaseId !== receipt.releaseId
+      || records.slice(receiptIndex).some(record => JSON.stringify(record) !== JSON.stringify(receipt))) {
+      throw a9PersistenceError('A9_MANAGED_OWNERSHIP_UNCONFIRMED', '释放审计链不完整或不一致');
+    }
+    return latest;
+  }
+
+  /** Recovery revision as it was when the row was still the pending cleanup fact. */
+  private managedRecoveryRevision(row: any, ownership: A9ManagedOwnershipRecord, lastProbeStatus = row.last_probe_status) {
+    return crypto.createHash('sha256').update(JSON.stringify({ row: { ...row, last_probe_status: lastProbeStatus }, ownership }), 'utf8').digest('hex');
+  }
+
+  /**
+   * Latest tool disposition record of a handle, before verification. Records are
+   * first restricted to trusted sources and only then is the latest chosen, so a
+   * record of another workspace (damaged or carrying only this handleId) can neither
+   * fail this read nor shadow the legitimate disposition. Trusted sources are the
+   * handle's stable owner session (its anchor survives a registry relink, ADR-0343),
+   * a session of this fact's workspace, and no known session. A trusted
+   * unattributable tool record newer than the match stays fail-closed.
+   */
+  private readManagedDispositionRow(handleId: string, ownerSessionId: string | undefined = this.managedAnchorSession(handleId)) {
+    const rows = this.db.prepare(`SELECT id, session_id, turn_id, payload_json, handle_id, session_workspace FROM (
+        SELECT e.id, e.session_id, e.turn_id, e.payload_json,
+          CASE WHEN json_valid(e.payload_json) THEN CASE WHEN json_type(e.payload_json, '$.handleId') = 'text'
+            THEN NULLIF(json_extract(e.payload_json, '$.handleId'), '') END END AS handle_id,
+          (SELECT s.workspace_path FROM a9_sessions s WHERE s.session_id = e.session_id) AS session_workspace
+        FROM a9_events e WHERE e.event_type = 'managed_process_disposition' AND e.kind = 'tool')
+      WHERE handle_id IS NULL OR handle_id = ? ORDER BY id DESC`).all(handleId) as Array<{ id: number; session_id: string;
+      turn_id: string | null; payload_json: string; handle_id: string | null; session_workspace: string | null }>;
+    const fact = this.db.prepare('SELECT workspace_path FROM a9_managed_processes WHERE handle_id = ?').get(handleId) as
+      { workspace_path: string } | undefined;
+    const trusted = (row: (typeof rows)[number]) => row.session_workspace === null
+      || (ownerSessionId !== undefined && row.session_id === ownerSessionId)
+      || (fact !== undefined && sameWorkspacePath(row.session_workspace, fact.workspace_path));
+    const match = rows.find(row => row.handle_id === handleId && trusted(row));
+    const damaged = rows.find(row => row.handle_id === null && (!match || row.id > match.id) && trusted(row));
+    if (damaged) {
+      safeParse(damaged.payload_json, { buffer: this.diagnosticBuffer, table: 'a9_events', rowId: damaged.id });
+      throw a9PersistenceError('A9_MANAGED_DISPOSITION_UNCONFIRMED', '本工作区的处置审计记录受损');
+    }
+    return match && { id: match.id, session_id: match.session_id, turn_id: match.turn_id, payload_json: match.payload_json };
+  }
+
+  /**
+   * A9-34: a user_dismissed fact is settled only by its own tool disposition record,
+   * bound to the original owner/requestId, PID, start time and the pre-dismissal
+   * revision. Changing the status text alone settles nothing.
+   */
+  private verifyManagedDisposition(row: any, ownership: A9ManagedOwnershipRecord) {
+    const event = this.readManagedDispositionRow(row.handle_id, ownership.owner.conversationId);
+    const payload = event && safeParse(event.payload_json, { buffer: this.diagnosticBuffer, table: 'a9_events', rowId: event.id }) as any;
+    if (!event || !payload || payload.schemaVersion !== 1 || payload.disposition !== 'user_attested_after_restart'
+      || payload.handleId !== row.handle_id || ownership.ownershipState !== 'owned'
+      || event.session_id !== ownership.owner.conversationId || event.turn_id !== ownership.owner.turnId
+      || !sameManagedOwner(payload.owner, ownership.owner) || payload.requestId !== ownership.requestId
+      || payload.startedAt !== row.started_at || !Number.isSafeInteger(row.pid) || row.pid <= 0
+      || payload.pidProbe?.pid !== row.pid || payload.pidProbe?.status !== 'absent'
+      || !Number.isFinite(Date.parse(payload.pidProbe?.checkedAt))
+      || typeof payload.recoveryRevision !== 'string' || !/^[0-9a-f]{64}$/.test(payload.recoveryRevision)
+      || payload.recoveryRevision !== this.managedRecoveryRevision(row, ownership, 'cleanup_required')) {
+      throw a9PersistenceError('A9_MANAGED_DISPOSITION_UNCONFIRMED', '已处置事实缺少一致的处置审计');
+    }
+    return { ...payload, eventId: Number(event.id) } as Record<string, any> & { eventId: number };
   }
 
   /** 摘要绑定原始行和完整归属；刷新相同事实不推进 revision。 */
   getManagedProcessRecoveryIdentity(handleId: string) {
     const row = this.db.prepare('SELECT * FROM a9_managed_processes WHERE handle_id=?').get(handleId) as any;
     if (!row) throw a9PersistenceError('A9_MANAGED_HANDLE_UNKNOWN', '恢复事实不存在');
-    const ownership = this.getManagedOwnership(handleId);
+    return this.managedRecoveryIdentity(row, this.getManagedOwnership(handleId, row.workspace_path));
+  }
+
+  /** Same identity and revision from a row and ownership already read in one batch. */
+  private managedRecoveryIdentity(row: any, ownership: A9ManagedOwnershipRecord | undefined) {
     const owner = ownership?.owner;
     if (!owner || !['workspace', 'conversationId', 'taskId', 'turnId', 'toolCallId'].every((key) =>
       typeof owner[key as keyof typeof owner] === 'string' && owner[key as keyof typeof owner].trim())
@@ -2260,8 +3087,41 @@ export class A9PersistenceManager {
       recoveryRevision: crypto.createHash('sha256').update(JSON.stringify({ row, ownership }), 'utf8').digest('hex') };
   }
 
+  /**
+   * Session of the first tool ownership record that is a credential of this fact:
+   * a complete `owned` record whose owner workspace is the fact row's own workspace
+   * and whose session/turn origin exists (ADR-0343 relink keeps it valid). A record
+   * that only names the same handleId, or one owned by another workspace, is never
+   * an anchor and cannot widen the trusted disposition sources (ADR-0346).
+   */
+  private managedAnchorSession(handleId: string): string | undefined {
+    const fact = this.db.prepare('SELECT workspace_path FROM a9_managed_processes WHERE handle_id = ?').get(handleId) as
+      { workspace_path: string } | undefined;
+    if (!fact) return undefined;
+    const rows = this.db.prepare(`SELECT e.id, e.session_id, e.turn_id, e.payload_json, ? AS handle_id,
+        EXISTS (SELECT 1 FROM a9_turns t WHERE t.turn_id = e.turn_id AND t.session_id = e.session_id) AS turn_valid
+      FROM a9_events e WHERE e.event_type = 'managed_process_ownership' AND e.kind = 'tool'
+        AND json_valid(e.payload_json) AND json_type(e.payload_json, '$.handleId') = 'text' AND json_extract(e.payload_json, '$.handleId') = ?
+      ORDER BY e.id ASC`).all(handleId, handleId) as Array<{ id: number; session_id: string; turn_id: string | null;
+      payload_json: string; handle_id: string; turn_valid: number }>;
+    for (const row of rows) {
+      let record: A9ManagedOwnershipRecord;
+      try { record = this.parseManagedOwnership(row); }
+      catch (error) {
+        if (error instanceof Error && 'code' in error && String(error.code).startsWith('A9_MANAGED_')) continue;
+        throw error;
+      }
+      if (record.ownershipState !== 'owned' || !sameWorkspacePath(record.owner.workspace, fact.workspace_path)) continue;
+      const origin = this.db.prepare(`SELECT 1 FROM a9_tasks t JOIN a9_turns tr ON tr.task_id = t.task_id AND tr.session_id = t.session_id
+        WHERE t.session_id = ? AND t.task_id = ? AND tr.turn_id = ?`).get(row.session_id, record.owner.taskId, record.owner.turnId);
+      if (origin) return row.session_id;
+    }
+    return undefined;
+  }
+
+  /** Latest tool disposition record as stored; listManagedProcesses verifies it before it settles a fact. */
   getManagedProcessDisposition(handleId: string): (Record<string, any> & { eventId: number }) | undefined {
-    const row = this.db.prepare("SELECT id, payload_json FROM a9_events WHERE event_type='managed_process_disposition' AND json_extract(payload_json, '$.handleId')=? ORDER BY id DESC LIMIT 1").get(handleId) as any;
+    const row = this.readManagedDispositionRow(handleId);
     if (!row) return undefined;
     return { ...(safeParse(row.payload_json, { buffer: this.diagnosticBuffer, table: 'a9_events', rowId: row.id }) as Record<string, any>), eventId: Number(row.id) };
   }
@@ -2279,8 +3139,16 @@ export class A9PersistenceManager {
       if (current.owner.workspace !== input.workspace || current.owner.conversationId !== input.conversationId) throw a9PersistenceError('A9_MANAGED_HANDLE_WRONG_OWNER', '仅允许当前工作区及对话');
       const previous = this.getManagedProcessDisposition(input.handleId);
       if (previous) {
-        if (previous.recoveryRevision !== input.recoveryRevision || current.lastProbeStatus !== 'user_dismissed'
-          || JSON.stringify(previous.owner) !== JSON.stringify(current.owner) || previous.requestId !== current.requestId
+        // Idempotent retry: the same original revision, and the stored record must
+        // still verify against the persisted owner, PID, start time and status.
+        let verified: Record<string, any> | undefined;
+        try {
+          const row = this.db.prepare('SELECT * FROM a9_managed_processes WHERE handle_id=?').get(input.handleId) as any;
+          verified = current.lastProbeStatus === 'user_dismissed'
+            ? this.verifyManagedDisposition(row, this.getManagedOwnership(input.handleId, row.workspace_path)!) : undefined;
+        } catch { verified = undefined; }
+        if (!verified || verified.eventId !== previous.eventId || previous.recoveryRevision !== input.recoveryRevision
+          || !sameManagedOwner(previous.owner, current.owner) || previous.requestId !== current.requestId
           || previous.pidProbe?.pid !== current.pid || previous.startedAt !== current.startedAt) throw a9PersistenceError('A9_MANAGED_RECOVERY_STALE', '处置身份已变化');
         return previous;
       }
@@ -2294,15 +3162,41 @@ export class A9PersistenceManager {
       const disposition = { schemaVersion: 1, disposition: 'user_attested_after_restart', owner: current.owner,
         handleId: input.handleId, requestId: current.requestId, startedAt: current.startedAt, recoveryRevision: input.recoveryRevision,
         disposedAt: new Date().toISOString(), pidProbe: input.pidProbe };
-      this.db.prepare("UPDATE a9_managed_processes SET last_probe_status='user_dismissed' WHERE handle_id=?").run(input.handleId);
+      const updated = this.db.prepare("UPDATE a9_managed_processes SET last_probe_status='user_dismissed' WHERE handle_id=? AND last_probe_status='cleanup_required'")
+        .run(input.handleId);
+      // Both the fact update and the required event must produce their row; any
+      // ignored write throws and rolls the whole disposition back.
+      assertWrittenRows(updated, 1, 'A9-34 disposition fact');
       const event = this.recordToolEvent(current.owner.conversationId, current.owner.turnId, 'managed_process_disposition', disposition);
       return { ...disposition, ...event };
     })();
   }
 
-  listManagedProcesses(workspacePath: string): Array<{
+  listManagedProcesses(workspacePath: string, options: {
+    includeOwnership?: true | 'recovery'; onOwnershipError?: (handleId: string, error: Error) => void;
+    includeRecoveryIdentity?: boolean;
+  } = {}): Array<{
     handleId: string; pid: number | null; command: string; cwd: string;
     startedAt: string; lastProbeStatus: string | null; pidReusePossible: boolean; cleanupRequired: boolean;
+    ownership?: A9ManagedOwnershipRecord;
+    recoveryIdentity?: { recoveryRevision: string } | { errorCode: string };
+    disposition?: Record<string, any> & { eventId: number };
+  }> {
+    // One read transaction: in WAL mode the facts and their ownership/history reads
+    // share one snapshot, so a commit from another connection between the statements
+    // can never pair an old fact with a new ownership (or the reverse).
+    return this.db.transaction(() => this.readManagedProcessList(workspacePath, options))();
+  }
+
+  private readManagedProcessList(workspacePath: string, options: {
+    includeOwnership?: true | 'recovery'; onOwnershipError?: (handleId: string, error: Error) => void;
+    includeRecoveryIdentity?: boolean;
+  }): Array<{
+    handleId: string; pid: number | null; command: string; cwd: string;
+    startedAt: string; lastProbeStatus: string | null; pidReusePossible: boolean; cleanupRequired: boolean;
+    ownership?: A9ManagedOwnershipRecord;
+    recoveryIdentity?: { recoveryRevision: string } | { errorCode: string };
+    disposition?: Record<string, any> & { eventId: number };
   }> {
     // Legacy facts retain the selected display path. Windows spelling changes must
     // not hide cleanup/recovery facts; compare path keys before loading their rows.
@@ -2311,7 +3205,88 @@ export class A9PersistenceManager {
         .filter((row) => sameWorkspacePath(row.workspace_path, workspacePath)).map((row) => row.workspace_path)
       : [workspacePath];
     const query = this.db.prepare('SELECT * FROM a9_managed_processes WHERE workspace_path = ?');
-    return workspaceKeys.flatMap((key) => query.all(key) as any[]).map((r) => ({
+    const rows = workspaceKeys.flatMap((key) => query.all(key) as any[]);
+    const needsRecovery = (row: any) =>
+      ['starting', 'running', 'running_unknown', 'identity_mismatch', 'cleanup_required'].includes(row.last_probe_status);
+    // released and user_dismissed settle cleanup only through their stable history.
+    const settlesByHistory = (row: any) => ['released', 'user_dismissed'].includes(row.last_probe_status);
+    // Active facts keep the scoped origin check: the conversation may not have moved.
+    const activeIds = new Set(rows.filter(needsRecovery).map(row => row.handle_id as string));
+    // Ordinary terminal facts share the same single batch read in both modes: the
+    // Shell pre-checks (leave, new conversation, mode change) read 'recovery' and must
+    // see the same release_unknown / release_intent conflicts as the final lock check.
+    const terminalIds = new Set(rows.filter(row => Boolean(options.includeOwnership) && !needsRecovery(row) && !settlesByHistory(row))
+      .map(row => row.handle_id as string));
+    const corrupted = new Set<string>();
+    const onError = options.onOwnershipError && ((handleId: string, error: Error) => {
+      corrupted.add(handleId);
+      options.onOwnershipError!(handleId, error);
+    });
+    const report = (handleId: string, error: Error) => { if (!onError) throw error; onError(handleId, error); };
+    // A terminal fact's scoped miss is re-read from its stable history below: a
+    // legitimate registry relink or rename changes the conversation's current
+    // workspace, never the fact's own historical ownership.
+    const deferred = new Map<string, Error>();
+    const scopedIds = [...activeIds, ...terminalIds];
+    const ownerships = scopedIds.length
+      ? this.listManagedOwnerships(scopedIds, (handleId, error) => {
+        // Round 16 (P1): a damaged payload is unrecoverable, never a scoped miss: it is
+        // reported now and can never be laundered by the stable-history fallback.
+        const corrupt = (error as { code?: unknown }).code === 'A9_MANAGED_OWNERSHIP_CORRUPT';
+        if (terminalIds.has(handleId) && !corrupt) deferred.set(handleId, error); else report(handleId, error);
+      }, workspacePath)
+      : new Map<string, A9ManagedOwnershipRecord>();
+    for (const handleId of activeIds) {
+      const ownership = ownerships.get(handleId);
+      if (!ownership) continue;
+      try {
+        if (ownership.ownershipState === 'released') {
+          throw a9PersistenceError('A9_MANAGED_OWNERSHIP_UNCONFIRMED', '探测事实与释放归属冲突');
+        }
+        if (options.includeOwnership === 'recovery') this.assertManagedOwnershipOrigin(workspacePath, ownership.owner);
+      } catch (error) {
+        ownerships.delete(handleId);
+        report(handleId, error as Error);
+      }
+    }
+    // released and user_dismissed settle cleanup only through their stable history.
+    // Round 17 (P1): an ordinary terminal fact (stopped, exited, ...) whose scoped read found an
+    // ownership is verified against its stable history too: a later record of another session
+    // must never hide older damage of the handle. A legacy handle -- the scoped read found
+    // neither an ownership nor any record or damage of this scope -- settles without ownership
+    // and needs no second read (it would find no anchor and no damage of its own either).
+    const historyRows = rows.filter(row => settlesByHistory(row) || deferred.has(row.handle_id)
+      || (terminalIds.has(row.handle_id) && ownerships.has(row.handle_id)));
+    const histories = historyRows.length ? this.readManagedOwnershipHistories(historyRows.map(row => row.handle_id)) : null;
+    const dispositions = new Map<string, Record<string, any> & { eventId: number }>();
+    for (const row of historyRows) {
+      const handleId = row.handle_id as string;
+      try {
+        if (row.last_probe_status === 'released') {
+          ownerships.set(handleId, this.verifyManagedReleaseHistory(row, histories!));
+          continue;
+        }
+        const { latest } = this.verifyStableManagedHistory(row, histories!, { requireOwnedAnchor: settlesByHistory(row) });
+        if (row.last_probe_status === 'user_dismissed') dispositions.set(handleId, this.verifyManagedDisposition(row, latest));
+        ownerships.set(handleId, latest);
+      } catch (error) {
+        // Round 16 (P1): every failed history verification blocks, whatever the status;
+        // a damaged history is reported as such rather than as the deferred scoped miss.
+        corrupted.add(handleId);
+        ownerships.delete(handleId);
+        const corrupt = (error as { code?: unknown }).code === 'A9_MANAGED_OWNERSHIP_CORRUPT';
+        report(handleId, (corrupt ? error : deferred.get(handleId) ?? error) as Error);
+      }
+    }
+    const recoveryIdentity = (r: any) => {
+      if (!options.includeRecoveryIdentity || r.last_probe_status !== 'cleanup_required' || corrupted.has(r.handle_id)) return {};
+      try { return { recoveryIdentity: { recoveryRevision: this.managedRecoveryIdentity(r, ownerships.get(r.handle_id)).recoveryRevision } }; }
+      catch (error) { return { recoveryIdentity: { errorCode: String((error as { code?: unknown }).code || 'A9_MANAGED_DISPOSITION_UNAVAILABLE') } }; }
+    };
+    return rows.map((r) => ({
+      ...(options.includeOwnership && ownerships.has(r.handle_id) ? { ownership: ownerships.get(r.handle_id) } : {}),
+      ...recoveryIdentity(r),
+      ...(dispositions.has(r.handle_id) ? { disposition: dispositions.get(r.handle_id) } : {}),
       handleId: r.handle_id,
       pid: r.pid,
       command: r.command,
@@ -2320,7 +3295,8 @@ export class A9PersistenceManager {
       lastProbeStatus: r.last_probe_status,
       pidReusePossible: r.pid_reuse_possible === 1,
       cleanupRequired: r.last_probe_status === 'cleanup_required'
-        || (['starting', 'running'].includes(r.last_probe_status) && this.getManagedOwnership(r.handle_id)?.ownershipState === 'owned'),
+        || (settlesByHistory(r) && corrupted.has(r.handle_id))
+        || (needsRecovery(r) && (corrupted.has(r.handle_id) || ownerships.has(r.handle_id))),
     }));
   }
 
@@ -2360,6 +3336,9 @@ export class A9PersistenceManager {
       INSERT INTO a9_events (session_id, turn_id, kind, event_type, payload_json, created_at)
       VALUES (?, ?, ?, ?, ?, ?)
     `).run(sessionId, turnId, kind, eventType, JSON.stringify(payload), new Date().toISOString());
+    // A trigger with RAISE(IGNORE) reports success with zero rows; an audit event
+    // that produced no row is a failed write and rolls back its transaction.
+    assertWrittenRows(info, 1, 'A9 event');
     return { eventId: Number(info.lastInsertRowid) };
   }
 
@@ -2414,7 +3393,14 @@ export class A9PersistenceManager {
    */
   enforceRetention(now: Date = new Date()): { purgedEvents: number } {
     const cutoff = new Date(now.getTime() - this.retentionDays * 24 * 60 * 60 * 1000).toISOString();
-    const info = this.db.prepare('DELETE FROM a9_events WHERE created_at < ?').run(cutoff);
+    // ADR-0343: ownership and disposition tool records of a handle that still has a
+    // managed fact row are the evidence that settles or authorizes that fact. They
+    // stay while the row exists; every other expired event is purged as before.
+    const info = this.db.prepare(`DELETE FROM a9_events WHERE created_at < ? AND NOT (
+      kind = 'tool' AND event_type IN ('managed_process_ownership', 'managed_process_disposition')
+      AND EXISTS (SELECT 1 FROM a9_managed_processes m WHERE m.handle_id =
+        CASE WHEN json_valid(a9_events.payload_json) THEN CASE WHEN json_type(a9_events.payload_json, '$.handleId') = 'text'
+          THEN json_extract(a9_events.payload_json, '$.handleId') END END))`).run(cutoff);
     return { purgedEvents: Number(info.changes ?? 0) };
   }
 
@@ -2478,8 +3464,72 @@ export class A9PersistenceManager {
     return acquire();
   }
 
-  releaseWorkspaceLock(workspacePath: string, ownerId: string): void {
+  /** Returns released=false when this owner's row is still present after the DELETE. */
+  releaseWorkspaceLock(workspacePath: string, ownerId: string): { released: boolean; blockers: string[]; reason?: string } {
+    return this.deleteOwnedWorkspaceLock(workspacePath, ownerId);
+  }
+
+  /**
+   * A DELETE can report zero rows while the row survives (for example a trigger with
+   * RAISE(IGNORE)). Success is only that this owner's row is gone afterwards.
+   */
+  private deleteOwnedWorkspaceLock(workspacePath: string, ownerId: string): { released: boolean; blockers: string[]; reason?: string } {
     this.db.prepare('DELETE FROM a9_workspace_locks WHERE workspace_path = ? AND owner_id = ?').run(workspacePath, ownerId);
+    const remaining = this.db.prepare('SELECT 1 FROM a9_workspace_locks WHERE workspace_path = ? AND owner_id = ?').get(workspacePath, ownerId);
+    return remaining
+      ? { released: false, blockers: [], reason: 'A9_WORKSPACE_LOCK_RELEASE_UNCONFIRMED' }
+      : { released: true, blockers: [] };
+  }
+
+  /**
+   * The single activity criterion for listed managed facts (ADR-0343/ADR-0344): a
+   * cleanup-pending fact or an active status blocks lock release and, in the Runtime,
+   * switching. ADR-0343: an unowned active fact committed after the in-memory checks
+   * (even without any in-memory handle) still blocks. Only a legacy direct-spawn handle
+   * the Runner itself left to the system keeps its running row for the next startup
+   * probe, and only that exact unowned identity (handleId, PID, start time) is exempt.
+   */
+  isManagedSettlementBlocker(fact: { handleId: string; pid: number | null; startedAt: string; lastProbeStatus: string | null;
+    cleanupRequired: boolean; ownership?: unknown },
+  handedOver: Array<{ handleId: string; pid: number | null; startedAt: string }> = []): boolean {
+    if (fact.cleanupRequired) return true;
+    // Only a known settled terminal status releases; NULL or an unknown status never does.
+    // A settled status releases only when its ownership agrees: a release whose outcome
+    // is unknown or still pending, or a status/ownership conflict, keeps blocking.
+    if (MANAGED_SETTLED_STATUSES.includes(fact.lastProbeStatus ?? '')) {
+      return fact.ownership !== undefined && fact.ownership !== null
+        && managedSettledOwnershipConflict(fact.lastProbeStatus ?? '', fact.ownership);
+    }
+    if (!MANAGED_ACTIVE_STATUSES.includes(fact.lastProbeStatus ?? '')) return true;
+    const handover = handedOver.find(item => item.handleId === fact.handleId);
+    return !(!fact.ownership && handover && handover.pid === (fact.pid ?? null) && handover.startedAt === fact.startedAt
+      && ['starting', 'running'].includes(fact.lastProbeStatus ?? ''));
+  }
+
+  /**
+   * Final shutdown release. Managed facts that block release or recovery are read
+   * again inside the same IMMEDIATE transaction that deletes this owner's lock row,
+   * so a write committed after any earlier check keeps the lock.
+   */
+  releaseWorkspaceLockIfManagedSettled(workspacePath: string, ownerId: string, managedWorkspacePath: string,
+    options: { handedOver?: Array<{ handleId: string; pid: number | null; startedAt: string }> } = {}):
+    { released: boolean; blockers: string[]; reason?: string } {
+    type Outcome = { released: boolean; blockers: string[]; reason?: string };
+    const release = this.db.transaction((): Outcome => {
+      const lock = this.db.prepare('SELECT owner_id FROM a9_workspace_locks WHERE workspace_path = ?').get(workspacePath) as any;
+      if (lock?.owner_id !== ownerId) return { released: true, blockers: [] };
+      const blockers = new Set<string>();
+      // includeOwnership: true also verifies ordinary terminal ownership; every
+      // ownership error keeps the lock.
+      for (const fact of this.listManagedProcesses(managedWorkspacePath, {
+        includeOwnership: true, onOwnershipError: (handleId) => { blockers.add(handleId); },
+      })) {
+        if (this.isManagedSettlementBlocker(fact, options.handedOver)) blockers.add(fact.handleId);
+      }
+      if (blockers.size) return { released: false, blockers: [...blockers] };
+      return this.deleteOwnedWorkspaceLock(workspacePath, ownerId);
+    }) as (() => Outcome) & { immediate?: () => Outcome };
+    return (release.immediate ?? release)();
   }
 }
 
@@ -2886,6 +3936,231 @@ function backupDatabase(
 function displayNameFor(workspacePath: string): string {
   const base = workspacePath.replace(/[\\/]+$/, '').split(/[\\/]/).pop() ?? workspacePath;
   return base.length > 0 ? base : workspacePath;
+}
+
+/** A mandatory write that reports another row count (e.g. RAISE(IGNORE)) is a failed write. */
+function assertWrittenRows(info: { changes?: number | bigint }, expected: number, what: string): void {
+  if (Number(info.changes ?? 0) !== expected) {
+    throw a9PersistenceError('A9_PERSISTENCE_WRITE_UNCONFIRMED', `${what} did not produce the expected row`);
+  }
+}
+
+const MANAGED_ACTIVE_STATUSES = ['starting', 'running', 'running_unknown', 'identity_mismatch'];
+const MANAGED_SETTLED_STATUSES = ['stopped', 'exited', 'failed', 'released', 'user_dismissed'];
+
+/**
+ * A settled status agrees with its ownership only as: released <-> released, and every
+ * other settled status with an `owned` record. release_unknown / release_intent (the
+ * release outcome is unknown or pending) and any other pairing conflict.
+ */
+function managedSettledOwnershipConflict(status: string, ownership: unknown): boolean {
+  const state = typeof ownership === 'object' && ownership !== null
+    ? (ownership as { ownershipState?: unknown }).ownershipState : undefined;
+  if (state === 'release_unknown' || state === 'release_intent') return true;
+  return status === 'released' ? state !== 'released' : state !== 'owned';
+}
+
+const MANAGED_OWNER_KEYS = ['workspace', 'conversationId', 'taskId', 'turnId', 'toolCallId'] as const;
+/** Field-wise owner comparison; key order of stored JSON is not identity. */
+/**
+ * True when an ownership payload names this workspace as its owner workspace.
+ * Round 14 (P1): a payload that is no longer valid JSON (e.g. truncated, last brace
+ * lost) still names its workspace; it must be matched textually so the damaged record
+ * stays evidence of this scope instead of silently making the handle look legacy.
+ */
+function namesManagedOwnerWorkspace(payloadJson: string, workspacePath: string): boolean {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(payloadJson);
+  } catch {
+    // Round 15 (P1): a value cut inside the path (no closing quote) names this
+    // workspace when it is a non-empty prefix of it.
+    return damagedPayloadWorkspaces(payloadJson).some(({ value, complete }) => sameWorkspacePath(value, workspacePath)
+      || (!complete && isTruncatedWorkspacePrefix(value, workspacePath)));
+  }
+  const owner = (parsed as { owner?: { workspace?: unknown } } | null)?.owner;
+  return Boolean(owner) && typeof owner!.workspace === 'string' && sameWorkspacePath(owner!.workspace as string, workspacePath);
+}
+
+/**
+ * Every `"workspace": "…"` value still readable in a damaged payload. `complete` is
+ * false when the closing quote was lost, i.e. the value may be cut inside the path.
+ */
+function damagedPayloadWorkspaces(payloadJson: string): Array<{ value: string; complete: boolean }> {
+  if (typeof payloadJson !== 'string') return [];
+  const workspaces: Array<{ value: string; complete: boolean }> = [];
+  for (const match of payloadJson.matchAll(/"workspace"\s*:\s*"((?:[^"\\]|\\.)*)("?)/g)) {
+    let value = match[1];
+    try { value = JSON.parse(`"${value}"`) as string; } catch { /* keep the raw (unescapable) text */ }
+    if (value) workspaces.push({ value, complete: match[2] === '"' });
+  }
+  return workspaces;
+}
+
+/** A non-empty path cut short by truncation that is a prefix of this workspace. */
+function isTruncatedWorkspacePrefix(partial: string, workspacePath: string): boolean {
+  if (!partial || !workspacePath) return false;
+  const looksWindows = process.platform === 'win32' || [partial, workspacePath].some(value => /^(?:[a-zA-Z]:|[\\/]{2})/.test(value));
+  if (looksWindows) {
+    const target = path.win32.normalize(workspacePath).toLowerCase();
+    return target.startsWith(partial.replace(/\//g, '\\').toLowerCase());
+  }
+  return [workspacePath, path.posix.resolve(workspacePath)].some(target => target.startsWith(partial));
+}
+
+/**
+ * Round 15 (P1): the top-level `handleId` string of a payload that is not valid JSON
+ * (e.g. truncated), or null. Only a top-level string value counts: a nested key or text
+ * inside another string value is never read as this record's handle.
+ * Round 17 (P1): a value cut before its closing quote is still read up to the end of the
+ * text (`complete: false`); the characters kept may be the whole handleId or a prefix of it.
+ */
+function damagedPayloadHandleId(payloadJson: unknown): { value: string; complete: boolean } | null {
+  if (typeof payloadJson !== 'string') return null;
+  try { JSON.parse(payloadJson); return null; } catch { /* damaged: scan below */ }
+  const text = payloadJson;
+  const readString = (start: number, allowOpen = false): { value: string; end: number; complete: boolean } | null => {
+    for (let i = start + 1; i < text.length; i++) {
+      if (text[i] === '\\') { i++; continue; }
+      if (text[i] === '"') {
+        try { return { value: JSON.parse(text.slice(start, i + 1)) as string, end: i + 1, complete: true }; } catch { return null; }
+      }
+    }
+    if (!allowOpen) return null;
+    // Unclosed string: drop a trailing partial escape, then unescape what is left.
+    let raw = text.slice(start + 1).replace(/(^|[^\\])((?:\\\\)*)\\u[0-9a-fA-F]{0,3}$/, '$1$2');
+    if ((/\\+$/.exec(raw)?.[0].length ?? 0) % 2 === 1) raw = raw.slice(0, -1);
+    let value = raw;
+    try { value = JSON.parse(`"${raw}"`) as string; } catch { /* keep the raw (unescapable) text */ }
+    return { value, end: text.length, complete: false };
+  };
+  const skipSpace = (i: number) => { while (i < text.length && /\s/.test(text[i])) i++; return i; };
+  let depth = 0, expectKey = false;
+  for (let i = skipSpace(0); i < text.length;) {
+    const ch = text[i];
+    if (ch === '"') {
+      const key = readString(i);
+      if (!key) return null;
+      i = key.end;
+      if (depth === 1 && expectKey) {
+        expectKey = false;
+        i = skipSpace(i);
+        if (text[i] !== ':') return null;
+        i = skipSpace(i + 1);
+        if (key.value === 'handleId') {
+          const value = text[i] === '"' ? readString(i, true) : null;
+          return value?.value ? { value: value.value, complete: value.complete } : null;
+        }
+      }
+      continue;
+    }
+    if (depth === 0 && ch !== '{') return null;
+    if (ch === '{' || ch === '[') { depth++; if (depth === 1) expectKey = true; }
+    else if (ch === '}' || ch === ']') { if (--depth <= 0) return null; }
+    else if (ch === ',' && depth === 1) expectKey = true;
+    i++;
+  }
+  return null;
+}
+
+/**
+ * Requested handles a damaged payload names: the complete top-level handleId, or every
+ * requested handle that a value cut before its closing quote is a non-empty prefix of
+ * (fail-closed: an ambiguous prefix is damage of each handle it may name).
+ */
+function damagedPayloadHandleTargets(payloadJson: unknown, targets: readonly string[]): string[] {
+  const recovered = damagedPayloadHandleId(payloadJson);
+  if (!recovered) return [];
+  return recovered.complete
+    ? targets.filter(target => target === recovered.value)
+    : targets.filter(target => target.startsWith(recovered.value));
+}
+
+/**
+ * Round 20 (P1): one closed segment of a conversation's workspace binding. Every event of
+ * the conversation with `id <= maxEventId` (and above the previous segment's bound) was
+ * written while it was bound to `workspace`; events above the last segment belong to its
+ * current workspace. `renamedTo` only records the later name of a renamed default directory:
+ * facts keep the path they were written under (ADR-0343), so attribution uses `workspace`.
+ */
+interface A9WorkspaceHistoryEntry { workspace: string; maxEventId: number; renamedTo?: string }
+
+/**
+ * Round 23 (P1): marker `workspace` of a segment whose events were written before segments were
+ * kept, in an earlier binding that cannot be bounded (a legacy rebind, a scalar previousWorkspace
+ * or damaged metadata). Never a path; its events count as possibly written in any workspace.
+ */
+const A9_UNKNOWN_PRIOR_WORKSPACE = '#a9-unknown-prior';
+
+/** The stored segments, or null when absent; 'damaged' when present but not well-formed. */
+function parseWorkspaceHistory(value: unknown): A9WorkspaceHistoryEntry[] | null | 'damaged' {
+  if (value === undefined || value === null) return null;
+  let parsed = value;
+  if (typeof value === 'string') {
+    try { parsed = JSON.parse(value); } catch { return 'damaged'; }
+  }
+  if (!Array.isArray(parsed)) return 'damaged';
+  let bound = -1;
+  for (const entry of parsed as Array<Record<string, unknown>>) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)
+      || typeof entry.workspace !== 'string' || !entry.workspace
+      || !Number.isSafeInteger(entry.maxEventId) || Number(entry.maxEventId) < bound
+      || (entry.renamedTo !== undefined && (typeof entry.renamedTo !== 'string' || !entry.renamedTo))) return 'damaged';
+    bound = Number(entry.maxEventId);
+  }
+  return parsed as A9WorkspaceHistoryEntry[];
+}
+
+/**
+ * `workdir.origin` of a session row aliased `s`; DAMAGED_WORKDIR_ORIGIN when its metadata is not
+ * valid JSON (nothing about its earlier bindings can be read).
+ */
+const DAMAGED_WORKDIR_ORIGIN = '#a9-damaged-metadata';
+const WORKDIR_ORIGIN_SQL = `CASE WHEN json_valid(s.metadata_json) THEN json_extract(s.metadata_json, '$.workdir.origin')
+  ELSE '${DAMAGED_WORKDIR_ORIGIN}' END`;
+
+/**
+ * Round 20 (P1): the workspace(s) the event's conversation was bound to when the event was
+ * written, or null for an unknown conversation. Damaged history or a legacy scalar
+ * `previousWorkspace` (no segment bounds) is ambiguous and yields every candidate (fail-closed).
+ * Round 22 (P1): a conversation rebound by a legacy build (`origin: 'linked'` with neither
+ * segments nor `previousWorkspace`), or whose metadata is damaged, may have written the event
+ * in any workspace: null (fail-closed).
+ */
+function managedEventWorkspaces(eventId: number, current: string | null, previousWorkspace: unknown, history: unknown,
+  origin?: unknown): string[] | null {
+  if (current === null || origin === DAMAGED_WORKDIR_ORIGIN) return null;
+  const segments = parseWorkspaceHistory(history);
+  if (segments === 'damaged') {
+    const mentioned = typeof history === 'string'
+      ? [...history.matchAll(/"(?:workspace|renamedTo)"\s*:\s*"((?:[^"\\]|\\.)*)"/g)].map(match => {
+        try { return JSON.parse(`"${match[1]}"`) as string; } catch { return match[1]; }
+      })
+      : [];
+    if (mentioned.includes(A9_UNKNOWN_PRIOR_WORKSPACE)) return null;
+    return [...mentioned, ...(typeof previousWorkspace === 'string' ? [previousWorkspace] : []), current];
+  }
+  if (segments?.length) {
+    const written = segments.find(entry => eventId <= entry.maxEventId)?.workspace ?? current;
+    // Round 23 (P1): an event of the unknown prior segment may have been written anywhere.
+    return written === A9_UNKNOWN_PRIOR_WORKSPACE ? null : [written];
+  }
+  if (typeof previousWorkspace === 'string') return [previousWorkspace, current];
+  return origin === 'linked' ? null : [current];
+}
+
+/** True when the event was written in `scope` (an unknown conversation may have been: fail-closed). */
+function managedEventWrittenIn(event: { id: number; previous_workspace: unknown; workspace_history: unknown; workdir_origin?: unknown },
+  current: string | null, scope: string): boolean {
+  const written = managedEventWorkspaces(event.id, current, event.previous_workspace, event.workspace_history, event.workdir_origin);
+  return written === null || written.some(workspace => sameWorkspacePath(workspace, scope));
+}
+
+function sameManagedOwner(left: unknown, right: unknown): boolean {
+  const a = left as Record<string, unknown> | undefined, b = right as Record<string, unknown> | undefined;
+  if (!a || !b || typeof a !== 'object' || typeof b !== 'object') return false;
+  return Object.keys(a).length === Object.keys(b).length
+    && MANAGED_OWNER_KEYS.every(key => typeof a[key] === 'string' && a[key] === b[key]);
 }
 
 function sameWorkspacePath(left: string, right: string): boolean {

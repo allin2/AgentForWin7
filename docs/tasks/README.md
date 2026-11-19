@@ -12,6 +12,11 @@
 必要验证为 7 模块编译、设计安全门、全量单元测试与文档一致性检查；证据仅为开发机（Node 20.17.0），Win7/Win10 实机为 `NOT_PERFORMED`。
 保护既有未跟踪目录 `scripts/dashboard/`，不新增系统权限，未公开推送。
 
+快照与 SQLite 遗留修复为 `APPROVED_FOR_IMPLEMENTATION`，实际分支 `main`，基线 `234dbd8`。
+交付活跃输出期间的快照缓存、托管事实幂等写入与批量归属读取、收件箱批量汇总及事件类型索引。
+保持现有 IPC、schema v4、托管事实审计与进程权限。以真实 SQLite 的 State 和 Shell 开发机回归、查询计划与独立只读审查核查。
+独立审查中导致启动失败、错误归属或陈旧缓存的问题先修复，再完成开发机回归。提交、推送与 Win7 实机验证另按已批准范围执行。
+
 本轮 A9 Settings 设置项（负责人任务书，基线 0153b394）：`APPROVED_FOR_IMPLEMENTATION`，实际分支 `box/a9-settings`。交付上下文预算、输入框上限、thinking 模式与思考强度设置及其 Provider/Core/Gateway 配置链路；保持 schemaVersion、不改专用 DeepSeek Provider、不新增依赖。必要验证与停止条件见 `A9_SETTINGS_CONTEXT_COMPOSER_THINKING.md`，证据目录为 `outputs/wp-a9-settings/a9-settings/`。
 
 本轮测试临时目录修复（负责人回复“再次进行检查，没有问题的话按照推荐进行修改”）：

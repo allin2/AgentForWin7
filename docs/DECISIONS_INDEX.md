@@ -345,3 +345,8 @@
 | ADR-0339 | 体检 Phase B：SQLite 性能索引、Provider 窗口/超时设置与错误指引 | Accepted |
 | ADR-0340 | 体检 Phase C 批次 1：STATUS 瘦身与历史归档、Gateway TLS/超时策略收敛、EOL 运行时与供应链策略 | Accepted |
 | ADR-0341 | 体检 Phase C 批次 2：Runtime 状态机强制转态（fail-closed）与事件驱动快照推送 | Accepted |
+| ADR-0342 | 体检 Phase C 补充：快照缓存与 SQLite 查询 | Accepted |
+| ADR-0343 | Phase C 补充复审修复：托管事实凭据、终态核验与锁释放确认 | Accepted |
+| ADR-0344 | Phase C 第二次复审修复：恢复句柄终态、必需写入确认、等价路径锚点与持久活动阻断 | Accepted |
+| ADR-0345 | Phase C 第三次复核修复：无效 PID 未知、终态待结算重试、移交后回调隔离与处置来源筛选 | Accepted |
+| ADR-0346 | Phase C 第四次复核修复：PID 0 身份、启动采纳终态待结算、helper 终态审计失败、锚点来源与待结算控件 | Accepted |

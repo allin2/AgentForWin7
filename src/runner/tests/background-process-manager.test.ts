@@ -377,6 +377,78 @@ describe('A9-02: BackgroundProcessManager', () => {
     expect(observed.pidReusePossible).toBe(false);
   });
 
+  it.each(['EINVAL', 'EPERM'])('keeps a recovered PID unsettled when the probe reports %s', async (code) => {
+    const pid = 987654321;
+    const realKill = process.kill.bind(process);
+    const kill = jest.spyOn(process, 'kill').mockImplementation(((target: number, signal?: any) => {
+      if (target === pid) throw Object.assign(new Error(code), { code });
+      return realKill(target, signal);
+    }) as any);
+    try {
+      const adopted = manager.adoptRecoveredFact('bg-recovered-probe', { pid, command: 'old', cwd: process.cwd(), startTime: '2026-11-19T00:00:00.000Z' });
+      expect(adopted).toMatchObject({ status: 'running', recoveryStatus: 'running_unknown', pidReusePossible: true });
+      await expect(manager.stop('bg-recovered-probe')).rejects.toMatchObject({
+        code: code === 'EINVAL' ? 'A9_MANAGED_PID_PROBE_UNKNOWN' : 'A9_RECOVERED_PROCESS_IDENTITY_UNCONFIRMED' });
+      const result = await manager.dispose({ stopManaged: true });
+      expect(result.stopped).toEqual([]);
+      expect(result.stoppedHandles).toEqual([]);
+      expect(manager.list()).toEqual([expect.objectContaining({ handleId: 'bg-recovered-probe', status: 'running' })]);
+      // Only a sent signal 0 is ever used against the recovered PID.
+      expect(kill.mock.calls.filter(([target]) => target === pid).every(([, signal]) => signal === 0)).toBe(true);
+    } finally { kill.mockRestore(); }
+  });
+
+  it('returns the Runner terminal state of a recovered PID stopped by dispose', async () => {
+    const pid = 987654321; let alive = true;
+    const realKill = process.kill.bind(process);
+    const kill = jest.spyOn(process, 'kill').mockImplementation(((target: number, signal?: any) => {
+      if (target !== pid) return realKill(target, signal);
+      if (alive) return true;
+      throw Object.assign(new Error('ESRCH'), { code: 'ESRCH' });
+    }) as any);
+    try {
+      manager.adoptRecoveredFact('bg-recovered-gone', { pid, command: 'old', cwd: process.cwd(), startTime: '2026-11-19T00:00:00.000Z' });
+      alive = false;
+      const result = await manager.dispose({ stopManaged: true });
+      expect(result.stopped).toEqual(['bg-recovered-gone']);
+      expect(result.stoppedHandles).toEqual([expect.objectContaining({ handleId: 'bg-recovered-gone', status: 'exited', pidReusePossible: false })]);
+    } finally { kill.mockRestore(); }
+  });
+
+  it.each([0, -1, Number.NaN, 1.5])('never probes or settles a recovered fact with invalid PID %p', async (pid) => {
+    const kill = jest.spyOn(process, 'kill');
+    try {
+      const adopted = manager.adoptRecoveredFact('bg-recovered-invalid', { pid, command: 'old', cwd: process.cwd(), startTime: '2026-11-19T00:00:00.000Z' });
+      expect(adopted).toMatchObject({ status: 'running', recoveryStatus: 'running_unknown', pidReusePossible: false });
+      // The invalid persisted PID stays the fact's identity (0 is not "missing").
+      expect(adopted.pid).toBe(pid);
+      await expect(manager.stop('bg-recovered-invalid')).rejects.toMatchObject({ code: 'A9_MANAGED_PID_PROBE_UNKNOWN' });
+      const result = await manager.dispose({ stopManaged: true });
+      expect(result.stopped).toEqual([]);
+      expect(result.unresolved).toEqual([expect.stringContaining('bg-recovered-invalid')]);
+      expect(manager.list()).toEqual([expect.objectContaining({ handleId: 'bg-recovered-invalid', status: 'running', recoveryStatus: 'running_unknown' })]);
+      expect(kill).not.toHaveBeenCalled();
+    } finally { kill.mockRestore(); (manager as any).processes.delete('bg-recovered-invalid'); }
+  });
+
+  it('stops persisting a direct child once it is handed over to the system', async () => {
+    const changed = jest.fn();
+    const own = new BackgroundProcessManager(undefined, (s) => s, () => [], changed);
+    const started = await own.start('bg-handover', 'short child', process.execPath, ['-e', 'setTimeout(() => {}, 200)'], process.cwd());
+    expect(changed).toHaveBeenCalledWith(expect.objectContaining({ handleId: 'bg-handover', status: 'running' }));
+    changed.mockClear();
+    const result = await own.dispose({ stopManaged: false });
+    expect(result.leftToSystem).toEqual(['bg-handover']);
+    expect(own.list()).toEqual([]);
+    for (let i = 0; i < 150; i++) {
+      try { process.kill(started.pid!, 0); } catch (error: any) { if (error?.code === 'ESRCH') break; }
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    // The child's natural exit after the handover reaches no persistence callback.
+    expect(changed).not.toHaveBeenCalled();
+  });
+
   it('dispose can leave managed processes to the system without killing them', async () => {
     await manager.start(
       'bg-leave',
@@ -482,7 +554,7 @@ it('v3 rejects Stop while release is pending or completed without sending cancel
   expect(f.m.list()[0].ownershipState).toBe('release_intent');
   await expect(f.m.stopOwned('handle', managedOwner)).rejects.toMatchObject({ code: 'A9_MANAGED_OWNERSHIP_UNCONFIRMED' });
   expect(invocation.cancel).not.toHaveBeenCalled();
-  unblock(); await expect(pending).resolves.toEqual({ stopped: [], leftToSystem: ['handle'], unresolved: [] });
+  unblock(); await expect(pending).resolves.toEqual({ stopped: [], leftToSystem: ['handle'], unresolved: [], stoppedHandles: [] });
   await expect(f.m.stopOwned('handle', managedOwner)).rejects.toMatchObject({ code: 'A9_MANAGED_HANDLE_UNKNOWN' });
   expect(invocation.cancel).not.toHaveBeenCalled();
 });
@@ -498,8 +570,64 @@ it('v3 Stop before release proves stopped and cannot later report leftToSystem',
     lastOutputSeq: 0, stdout: { rawBytesRead: 0, emittedBytes: 0, omittedBytes: 0 }, stderr: { rawBytesRead: 0, emittedBytes: 0, omittedBytes: 0 },
   } }));
   await expect(f.m.stopOwned('handle', managedOwner)).resolves.toMatchObject({ status: 'stopped', cleanupRequired: false });
-  await expect(f.m.dispose({ stopManaged: false })).resolves.toEqual({ stopped: [], leftToSystem: [], unresolved: [] });
+  await expect(f.m.dispose({ stopManaged: false })).resolves.toEqual({ stopped: [], leftToSystem: [], unresolved: [], stoppedHandles: [] });
   expect(invocation.cancel).toHaveBeenCalledTimes(1); expect(invocation.release).not.toHaveBeenCalled();
+});
+it('v3 never reports a helper-proven terminal state whose terminal audit write failed', async () => {
+  let failStopped = true; const persisted: any[] = [];
+  const f = managedFixture((h) => {
+    if (failStopped && h.status === 'stopped') throw new Error('terminal write ignored');
+    persisted.push({ status: h.status, cleanupRequired: h.cleanupRequired === true });
+  });
+  await f.start();
+  const invocation = f.transport.startManaged.mock.results[0].value;
+  invocation.cancel = jest.fn(() => f.resolve({ kind: 'response', response: {
+    schemaVersion: 3, type: 'execution_result', requestId: 'req', profileId: 'a9-trusted-shell-current-user-v2',
+    status: 'completed', exitCode: 1, executionTimeMs: 1, timedOut: false, idleTimedOut: false, canceled: true,
+    outputTruncated: false, containmentVerified: true, inputDetached: true, cleanupConfirmed: true, workDirAclModified: false,
+    tokenAudit: helperReady(345, 'req').tokenAudit,
+    hostJob: { detected: false, breakaway: 'none', limitFlags: 0x2000, childJobAssignmentVerified: true },
+    lastOutputSeq: 0, stdout: { rawBytesRead: 0, emittedBytes: 0, omittedBytes: 0 }, stderr: { rawBytesRead: 0, emittedBytes: 0, omittedBytes: 0 },
+  } }));
+  await expect(f.m.stopOwned('handle', managedOwner)).rejects.toMatchObject({ code: 'A9_BACKGROUND_STATE_PERSIST_FAILED' });
+  // The audit failure is not folded into cleanupRequired: the helper proof stays truthful.
+  expect(f.m.list()[0]).toMatchObject({ status: 'stopped', statePersistencePending: true });
+  expect(f.m.list()[0].cleanupRequired).not.toBe(true);
+  // No terminal row was written at all (in particular no cleanup_required substitute).
+  expect(persisted.filter((item) => item.status !== 'running' && item.status !== 'starting')).toEqual([]);
+  expect(f.m.getActiveCount()).toBe(1);
+  for (const stopManaged of [true, false]) {
+    const blocked = await f.m.dispose({ stopManaged });
+    expect(blocked).toMatchObject({ stopped: [], stoppedHandles: [], unresolved: [expect.stringContaining('handle')] });
+  }
+  expect(invocation.cancel).toHaveBeenCalledTimes(1);
+  failStopped = false;
+  await expect(f.m.stopOwned('handle', managedOwner)).resolves.toMatchObject({ status: 'stopped', cleanupRequired: false });
+  expect(f.m.list()[0].statePersistencePending).toBeUndefined();
+  expect(persisted.pop()).toEqual({ status: 'stopped', cleanupRequired: false });
+  expect(f.m.getActiveCount()).toBe(0);
+  expect(invocation.cancel).toHaveBeenCalledTimes(1);
+});
+it('v3 dispose retries a pending terminal audit write under either policy', async () => {
+  for (const stopManaged of [true, false]) {
+    let fail = true;
+    const f = managedFixture((h) => { if (fail && h.status === 'exited') throw new Error('terminal write ignored'); });
+    await f.start();
+    f.resolve({ kind: 'response', response: {
+      schemaVersion: 3, type: 'execution_result', requestId: 'req', profileId: 'a9-trusted-shell-current-user-v2',
+      status: 'completed', exitCode: 0, executionTimeMs: 1, timedOut: false, idleTimedOut: false, canceled: false,
+      outputTruncated: false, containmentVerified: true, inputDetached: true, cleanupConfirmed: true, workDirAclModified: false,
+      tokenAudit: helperReady(345, 'req').tokenAudit,
+      hostJob: { detected: false, breakaway: 'none', limitFlags: 0x2000, childJobAssignmentVerified: true },
+      lastOutputSeq: 0, stdout: { rawBytesRead: 0, emittedBytes: 0, omittedBytes: 0 }, stderr: { rawBytesRead: 0, emittedBytes: 0, omittedBytes: 0 },
+    } });
+    await f.completion; await new Promise((r) => setImmediate(r));
+    expect(f.m.list()[0]).toMatchObject({ status: 'exited', statePersistencePending: true });
+    fail = false;
+    const result = await f.m.dispose({ stopManaged });
+    expect(result).toMatchObject({ stopped: ['handle'], unresolved: [], stoppedHandles: [expect.objectContaining({ status: 'exited', cleanupRequired: false })] });
+    expect(f.m.list()).toEqual([]);
+  }
 });
 it('v3 publishes no output when mandatory output audit fails', async () => {
   const f = managedFixture(undefined, () => { throw new Error('audit failed'); }); await f.start();
@@ -587,5 +715,79 @@ describe('A9-34 recovered cleanup disposition', () => {
     });
     expect(() => manager.probeRecoveredCleanup('h', owner)).toThrow(result === 'alive' || result === 'EPERM' ? 'A9_MANAGED_PID_ALIVE' : 'A9_MANAGED_PID_PROBE_UNKNOWN');
     expect(manager.getActiveCount()).toBe(1);
+  });
+});
+
+describe('P1-1 helper-not-ready terminal write stays pending for Stop/shutdown retry', () => {
+  const canceledProof = (requestId: string) => ({ kind: 'response', response: {
+    schemaVersion: 3, type: 'execution_result', requestId, profileId: 'a9-trusted-shell-current-user-v2',
+    status: 'completed', exitCode: 1, executionTimeMs: 1, timedOut: false, idleTimedOut: false, canceled: true,
+    outputTruncated: false, containmentVerified: true, inputDetached: true, cleanupConfirmed: true, workDirAclModified: false,
+    tokenAudit: helperReady(345, requestId).tokenAudit,
+    hostJob: { detected: false, breakaway: 'none', limitFlags: 0x2000, childJobAssignmentVerified: true },
+    lastOutputSeq: 0, stdout: { rawBytesRead: 0, emittedBytes: 0, omittedBytes: 0 }, stderr: { rawBytesRead: 0, emittedBytes: 0, omittedBytes: 0 },
+  } });
+  function notReadyFixture(stateHook: (h: any) => void) {
+    const cancel = jest.fn();
+    const transport: any = { invoke: jest.fn(), startManaged: jest.fn(() => {
+      let resolve!: (v: any) => void;
+      const completion = new Promise<any>((r) => { resolve = r; });
+      cancel.mockImplementation(() => resolve(canceledProof('req')));
+      return { pid: 9001, ready: Promise.reject(new Error('malformed execution_started')), completion, cancel };
+    }) };
+    const m = new BackgroundProcessManager(transport, (s) => s, () => [], stateHook);
+    const request: any = { schemaVersion: 3, profileId: 'a9-trusted-shell-current-user-v2', requestId: 'req', managed: true, outputEncoding: { stdout: 'utf-8', stderr: 'utf-8' } };
+    return { m, cancel, start: () => m.start('handle', 'echo tick', 'cmd.exe', [], '/w', undefined, request, { owner: managedOwner }) };
+  }
+
+  it('marks statePersistencePending when the failed write after a persisted stopped is ignored, and keeps shutdown unresolved', async () => {
+    let failFailed = true; const persisted: string[] = [];
+    const f = notReadyFixture((h) => {
+      if (failFailed && h.status === 'failed') throw new Error('failed terminal write ignored');
+      persisted.push(h.status);
+    });
+    await expect(f.start()).rejects.toMatchObject({
+      code: 'A9_BACKGROUND_HELPER_START_FAILED', cleanupConfirmed: true, cleanupRequired: false, statePersistencePending: true,
+    });
+    expect(f.cancel).toHaveBeenCalledTimes(1);
+    // The helper's canceled completion was persisted as stopped before the ignored failed write.
+    expect(persisted).toEqual(['starting', 'stopped']);
+    expect(f.m.list()[0]).toMatchObject({ status: 'failed', cleanupRequired: false, statePersistencePending: true });
+    expect(f.m.getActiveCount()).toBe(1);
+    // Stop stays available and reports the unconfirmed terminal write instead of a clean result.
+    await expect(f.m.stop('handle')).rejects.toMatchObject({ code: 'A9_BACKGROUND_STATE_PERSIST_FAILED' });
+    for (const stopManaged of [true, false]) {
+      const blocked = await f.m.dispose({ stopManaged });
+      expect(blocked).toMatchObject({ stopped: [], stoppedHandles: [], unresolved: [expect.stringContaining('handle')] });
+    }
+    expect(f.m.getActiveCount()).toBe(1);
+    failFailed = false;
+    const settled = await f.m.dispose({ stopManaged: true });
+    expect(settled).toMatchObject({ stopped: ['handle'], unresolved: [],
+      stoppedHandles: [expect.objectContaining({ status: 'failed', cleanupRequired: false })] });
+    expect(settled.stoppedHandles[0].statePersistencePending).toBeUndefined();
+    expect(persisted.pop()).toBe('failed');
+    expect(f.m.getActiveCount()).toBe(0);
+    expect(f.cancel).toHaveBeenCalledTimes(1);
+  });
+
+  it('Stop alone retries the pending failed write and then reports it settled', async () => {
+    let failFailed = true;
+    const f = notReadyFixture((h) => { if (failFailed && h.status === 'failed') throw new Error('disk busy'); });
+    await expect(f.start()).rejects.toMatchObject({ code: 'A9_BACKGROUND_HELPER_START_FAILED', statePersistencePending: true });
+    failFailed = false;
+    await expect(f.m.stop('handle')).resolves.toMatchObject({ status: 'failed', cleanupRequired: false });
+    expect(f.m.list()[0].statePersistencePending).toBeUndefined();
+    expect(f.m.getActiveCount()).toBe(0);
+    await expect(f.m.dispose({ stopManaged: true })).resolves.toMatchObject({ unresolved: [] });
+  });
+
+  it('a successful failed write leaves no pending flag (no regression)', async () => {
+    const f = notReadyFixture(() => {});
+    let error: any; try { await f.start(); } catch (e) { error = e; }
+    expect(error).toMatchObject({ code: 'A9_BACKGROUND_HELPER_START_FAILED', cleanupConfirmed: true });
+    expect(error.statePersistencePending).toBeUndefined();
+    expect(f.m.list()[0].statePersistencePending).toBeUndefined();
+    expect(f.m.getActiveCount()).toBe(0);
   });
 });

@@ -91,6 +91,7 @@ function convertSessionsToWin719SchemaV4(databasePath: string): void {
     DROP INDEX IF EXISTS idx_a9_turns_session_task;
     DROP INDEX IF EXISTS idx_a9_events_created;
     DROP INDEX IF EXISTS idx_a9_events_session_type;
+    DROP INDEX IF EXISTS idx_a9_events_type_id;
     DROP INDEX idx_a9_sessions_workspace;
     ALTER TABLE a9_sessions RENAME TO a9_sessions_canonical;
     CREATE TABLE a9_sessions (

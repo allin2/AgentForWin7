@@ -115,15 +115,20 @@ describe('A9-61 review wait boundaries', () => {
       jest.spyOn(f.persistence, 'reconcileInterruptedWorkspaceCheckpoints').mockImplementation((...args: any[]) => {
         const result = reconcile(...args); order.push('reconcile'); return result;
       });
-      const release = f.persistence.releaseWorkspaceLock.bind(f.persistence);
-      jest.spyOn(f.persistence, 'releaseWorkspaceLock').mockImplementation((...args: any[]) => {
+      // Shutdown releases through the guarded final State transaction.
+      const release = f.persistence.releaseWorkspaceLockIfManagedSettled.bind(f.persistence);
+      jest.spyOn(f.persistence, 'releaseWorkspaceLockIfManagedSettled').mockImplementation((...args: any[]) => {
         order.push('release'); return release(...args);
       });
+      const lockRows = () => f.persistence.db.prepare('SELECT count(*) AS n FROM a9_workspace_locks').get().n;
       pendingShutdown = runtime.shutdown();
       const heldDuringRecovery = runtime.getSnapshot().lock.held;
+      const rowsDuringRecovery = lockRows();
       gate.release(); await runtime.whenReady(); await pendingShutdown;
       expect(heldDuringRecovery).toBe(true);
+      expect(rowsDuringRecovery).toBe(1);
       expect(order).toEqual(['reconcile', 'release']);
+      expect(lockRows()).toBe(0);
       expect(f.persistence.getCheckpoint('crash-turn').payload.recoveredFromWorkspaceManifest).toBe(true);
       expect(runtime.getSnapshot().checkpointRecoveryDiagnostics ?? null).toBeNull();
     } finally { gate.release(); if (pendingShutdown) await pendingShutdown; await f.close(); }
@@ -541,4 +546,57 @@ describe('A9-61 review wait boundaries', () => {
       await f.close();
     }
   });
+});
+
+it('registry close keeps the entry while the lock DELETE is ignored or a re-verified release is pending', async () => {
+  const f = environment();
+  try {
+    const entry = f.registry.activate(f.a); const runtime = entry.runtime; await runtime.whenReady();
+    const p = f.persistence; const sessionId = runtime.getSnapshot().activeConversationId;
+    const workspacePath = p.listConversations(f.a)[0]?.workspacePath ?? f.a;
+    p.upsertTask('managed-task', sessionId, 'completed'); p.upsertTurn('managed-turn', 'managed-task', sessionId, 'completed');
+    const fact = { handleId: 'h', workspacePath: f.a, command: 'safe', cwd: f.a, startedAt: '2026-11-19', lastProbeStatus: 'running', pid: 345 };
+    const ownership = { schemaVersion: 1, owner: { workspace: workspacePath, conversationId: sessionId, taskId: 'managed-task',
+      turnId: 'managed-turn', toolCallId: 'call' }, requestId: 'request', ownershipState: 'owned' };
+    p.recordManagedOwnership(fact, ownership);
+    p.recordManagedOwnership(fact, { ...ownership, ownershipState: 'release_intent', releaseId: 'rel' });
+    p.recordManagedOwnership({ ...fact, lastProbeStatus: 'released', cleanupRequired: false }, { ...ownership, ownershipState: 'released', releaseId: 'rel' });
+    const lockRows = () => p.db.prepare('SELECT count(*) AS n FROM a9_workspace_locks').get().n;
+    // A changed released row isolates the handle; both exit choices stay retryable.
+    p.db.prepare("UPDATE a9_managed_processes SET last_probe_status = 'cleanup_required' WHERE handle_id = 'h'").run();
+    for (const stopManaged of [true, false]) {
+      await expect(f.registry.close(entry.workspaceId, { stopManaged })).rejects.toMatchObject({ code: 'A9_WORKSPACE_CLEANUP_UNCONFIRMED' });
+      expect(f.registry.getActive()?.workspaceId).toBe(entry.workspaceId);
+    }
+    // The verified correction clears the isolation; an ignored DELETE is still no release.
+    p.db.prepare("UPDATE a9_managed_processes SET last_probe_status = 'released' WHERE handle_id = 'h'").run();
+    p.db.exec('CREATE TRIGGER keep_lock BEFORE DELETE ON a9_workspace_locks BEGIN SELECT RAISE(IGNORE); END');
+    await expect(f.registry.close(entry.workspaceId, { stopManaged: false })).rejects.toMatchObject({ code: 'A9_WORKSPACE_CLEANUP_UNCONFIRMED' });
+    expect(f.registry.getActive()?.workspaceId).toBe(entry.workspaceId);
+    expect(lockRows()).toBe(1);
+    expect(runtime.getSnapshot().persistenceDiagnostics).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'A9_MANAGED_QUARANTINE_CLEARED' }), expect.objectContaining({ code: 'A9_SHUTDOWN_LOCK_RELEASE_FAILED' })]));
+    p.db.exec('DROP TRIGGER keep_lock');
+    expect(await f.registry.close(entry.workspaceId, { stopManaged: true })).toMatchObject({ ok: true });
+    expect(lockRows()).toBe(0);
+  } finally { await f.close(); }
+});
+
+it('registry close and shutdown never drop a workspace whose Runtime still holds its lock (ADR-0346)', async () => {
+  const f = environment();
+  try {
+    const entry = f.registry.activate(f.a); const runtime = entry.runtime; await runtime.whenReady();
+    const lockRows = () => f.persistence.db.prepare('SELECT count(*) AS n FROM a9_workspace_locks').get().n;
+    // A Runtime result that reports nothing unresolved is not trusted over the held lock.
+    const clean = { stopped: [], leftToSystem: [], unresolved: [] };
+    const shutdown = jest.spyOn(runtime, 'shutdown').mockResolvedValue(clean);
+    await expect(f.registry.close(entry.workspaceId, { stopManaged: true })).rejects.toMatchObject({ code: 'A9_WORKSPACE_CLEANUP_UNCONFIRMED' });
+    expect(f.registry.getActive()?.workspaceId).toBe(entry.workspaceId);
+    expect(runtime.isWorkspaceLockReleased()).toBe(false);
+    expect((await f.registry.shutdown({ stopManaged: true })).unresolved).toEqual(['workspace 1: workspace lock remains held']);
+    expect(lockRows()).toBe(1);
+    shutdown.mockRestore();
+    expect(await f.registry.close(entry.workspaceId, { stopManaged: true })).toMatchObject({ ok: true });
+    expect(lockRows()).toBe(0);
+  } finally { await f.close(); }
 });

@@ -114,6 +114,42 @@ function createA9AgentRuntime(options) {
   }
   const persistence = persistenceOutcome.manager;
 
+  let managedProcessesCache = null;
+  // Persistent managed facts that State's activity criterion still counts as unsettled,
+  // refreshed on every managed-fact read (including snapshot cache hits).
+  let persistentManagedBlockers = new Set();
+  // Exact legacy direct-spawn identities this Runtime's Runner left to the system. They
+  // stay until the lock is really released; the final State transaction re-verifies them.
+  const confirmedHandovers = new Map();
+  // Runner-confirmed terminal states whose persistent write was not confirmed. Each keeps
+  // the Runner handle (its original adopted identity) and write mode, so Stop and shutdown
+  // retry the same conditional transaction; an entry is removed only after the write is
+  // confirmed, or when State proves the persisted identity is no longer this handle's.
+  const pendingManagedSettlements = new Map();
+  const reportedOwnershipErrors = new Set();
+  const quarantinedManagedHandles = new Set();
+  const quarantinedManagedIdentities = new Map();
+  let checkpointCache = null;
+  let conversationsCache = null;
+
+  function readSnapshotRevisions() {
+    return typeof persistence.readSnapshotRevisions === 'function'
+      ? persistence.readSnapshotRevisions(canonicalWorkspace, a9SessionId, workspaceRoot)
+      : null;
+  }
+
+  function invalidateSnapshotCaches({ managed = false, checkpoints = false, conversations = false } = {}) {
+    if (managed) {
+      managedProcessesCache = null;
+    }
+    if (checkpoints) checkpointCache = null;
+    if (conversations) conversationsCache = null;
+  }
+
+  function cloneManagedProcessFacts(items) {
+    return JSON.parse(JSON.stringify(items)).map(item => ({ ...item, command: redactSecrets(item.command) }));
+  }
+
   /**
    * B8：非致命失败（状态观察者、关闭阶段、后台句柄接管）进入持久化诊断缓冲（随快照的
    * persistenceDiagnostics 展示），同时发出带稳定错误码的 warning；经脱敏并限长，绝不抛出。
@@ -150,7 +186,10 @@ function createA9AgentRuntime(options) {
     if (!config.defaultWorkdirRoot) return true;
     const state = verifyWorkdir(config.defaultWorkdirRoot, workspaceRoot, create);
     if (state.made) {
-      const workdir = persistence.getConversationMetadata(a9SessionId).workdir || { version: 1, origin: 'auto', createdAt: null };
+      // Round 20: a workdir holding only the workspace history a rename recorded is still unset.
+      const stored = persistence.getConversationMetadata(a9SessionId).workdir;
+      const historyOnly = stored && Object.keys(stored).length === 1 && Object.prototype.hasOwnProperty.call(stored, 'workspaceHistory');
+      const workdir = stored && !historyOnly ? stored : { ...(stored || {}), version: 1, origin: 'auto', createdAt: null };
       const message = `${workdir.createdAt ? '已重建' : '已创建'}工作目录：${workspaceRoot}`;
       persistence.db.transaction(() => {
         persistence.saveSession(a9SessionId, canonicalWorkspace, { workdir: { ...workdir, createdAt: workdir.createdAt || new Date().toISOString() } });
@@ -266,7 +305,10 @@ function createA9AgentRuntime(options) {
   // States and transitions live in a9-workspace-lock.js (unlocked → acquired → released).
   const workspaceLock = createWorkspaceLock({
     acquire: () => persistence.acquireWorkspaceLock(canonicalWorkspace, ownerId, { holderIsAlive: workspaceLockHolderIsAlive }),
-    release: () => persistence.releaseWorkspaceLock(canonicalWorkspace, ownerId),
+    // The final managed-fact check and lock deletion share one State transaction.
+    release: (options) => typeof persistence.releaseWorkspaceLockIfManagedSettled === 'function'
+      ? persistence.releaseWorkspaceLockIfManagedSettled(canonicalWorkspace, ownerId, workspaceRoot, options || {})
+      : persistence.releaseWorkspaceLock(canonicalWorkspace, ownerId),
   });
 
   // ----- R2：pending 审批（SQLite 记录来自原始 pending 对象） -----
@@ -1408,53 +1450,256 @@ function createA9AgentRuntime(options) {
     onBackgroundStateChange: (handle) => recordManagedHandle(handle),
   });
 
-  function recordManagedHandle(handle) {
-    // A proven, ordinary start failure is a tool result. Unknown lifecycle
-    // still blocks dispatch; actual persistence failures are caught below.
-    if (handle.owner && handle.status === 'failed' && handle.cleanupRequired !== false) blockManagedAudit(handle.owner, 'managed_process_terminal', 'A9_MANAGED_PROCESS_FAILED');
+  function projectManagedHandle(handle) {
     const fact = {
       handleId: handle.handleId,
       workspacePath: workspaceRoot,
-      ...(handle.pid ? { pid: handle.pid } : {}),
+      // 0 is an invalid but persisted identity, not a missing PID (ADR-0346).
+      ...(typeof handle.pid === 'number' ? { pid: handle.pid } : {}),
       command: redactSecrets(handle.command),
       cwd: redactSecrets(handle.cwd),
       startedAt: handle.startTime,
-      lastProbeStatus: handle.ownershipState === 'released' ? 'released' : handle.recoveryStatus || handle.status,
+      // A Runner-confirmed terminal status supersedes the restart probe label
+      // (a stopped recovered PID fact must not persist as running_unknown).
+      lastProbeStatus: handle.ownershipState === 'released' ? 'released'
+        : ['exited', 'stopped', 'failed'].includes(handle.status) ? handle.status : handle.recoveryStatus || handle.status,
       pidReusePossible: handle.pidReusePossible === true,
       cleanupRequired: handle.cleanupRequired === true,
     };
-    try {
-    if (handle.owner) persistence.recordManagedOwnership(fact, { schemaVersion: 1, owner: handle.owner,
+    const ownership = handle.owner ? {
+      schemaVersion: 1, owner: handle.owner,
       requestId: handle.requestId || handle.handleId, ownershipState: handle.ownershipState || 'owned',
-      ...(handle.releaseId ? { releaseId: handle.releaseId } : {}), ...(handle.recoveryStatus ? { recoveryStatus: handle.recoveryStatus } : {}) });
-    else persistence.recordManagedProcess(fact);
-    } catch (error) { blockManagedAudit(handle.owner, 'managed_process_ownership'); throw error; }
+      ...(handle.releaseId ? { releaseId: handle.releaseId } : {}),
+      ...(handle.recoveryStatus ? { recoveryStatus: handle.recoveryStatus } : {}),
+    } : null;
+    return { fact, ownership };
   }
 
-  function syncManagedProcessFacts() {
-    const handles = loopTrustedRunner.getBackgroundManager().list();
-    handles.forEach(recordManagedHandle);
-    const byId = new Map(handles.map((handle) => [handle.handleId, handle]));
-    return persistence.listManagedProcesses(workspaceRoot).map((fact) => ({
+  function recordManagedHandle(handle, { fact, ownership } = projectManagedHandle(handle),
+    mode = handle.status === 'starting' ? 'register' : 'update', { deferUnconfirmedAuditBlock = false } = {}) {
+    managedProcessesCache = null;
+    // A proven, ordinary start failure is a tool result. Unknown lifecycle
+    // still blocks dispatch; actual persistence failures are caught below.
+    if (handle.owner && handle.status === 'failed' && handle.cleanupRequired !== false) blockManagedAudit(handle.owner, 'managed_process_terminal', 'A9_MANAGED_PROCESS_FAILED');
+    try {
+      if (ownership) persistence.recordManagedOwnership(fact, ownership, { mode: mode === 'settle' ? 'update' : mode });
+      else if (mode === 'reconcile') persistence.recordLegacyManagedRecoveryProbe?.(fact);
+      // A restart-adopted legacy PID fact settles only its own persisted identity (ADR-0344).
+      else if (mode === 'settle' && typeof persistence.settleRecoveredManagedProcess === 'function') persistence.settleRecoveredManagedProcess(fact);
+      else persistence.recordManagedProcess(fact);
+    } catch (error) {
+      // P1-2: a recovery-mode STALE means another connection already settled or
+      // replaced this row (a legitimate startup/terminal race), not an audit write
+      // failure; callers handle it and any replacing fact stays a persistent blocker.
+      const settledElsewhere = error && error.code === 'A9_MANAGED_RECOVERY_STALE'
+        && (mode === 'settle' || mode === 'reconcile');
+      // A startup reconcile may also meet UNCONFIRMED when another connection committed
+      // a verified release/disposition; that caller re-reads SQLite and blocks itself
+      // unless the exact identity is proven settled.
+      const deferred = deferUnconfirmedAuditBlock && mode === 'reconcile'
+        && error && error.code === 'A9_MANAGED_OWNERSHIP_UNCONFIRMED';
+      if (!settledElsewhere && !deferred) blockManagedAudit(handle.owner, 'managed_process_ownership');
+      throw error;
+    }
+  }
+
+  function settleManagedTerminal(handle, mode) {
+    try {
+      recordManagedHandle(handle, undefined, mode);
+      pendingManagedSettlements.delete(handle.handleId);
+    } catch (error) {
+      if (error && error.code === 'A9_MANAGED_RECOVERY_STALE') pendingManagedSettlements.delete(handle.handleId);
+      else pendingManagedSettlements.set(handle.handleId, { handle, mode });
+      throw error;
+    }
+  }
+
+  function reportManagedOwnershipError(handleId, error, code) {
+    if (reportedOwnershipErrors.has(handleId)) return;
+    reportedOwnershipErrors.add(handleId);
+    recordRuntimeDiagnostic(code, error);
+  }
+
+  function needsManagedCleanup(fact) {
+    return fact.cleanupRequired === true
+      || ['starting', 'running', 'running_unknown', 'identity_mismatch'].includes(fact.lastProbeStatus);
+  }
+
+  // Reuses State's single release criterion, so switching, leaving, mode change and
+  // close agree on which persistent facts are unsettled.
+  // Ownership read errors (rejected) block exactly as in the final lock check.
+  function refreshPersistentManagedBlockers(facts, rejected = new Set()) {
+    const handovers = Array.from(confirmedHandovers.values());
+    persistentManagedBlockers = new Set(facts.filter(fact => rejected.has(fact.handleId)
+      || (typeof persistence.isManagedSettlementBlocker === 'function'
+        ? persistence.isManagedSettlementBlocker(fact, handovers) : needsManagedCleanup(fact))).map(fact => fact.handleId));
+  }
+
+  function quarantineManagedHandle(handleId, fact) {
+    if (quarantinedManagedHandles.has(handleId)) return;
+    quarantinedManagedHandles.add(handleId);
+    // The persisted identity seen at isolation; only that exact identity can later clear it.
+    if (fact) quarantinedManagedIdentities.set(handleId, managedFactIdentity(fact));
+    if (!managedAuditFailure) blockManagedAudit(null, 'managed_process_ownership');
+  }
+
+  function managedFactIdentity(fact) {
+    return JSON.stringify([fact.handleId, fact.pid ?? null, fact.startedAt ?? null, fact.command ?? null, fact.cwd ?? null]);
+  }
+
+  // ADR-0343: an isolated handle stops blocking close only when SQLite again proves
+  // the exact persisted identity and the complete release chain (State verified the
+  // owned -> release_intent -> released tool records) and any in-memory handle is
+  // that released handle. Unconfirmed handles stay isolated; diagnostics are kept.
+  function clearVerifiedReleasedQuarantine(facts, rejected) {
+    if (!quarantinedManagedHandles.size) return;
+    const byHandle = new Map(facts.map(fact => [fact.handleId, fact]));
+    const handles = new Map(loopTrustedRunner.getBackgroundManager().list().map(handle => [handle.handleId, handle]));
+    for (const handleId of Array.from(quarantinedManagedHandles)) {
+      const fact = byHandle.get(handleId);
+      const stored = fact && fact.ownership;
+      const identity = quarantinedManagedIdentities.get(handleId);
+      if (!fact || !stored || !identity || rejected.has(handleId) || fact.cleanupRequired === true
+        || fact.lastProbeStatus !== 'released' || stored.ownershipState !== 'released'
+        || identity !== managedFactIdentity(fact)) continue;
+      const handle = handles.get(handleId);
+      if (handle && (handle.ownershipState !== 'released' || fact.startedAt !== handle.startTime || fact.pid !== (handle.pid ?? null)
+        || JSON.stringify(stored.owner) !== JSON.stringify(handle.owner) || stored.requestId !== (handle.requestId || handle.handleId)
+        || stored.releaseId !== handle.releaseId)) continue;
+      quarantinedManagedHandles.delete(handleId);
+      quarantinedManagedIdentities.delete(handleId);
+      recordRuntimeDiagnostic('A9_MANAGED_QUARANTINE_CLEARED', Object.assign(
+        new Error(`managed handle ${handleId} re-verified as released; earlier isolation diagnostics are retained`),
+        { code: 'A9_MANAGED_QUARANTINE_CLEARED' }));
+    }
+  }
+
+  function readManagedRecoveryFacts() {
+    const rejected = new Set();
+    // 'recovery' keeps the active-fact origin check and, like includeOwnership: true,
+    // loads ordinary terminal ownership, so release_unknown / release_intent conflicts
+    // block leave, new conversation and mode change exactly as the final lock does.
+    const facts = persistence.listManagedProcesses(workspaceRoot, {
+      includeOwnership: 'recovery',
+      onOwnershipError(handleId, error) {
+        rejected.add(handleId);
+        reportManagedOwnershipError(handleId, error, 'A9_MANAGED_HANDLE_ADOPT_FAILED');
+      },
+    });
+    for (const fact of facts) {
+      if (rejected.has(fact.handleId) && needsManagedCleanup(fact)) quarantineManagedHandle(fact.handleId, fact);
+    }
+    validateManagedHandleBindings(loopTrustedRunner.getBackgroundManager().list(), facts);
+    clearVerifiedReleasedQuarantine(facts, rejected);
+    refreshPersistentManagedBlockers(facts, rejected);
+    return { rejected, facts };
+  }
+
+  function validateManagedHandleBindings(handles, facts) {
+    if (typeof persistence.listManagedOwnerships !== 'function') return;
+    const byHandle = new Map(facts.map(fact => [fact.handleId, fact]));
+    for (const handle of handles) {
+      if (!handle.owner || handle.ownershipState === 'released'
+        || !needsManagedCleanup({ cleanupRequired: handle.cleanupRequired, lastProbeStatus: handle.recoveryStatus || handle.status })) continue;
+      const fact = byHandle.get(handle.handleId);
+      const stored = fact?.ownership;
+      if (!stored || fact.startedAt !== handle.startTime || fact.pid !== (handle.pid ?? null)
+        || JSON.stringify(stored.owner) !== JSON.stringify(handle.owner)
+        || stored.requestId !== (handle.requestId || handle.handleId)
+        || stored.ownershipState !== (handle.ownershipState || 'owned') || stored.releaseId !== handle.releaseId) {
+        quarantineManagedHandle(handle.handleId, fact);
+        reportManagedOwnershipError(handle.handleId, new Error('A9_MANAGED_OWNERSHIP_UNCONFIRMED'), 'A9_MANAGED_FACT_SYNC_FAILED');
+      }
+    }
+  }
+
+  // Runner lifecycle callbacks own writes. Snapshot reads must preserve the
+  // persistent identity and release state used to authorize recovery actions.
+  // Terminal in-memory handles add nothing beyond persistent facts; their exact
+  // identity is part of the cache key. Live or cleanup-pending handles never hit.
+  function terminalManagedHandleKey(manager, handles) {
+    if (handles.some(handle => ['starting', 'running'].includes(handle.status) || handle.cleanupRequired === true
+      || handle.statePersistencePending === true
+      || ['release_intent', 'release_unknown'].includes(handle.ownershipState))) return null;
+    return JSON.stringify([[...quarantinedManagedHandles].sort(), handles.map(handle => [handle.handleId, handle.status,
+      handle.ownershipState || null, handle.releaseId || null, handle.recoveryStatus || null, handle.pid ?? null,
+      handle.startTime || null, handle.requestId || null, manager.isRecoveredFact(handle.handleId)])]);
+  }
+
+  // A snapshot item spreads its ownership fields; restore the listed-fact shape for State's criterion.
+  // The ownership state travels with it: a settled status with a release_unknown/release_intent
+  // (or otherwise conflicting) ownership still blocks (round 10).
+  function snapshotItemAsFact(item) {
+    return { handleId: item.handleId, pid: item.pid ?? null, startedAt: item.startedAt, lastProbeStatus: item.lastProbeStatus,
+      cleanupRequired: item.cleanupRequired === true, ...(item.owner ? { ownership: { owner: item.owner,
+        ...(item.ownershipState !== undefined ? { ownershipState: item.ownershipState } : {}),
+        ...(item.releaseId !== undefined ? { releaseId: item.releaseId } : {}) } } : {}) };
+  }
+
+  function readManagedProcessFacts({ bypassCache = false, forSnapshot = false } = {}) {
+    const manager = loopTrustedRunner.getBackgroundManager();
+    const handles = manager.list();
+    const revision = bypassCache ? undefined : readSnapshotRevisions()?.managed;
+    const handleKey = terminalManagedHandleKey(manager, handles);
+    if (handleKey !== null && revision !== undefined && managedProcessesCache?.revision === revision
+      && managedProcessesCache.handleKey === handleKey && !managedProcessesCache.hasLive) {
+      const cached = cloneManagedProcessFacts(managedProcessesCache.items);
+      refreshPersistentManagedBlockers(cached.map(snapshotItemAsFact));
+      return cached;
+    }
+
+    const cleanupHandles = new Set(handles.filter(handle => handle.cleanupRequired === true).map(handle => handle.handleId));
+    const corruptOwnerships = new Set();
+    const facts = persistence.listManagedProcesses(workspaceRoot, {
+      includeOwnership: true, includeRecoveryIdentity: true,
+      ...(forSnapshot ? { onOwnershipError(handleId, error) {
+        corruptOwnerships.add(handleId);
+        reportManagedOwnershipError(handleId, error, 'A9_MANAGED_OWNERSHIP_CORRUPT');
+      } } : {}),
+    });
+    validateManagedHandleBindings(handles, facts);
+    for (const fact of facts) {
+      if (corruptOwnerships.has(fact.handleId) && needsManagedCleanup(fact)) quarantineManagedHandle(fact.handleId, fact);
+    }
+    const synced = facts.map(({ ownership, recoveryIdentity, ...fact }) => ({
       ...fact,
       command: redactSecrets(fact.command),
-      ...(persistence.getManagedOwnership(fact.handleId) || {}),
-      ...managedDispositionCard(fact),
-      ...((fact.cleanupRequired === true || byId.get(fact.handleId)?.cleanupRequired === true)
-        ? { cleanupRequired: true }
-        : {}),
+      ...(corruptOwnerships.has(fact.handleId) || quarantinedManagedHandles.has(fact.handleId)
+        ? {} : ownership || (typeof persistence.listManagedOwnerships !== 'function'
+        ? persistence.getManagedOwnership(fact.handleId) : {})),
+      ...(corruptOwnerships.has(fact.handleId) || quarantinedManagedHandles.has(fact.handleId)
+        ? { canDismissRecovered: false } : managedDispositionCard(fact, recoveryIdentity)),
+      ...((fact.cleanupRequired === true || cleanupHandles.has(fact.handleId) || quarantinedManagedHandles.has(fact.handleId))
+        ? { cleanupRequired: true } : {}),
     }));
+    refreshPersistentManagedBlockers(synced.map(snapshotItemAsFact));
+    const afterRead = bypassCache ? undefined : readSnapshotRevisions()?.managed;
+    managedProcessesCache = !corruptOwnerships.size && revision !== undefined && revision === afterRead
+      && handleKey !== null && handleKey === terminalManagedHandleKey(manager, manager.list())
+      ? {
+        revision,
+        handleKey,
+        hasLive: synced.some(item => ['starting', 'running'].includes(item.lastProbeStatus)),
+        items: cloneManagedProcessFacts(synced),
+      }
+      : null;
+    return synced;
   }
 
-  function managedDispositionCard(fact) {
+  function managedDispositionCard(fact, batchIdentity) {
     // 处置事件查询会扫描事件表；只对已处置的事实执行，避免每次快照对全部历史句柄全表扫描。
     if (fact.lastProbeStatus === 'user_dismissed') {
-      return { canDismissRecovered: false, disposition: persistence.getManagedProcessDisposition(fact.handleId) };
+      // Only a disposition State verified settles the fact; an unverified one stays blocking.
+      if (fact.cleanupRequired === true) return { canDismissRecovered: false };
+      return { canDismissRecovered: false, disposition: fact.disposition || persistence.getManagedProcessDisposition(fact.handleId) };
     }
     const manager = loopTrustedRunner.getBackgroundManager();
     if (!manager.isRecoveredFact(fact.handleId) || !fact.cleanupRequired) return { canDismissRecovered: false };
     try {
-      const identity = persistence.getManagedProcessRecoveryIdentity(fact.handleId);
+      // The snapshot derives the revision from its batch fact/ownership read; the
+      // dismissal transaction still re-reads and re-validates it before commit.
+      const identity = batchIdentity || persistence.getManagedProcessRecoveryIdentity(fact.handleId);
+      if (identity.errorCode) throw Object.assign(new Error(identity.errorCode), { code: identity.errorCode });
       if (!workspaceLock.isHeld()) throw Object.assign(new Error('工作区锁无效'), { code: 'A9_WORKSPACE_LOCKED' });
       if (managedStopPromise || shutdownPromise || managedDismissInFlight) throw Object.assign(new Error('后台处置正在进行'), { code: 'A9_MANAGED_DISPOSITION_BUSY' });
       manager.probeRecoveredCleanup(fact.handleId, { workspace: canonicalWorkspace, conversationId: a9SessionId });
@@ -1477,7 +1722,11 @@ function createA9AgentRuntime(options) {
       managedDismissInFlight = true;
       try {
         const manager = loopTrustedRunner.getBackgroundManager();
+        const identity = persistence.getManagedProcessRecoveryIdentity(input.handleId);
+        if (identity.owner.workspace !== canonicalWorkspace || identity.owner.conversationId !== a9SessionId) fail('A9_MANAGED_HANDLE_WRONG_OWNER');
         const previous = persistence.getManagedProcessDisposition(input.handleId);
+        if ((previous?.recoveryRevision ?? identity.recoveryRevision) !== input.recoveryRevision) fail('A9_MANAGED_RECOVERY_STALE');
+        if (quarantinedManagedHandles.has(input.handleId)) fail('A9_MANAGED_OWNERSHIP_UNCONFIRMED');
         const checked = previous ? null : manager.probeRecoveredCleanup(input.handleId, { workspace: canonicalWorkspace, conversationId: a9SessionId });
         let disposition;
         try {
@@ -1485,33 +1734,137 @@ function createA9AgentRuntime(options) {
             ...(checked ? { identity: { owner: checked.handle.owner, requestId: checked.handle.requestId,
               pid: checked.handle.pid, startedAt: checked.handle.startTime }, pidProbe: checked.pidProbe } : {}) });
         } catch (error) {
-          if (!error.code || !String(error.code).startsWith('A9_')) {
+          // An ignored required write is a storage failure, not a qualification refusal.
+          if (!error.code || !String(error.code).startsWith('A9_') || error.code === 'A9_PERSISTENCE_WRITE_UNCONFIRMED') {
             blockManagedAudit(checked && checked.handle.owner, 'managed_process_disposition');
             fail('A9_AUDIT_PERSISTENCE_FAILED');
           }
           throw error;
         }
         if (!previous) manager.dismissRecoveredFact(input.handleId, { workspace: canonicalWorkspace, conversationId: a9SessionId });
+        invalidateSnapshotCaches({ managed: true });
         return { ok: true, disposition };
       } finally { managedDismissInFlight = false; }
     } catch (error) { return { ok: false, error: presentError(error) }; }
   }
 
+  const MANAGED_SETTLED_TERMINAL_STATUSES = ['stopped', 'exited', 'failed', 'released', 'user_dismissed'];
+  const MANAGED_OWNER_KEYS = ['workspace', 'conversationId', 'taskId', 'turnId', 'toolCallId'];
+
+  function sameRecoveredOwnership(recovered, ownership) {
+    const stored = ownership && ownership.owner, adopted = recovered.owner;
+    return Boolean(stored && adopted && typeof stored === 'object' && typeof adopted === 'object')
+      && Object.keys(stored).length === Object.keys(adopted).length
+      && MANAGED_OWNER_KEYS.every(key => typeof stored[key] === 'string' && stored[key] === adopted[key])
+      && ownership.requestId === (recovered.requestId || recovered.handleId);
+  }
+
+  // P1-2: a startup reconcile answered A9_MANAGED_RECOVERY_STALE or
+  // A9_MANAGED_OWNERSHIP_UNCONFIRMED. Re-read the persistent fact; the stale adopted
+  // handle is withdrawn without isolation or an audit block only when SQLite proves
+  // that exact identity (handleId, PID, start time) reached a valid terminal status,
+  // its ownership is readable and consistent with the adopted handle (a legacy handle
+  // still has none), and State's single criterion no longer counts it as a blocker.
+  // A replacing identity, a NULL/active status, a missing/corrupt/foreign ownership
+  // or a Runner that cannot withdraw the exact identity returns false and keeps isolation.
+  // Facts and verified ownership come from one listManagedProcesses call (one SQLite
+  // read snapshot); no separate ownership read can see a later replacement or NULL write.
+  // The legacy startup settle and the owned reconcile both use this single check.
+  function withdrawSettledRecoveredHandle(recovered, error) {
+    const rejected = new Set();
+    let facts;
+    try {
+      facts = persistence.listManagedProcesses(workspaceRoot, {
+        includeOwnership: true, onOwnershipError(handleId) { rejected.add(handleId); },
+      });
+    } catch (_readError) { return false; }
+    const current = facts.find(item => item.handleId === recovered.handleId);
+    if (!current || rejected.has(recovered.handleId)) return false;
+    // Exact persisted identity: another identity's terminal row never settles this handle.
+    if ((current.pid ?? null) !== (recovered.pid ?? null) || current.startedAt !== recovered.startTime) return false;
+    if (!MANAGED_SETTLED_TERMINAL_STATUSES.includes(current.lastProbeStatus) || current.cleanupRequired === true) return false;
+    // includeOwnership: true verifies ordinary terminal ownership in the same read;
+    // a corrupt one was reported through onOwnershipError above.
+    const ownership = current.ownership;
+    if (recovered.owner) {
+      if (!sameRecoveredOwnership(recovered, ownership)) return false;
+      if ((ownership.ownershipState === 'released') !== (current.lastProbeStatus === 'released')) return false;
+      if (current.lastProbeStatus !== 'released' && ownership.ownershipState !== 'owned') return false;
+      if (current.lastProbeStatus === 'user_dismissed' && !current.disposition) return false;
+    } else if (ownership || current.ownership || ['released', 'user_dismissed'].includes(current.lastProbeStatus)) {
+      return false;
+    }
+    const stillBlocking = typeof persistence.isManagedSettlementBlocker === 'function'
+      ? persistence.isManagedSettlementBlocker(current, Array.from(confirmedHandovers.values())) : needsManagedCleanup(current);
+    if (stillBlocking) return false;
+    const manager = loopTrustedRunner.getBackgroundManager();
+    if (typeof manager.withdrawRecoveredFact !== 'function'
+      || !manager.withdrawRecoveredFact(recovered.handleId, { pid: recovered.pid ?? null, startTime: recovered.startTime })) return false;
+    managedProcessesCache = null;
+    refreshPersistentManagedBlockers(facts, rejected);
+    recordRuntimeDiagnostic('A9_MANAGED_TERMINAL_ALREADY_SETTLED', error);
+    return true;
+  }
+
   // 崩溃恢复只采纳 PID 事实，不重放命令；PID 复用风险保留给显式 Stop 决策。
-  for (const fact of persistence.listManagedProcesses(workspaceRoot)) {
-    if ((['running', 'starting', 'running_unknown'].includes(fact.lastProbeStatus) || fact.cleanupRequired === true)) {
+  const { rejected: failedAdoptions, facts: startupFacts } = readManagedRecoveryFacts();
+  for (const { ownership: storedOwnership, ...fact } of startupFacts) {
+    if (failedAdoptions.has(fact.handleId)
+      || !(['running', 'starting', 'running_unknown'].includes(fact.lastProbeStatus) || fact.cleanupRequired === true)) continue;
+    try {
+      const ownership = storedOwnership || (typeof persistence.listManagedOwnerships !== 'function'
+        ? persistence.getManagedOwnership(fact.handleId) : undefined);
+      const recovered = loopTrustedRunner.getBackgroundManager().adoptRecoveredFact(fact.handleId, {
+        // A null PID stays missing and 0 stays the persisted invalid PID; neither is probed.
+        pid: fact.pid ?? null,
+        command: fact.command,
+        cwd: fact.cwd,
+        startTime: fact.startedAt,
+        cleanupRequired: fact.cleanupRequired === true,
+        ...(ownership || {}),
+      });
+      if (recovered.status === 'exited' && recovered.cleanupRequired !== true) {
+        // ESRCH at adoption is a Runner-confirmed terminal state. An unconfirmed write
+        // stays a pending settlement that Stop and shutdown retry (ADR-0346), instead of
+        // an isolation that nothing could ever settle.
+        try { settleManagedTerminal(recovered, recovered.owner ? 'reconcile' : 'settle'); }
+        catch (error) {
+          // STALE: another connection changed this row. Only the same strict check as
+          // reconcile (exact identity, valid terminal status, consistent ownership, no
+          // State blocker) withdraws the handle; a NULL/replaced/corrupt row is rethrown
+          // and isolated below, keeping the workspace lock.
+          if (error && error.code === 'A9_MANAGED_RECOVERY_STALE') {
+            if (withdrawSettledRecoveredHandle(recovered, error)) continue;
+            throw error;
+          }
+          // Round 10: a legacy settle that meets a damaged or unexpected ownership record
+          // is not a retryable write; it is isolated below instead of left pending.
+          if (!recovered.owner && error && ['A9_MANAGED_OWNERSHIP_CORRUPT', 'A9_MANAGED_OWNERSHIP_UNCONFIRMED'].includes(error.code)) {
+            pendingManagedSettlements.delete(recovered.handleId);
+            throw error;
+          }
+          if (!pendingManagedSettlements.has(recovered.handleId)) throw error;
+          recordRuntimeDiagnostic('A9_MANAGED_TERMINAL_SETTLE_PENDING', error);
+        }
+        continue;
+      }
       try {
-        recordManagedHandle(loopTrustedRunner.getBackgroundManager().adoptRecoveredFact(fact.handleId, {
-          pid: fact.pid || 0,
-          command: fact.command,
-          cwd: fact.cwd,
-          startTime: fact.startedAt,
-          cleanupRequired: fact.cleanupRequired === true,
-          ...(persistence.getManagedOwnership(fact.handleId) || {}),
-        }));
+        recordManagedHandle(recovered, projectManagedHandle(recovered), 'reconcile', { deferUnconfirmedAuditBlock: true });
       } catch (error) {
-        // 重复句柄保持现有管理器事实；其他失败说明恢复事实未被接管，需要诊断。
-        if (!/后台进程句柄已存在/.test(String(error && error.message))) recordRuntimeDiagnostic('A9_MANAGED_HANDLE_ADOPT_FAILED', error);
+        // P1-2: an owned ESRCH (cleanupRequired) or an unknown probe (e.g. EINVAL) whose
+        // reconcile is STALE or UNCONFIRMED (another connection committed a verified
+        // release/disposition) is settled elsewhere only if a fresh SQLite read proves it.
+        const code = error && error.code;
+        if ((code === 'A9_MANAGED_RECOVERY_STALE' || code === 'A9_MANAGED_OWNERSHIP_UNCONFIRMED')
+          && withdrawSettledRecoveredHandle(recovered, error)) continue;
+        if (code === 'A9_MANAGED_OWNERSHIP_UNCONFIRMED') blockManagedAudit(recovered.owner, 'managed_process_ownership');
+        throw error;
+      }
+    } catch (error) {
+      // 重复句柄保持现有管理器事实；其他失败说明恢复事实未被接管，需要诊断。
+      if (!/后台进程句柄已存在/.test(String(error && error.message))) {
+        quarantineManagedHandle(fact.handleId, fact);
+        reportManagedOwnershipError(fact.handleId, error, 'A9_MANAGED_HANDLE_ADOPT_FAILED');
       }
     }
   }
@@ -1521,11 +1874,14 @@ function createA9AgentRuntime(options) {
     if (queueScheduled) return '下一条排队消息正在准备执行';
     if (currentPendingApproval) return '当前对话正在等待审批';
     if (currentPendingQuestion) return '当前对话正在等待回答';
+    if (quarantinedManagedHandles.size) return '后台进程归属无法确认，工作区仍有待清理进程';
     if (loopTrustedRunner.getBackgroundManager().getActiveCount() > 0) return '当前对话仍有托管后台进程';
+    if (persistentManagedBlockers.size || pendingManagedSettlements.size) return '工作区仍有未结算的托管后台进程记录';
     return null;
   }
 
   function assertConversationSwitchAllowed() {
+    readManagedRecoveryFacts();
     const reason = conversationBlockReason();
     if (!reason) return;
     const err = new Error(`A9_CONVERSATION_BUSY: ${reason}，停止或完成后才能切换对话/工作区。`);
@@ -1534,6 +1890,7 @@ function createA9AgentRuntime(options) {
   }
 
   function loadConversation(record) {
+    invalidateSnapshotCaches({ checkpoints: true, conversations: true });
     pauseQueue();
     activeConversation = record;
     a9SessionId = record.sessionId;
@@ -1572,6 +1929,7 @@ function createA9AgentRuntime(options) {
   function renameConversation(sessionId, title) {
     const record = persistence.renameConversation(String(sessionId), redactSecrets(String(title)), canonicalWorkspace);
     if (record.sessionId === a9SessionId) activeConversation = record;
+    invalidateSnapshotCaches({ conversations: true });
     return { ok: true, conversation: record };
   }
 
@@ -1583,6 +1941,7 @@ function createA9AgentRuntime(options) {
       throw err;
     }
     const next = persistence.archiveConversation(a9SessionId, config.defaultWorkdirRoot ? undefined : createConversationId());
+    invalidateSnapshotCaches({ checkpoints: true, conversations: true });
     if (!next) { activeConversation = { ...activeConversation, state: 'archived' }; return { ok: true, conversationId: a9SessionId, archived: true }; }
     return loadConversation(next);
   }
@@ -1604,11 +1963,13 @@ function createA9AgentRuntime(options) {
     const patch = action === 'settle' ? { settledAt: now }
       : action === 'reopen' ? { settledAt: null, activeSince: now } : { lastVisitedAt: now };
     persistence.mergeConversationInbox(sessionId, canonicalWorkspace, patch);
+    invalidateSnapshotCaches({ conversations: true });
     return { ok: true, conversationId: sessionId };
   }
 
   function markInboxActive() {
     persistence.mergeConversationInbox(a9SessionId, canonicalWorkspace, { settledAt: null, activeSince: new Date().toISOString() });
+    invalidateSnapshotCaches({ conversations: true });
   }
 
   function ensureRuntime() {
@@ -1814,7 +2175,7 @@ function createA9AgentRuntime(options) {
             data: safeEvent.data,
           });
           if (event.type === 'tool_end' && event.data && ['shell', 'start_process', 'stop_process'].includes(event.data.toolName)) {
-            syncManagedProcessFacts();
+            readManagedProcessFacts();
           }
           auditedEvents.set(event, { safeEvent: { ...safeEvent, eventId, sequence: eventId }, flushed });
         },
@@ -2547,6 +2908,7 @@ function createA9AgentRuntime(options) {
     activeConversation = persistence.listConversations(canonicalWorkspace)
       .find((item) => item.sessionId === a9SessionId) || activeConversation;
     activeLifecycle = ['needs_approval', 'needs_input'].includes(result.outcome) ? lifecycle : null;
+    invalidateSnapshotCaches({ checkpoints: true, conversations: true });
   }
 
   function persistUnexpectedFailure(error, lifecycle) {
@@ -2581,6 +2943,7 @@ function createA9AgentRuntime(options) {
     activeLifecycle = null;
     currentPendingApproval = null;
     currentPendingQuestion = null;
+    invalidateSnapshotCaches({ checkpoints: true, conversations: true });
   }
 
   function approvalIdentity(approval) {
@@ -3229,28 +3592,43 @@ function createA9AgentRuntime(options) {
       markCancelling();
       return { ok: true };
     }
+    readManagedRecoveryFacts();
     const manager = loopTrustedRunner.getBackgroundManager();
-    const active = manager.list().filter((item) => item.status === 'running' || item.status === 'starting' || item.cleanupRequired === true);
-    if (active.length === 0) return { ok: false, error: { code: 'NO_ACTIVE_TURN_OR_MANAGED_PROCESS' } };
+    const active = manager.list().filter((item) => !quarantinedManagedHandles.has(item.handleId)
+      && !pendingManagedSettlements.has(item.handleId)
+      && (item.status === 'running' || item.status === 'starting' || item.cleanupRequired === true
+        || item.statePersistencePending === true));
+    const pendingSettles = Array.from(pendingManagedSettlements.values())
+      .filter(pending => !quarantinedManagedHandles.has(pending.handle.handleId));
+    if (!active.length && !pendingSettles.length && !quarantinedManagedHandles.size) {
+      return { ok: false, error: { code: 'NO_ACTIVE_TURN_OR_MANAGED_PROCESS' } };
+    }
     if (managedStopPromise) return managedStopPromise;
     const attempt = (async () => {
       const stopped = [];
       const errors = [];
+      const stopError = (handleId, error) => ({
+        handleId,
+        code: error && error.code ? String(error.code) : 'A9_MANAGED_PROCESS_CLEANUP_UNCONFIRMED',
+        message: redactSecrets(error && error.message ? error.message : String(error)),
+      });
+      // Retry an earlier unconfirmed terminal write through the same conditional transaction.
+      for (const pending of pendingSettles) {
+        try { settleManagedTerminal(pending.handle, pending.mode); stopped.push(pending.handle.handleId); }
+        catch (error) { errors.push(stopError(pending.handle.handleId, error)); }
+      }
       for (const handle of active) {
         try {
+          const recovered = !handle.owner && manager.isRecoveredFact(handle.handleId);
           const result = await manager.stop(handle.handleId);
-          recordManagedHandle(result);
+          settleManagedTerminal(result, recovered ? 'settle' : undefined);
           stopped.push(handle.handleId);
         } catch (error) {
-          errors.push({
-            handleId: handle.handleId,
-            code: error && error.code ? String(error.code) : 'A9_MANAGED_PROCESS_CLEANUP_UNCONFIRMED',
-            message: redactSecrets(error && error.message ? error.message : String(error)),
-          });
+          errors.push(stopError(handle.handleId, error));
         }
       }
-      syncManagedProcessFacts();
-      if (errors.length > 0) {
+      readManagedProcessFacts({ forSnapshot: quarantinedManagedHandles.size > 0 });
+      if (errors.length > 0 || quarantinedManagedHandles.size) {
         return { ok: false, stopped, errors, error: { code: 'A9_MANAGED_PROCESS_CLEANUP_UNCONFIRMED', message: '部分后台进程清理无法确认，请检查残留。' } };
       }
       return { ok: true, stopped };
@@ -3278,8 +3656,11 @@ function createA9AgentRuntime(options) {
       err.code = 'A9_MODE_CHANGE_BLOCKED_ACTIVE_TURN';
       throw err;
     }
+    readManagedRecoveryFacts();
     const managed = loopTrustedRunner.getBackgroundManager().list();
-    if (managed.some((item) => item.status === 'running' || item.status === 'starting' || item.cleanupRequired === true)) {
+    if (quarantinedManagedHandles.size || persistentManagedBlockers.size || pendingManagedSettlements.size
+      || managed.some((item) => item.status === 'running' || item.status === 'starting' || item.cleanupRequired === true
+        || item.statePersistencePending === true)) {
       const err = new Error('A9_MODE_CHANGE_BLOCKED_MANAGED_PROCESS: 仍有活动或清理未确认的后台进程，不能切换权限模式');
       err.code = 'A9_MODE_CHANGE_BLOCKED_MANAGED_PROCESS';
       throw err;
@@ -3302,16 +3683,53 @@ function createA9AgentRuntime(options) {
         setAgentStatus('needs_input', { resync: true });
       }
     }
+    const bypassCache = options.bypassCache === true;
     const conversationPage = options.conversationPage ? persistence.listConversationFactPage(a9SessionId) : null;
     workspaceLock.retry();
     const shellSelection = shellSnapshot();
-    const managedProcesses = syncManagedProcessFacts();
+    const managedProcesses = readManagedProcessFacts({ bypassCache, forSnapshot: true });
     const activeManaged = managedProcesses.filter((item) => ['running', 'starting', 'running_unknown', 'identity_mismatch'].includes(item.lastProbeStatus) || item.cleanupRequired === true);
+    // A pending terminal settlement (or a Runner terminal write still unconfirmed) keeps
+    // Stop available as its retry entry even when the persistent row already looks settled.
+    const managedStoppable = activeManaged.length > 0 || pendingManagedSettlements.size > 0
+      || loopTrustedRunner.getBackgroundManager().list().some(handle => handle.statePersistencePending === true);
     const blockReason = conversationBlockReason();
     const pendingQuestion = currentPendingQuestion
       ? pendingQuestionSnapshot(currentPendingQuestion)
       : persistence.getPendingQuestion(canonicalWorkspace, a9SessionId);
-    const checkpointPage = persistence.listRecentCheckpoints(a9SessionId, 50);
+    const checkpointRevision = bypassCache ? undefined : readSnapshotRevisions()?.checkpoints;
+    let checkpointPage;
+    if (checkpointRevision !== undefined && checkpointCache?.sessionId === a9SessionId
+      && checkpointCache.revision === checkpointRevision) {
+      checkpointPage = checkpointCache.page;
+    } else {
+      const freshPage = persistence.listRecentCheckpoints(a9SessionId, 50);
+      checkpointPage = {
+        checkpoints: Array.isArray(freshPage.checkpoints) ? freshPage.checkpoints : [],
+        total: freshPage.total,
+      };
+      checkpointCache = checkpointRevision !== undefined && readSnapshotRevisions()?.checkpoints === checkpointRevision
+        ? { sessionId: a9SessionId, revision: checkpointRevision, page: checkpointPage }
+        : null;
+    }
+    const directoryRevision = bypassCache ? undefined : readSnapshotRevisions()?.directory;
+    let rawConversationsWithInbox;
+    if (directoryRevision !== undefined && conversationsCache?.workspace === canonicalWorkspace
+      && conversationsCache.revision === directoryRevision) {
+      rawConversationsWithInbox = conversationsCache.items;
+    } else {
+      const listed = persistence.listConversations(canonicalWorkspace, { includeDraftPresence: true });
+      const inboxSummaries = typeof persistence.listConversationInboxSummaries === 'function'
+        ? persistence.listConversationInboxSummaries(canonicalWorkspace)
+        : null;
+      rawConversationsWithInbox = listed.map((item) => {
+        const summary = inboxSummaries?.get(item.sessionId) || persistence.getConversationInboxSummary(item.sessionId);
+        return { ...item, ...summary };
+      });
+      conversationsCache = directoryRevision !== undefined && readSnapshotRevisions()?.directory === directoryRevision
+        ? { workspace: canonicalWorkspace, revision: directoryRevision, items: rawConversationsWithInbox }
+        : null;
+    }
     let workdir;
     try { workdir = getWorkdirInfo(); }
     catch (error) {
@@ -3377,8 +3795,8 @@ function createA9AgentRuntime(options) {
       agentStatus,
       ...(agentStatus === 'needs_input' ? { questionState: { awaitingReply: true } } : {}),
       activeConversationId: a9SessionId,
-      conversations: persistence.listConversations(canonicalWorkspace)
-        .map(item => ({ ...item, ...persistence.getConversationInboxSummary(item.sessionId), hasDraft: composer.hasContent(item.sessionId) })),
+      conversations: rawConversationsWithInbox
+        .map(({ hasPersistedDraft, ...item }) => ({ ...item, hasDraft: composer.hasContent(item.sessionId, hasPersistedDraft) })),
       conversationControls: {
         canSwitch: !blockReason,
         reason: blockReason,
@@ -3394,8 +3812,8 @@ function createA9AgentRuntime(options) {
         },
       } : {}),
       controls: {
-        canStop: Boolean(activeController) || activeManaged.length > 0,
-        stopKind: activeController ? 'turn' : activeManaged.length > 0 ? 'managed_process' : 'none',
+        canStop: Boolean(activeController) || managedStoppable,
+        stopKind: activeController ? 'turn' : managedStoppable ? 'managed_process' : 'none',
       },
       // runTurn/resumeAfterApproval 尚未返回时不把审批暴露给 Renderer；否则旧卡片
       // 可在控制器释放前再次提交，形成 A9_TURN_ALREADY_ACTIVE 竞态。
@@ -3403,7 +3821,7 @@ function createA9AgentRuntime(options) {
       ...(pendingQuestion && !activeController ? { pendingQuestion } : {}),
       timeline: timeline.slice(-100),
       liveModelPreview: computeLiveModelPreview(),
-      checkpoints: checkpointPage.checkpoints,
+      checkpoints: checkpointPage.checkpoints.map(item => ({ ...item })),
       checkpointsTotal: checkpointPage.total,
       conversation: conversationPage ? conversationPage.facts : persistence.listConversationFacts(a9SessionId),
       ...(conversationPage ? { conversationPage: { hasMore: conversationPage.hasMore, nextBefore: conversationPage.nextBefore } } : {}),
@@ -3744,6 +4162,7 @@ function createA9AgentRuntime(options) {
   }
 
   function canLeaveWorkspace() {
+    readManagedRecoveryFacts();
     const reason = config.isTransferReserved?.() ? '文件配对转移正在执行，请先停止或等待完成' : conversationBlockReason();
     return { allowed: !reason, reason };
   }
@@ -3816,20 +4235,44 @@ function createA9AgentRuntime(options) {
         { code: 'A9_SHUTDOWN_POLICY_CONFLICT' }));
       return shutdownPromise;
     }
+    readManagedRecoveryFacts();
     shutdownStopManaged = stopManaged;
     shutdownRequested = true;
     queueClosed = true;
     pauseQueue();
     if (imageService) imageService.clear();
     const manager = loopTrustedRunner.getBackgroundManager();
-    const releaseWorkspaceLock = () => workspaceLock.release();
+    // Returns false and keeps the lock when the final State transaction finds blockers.
+    const releaseWorkspaceLock = (result) => {
+      let outcome;
+      try { outcome = workspaceLock.release({ handedOver: Array.from(confirmedHandovers.values()) }); }
+      catch (error) {
+        recordRuntimeDiagnostic('A9_SHUTDOWN_LOCK_RELEASE_FAILED', error);
+        result.unresolved.push('workspace lock release could not be confirmed');
+        return false;
+      }
+      if (outcome.released) { confirmedHandovers.clear(); return true; }
+      if (outcome.reason) {
+        // The owner row survived the DELETE: keep the entry and stay retryable.
+        recordRuntimeDiagnostic('A9_SHUTDOWN_LOCK_RELEASE_FAILED', Object.assign(new Error(outcome.reason), { code: outcome.reason }));
+        result.unresolved.push('workspace lock release could not be confirmed');
+        return false;
+      }
+      const blockers = outcome.blockers || [];
+      result.unresolved.push(`managed process cleanup remains unconfirmed in persistent state: ${blockers.slice(0, 20).join(', ')}`
+        + (blockers.length > 20 ? ` (+${blockers.length - 20})` : ''));
+      return false;
+    };
     if (!checkpointRecoveryPending && pendingStateOperations.size === 0 && !officeService
       && !officePorts.hasOpenPorts()
-      && !activeController && !(options.cancelPending && (currentPendingApproval || currentPendingQuestion)) && manager.getActiveCount() === 0) {
+      && !activeController && !(options.cancelPending && (currentPendingApproval || currentPendingQuestion))
+      && !quarantinedManagedHandles.size && !pendingManagedSettlements.size && manager.getActiveCount() === 0) {
       // 保留既有无负载关闭语义：无需等待时同步释放锁，紧接着切换/重开
       // 同一工作区不会短暂误报 A9_WORKSPACE_LOCKED。
-      releaseWorkspaceLock();
-      shutdownPromise = Promise.resolve({ stopped: [], leftToSystem: [], unresolved: [] });
+      const result = { stopped: [], leftToSystem: [], unresolved: [] };
+      // A refused fast release stays retryable like an unresolved slow attempt.
+      if (!releaseWorkspaceLock(result)) return Promise.resolve(result);
+      shutdownPromise = Promise.resolve(result);
       return shutdownPromise;
     }
     const attempt = (async () => {
@@ -3879,11 +4322,36 @@ function createA9AgentRuntime(options) {
       // and unresolved result. Its pending promise must not bypass that limit.
       await shutdownWait('state_operations', () => !activeController ? Promise.allSettled(Array.from(pendingStateOperations)) : undefined);
       await shutdownWait('managed_process_stop', () => managedStopPromise);
-      const before = manager.list();
-      const result = await shutdownWait('background_manager_dispose', () => manager.dispose({ stopManaged }));
+      readManagedRecoveryFacts();
+      // Terminal writes left unconfirmed by an earlier Stop/shutdown are retried first,
+      // through the same conditional transaction and with their original identity.
+      const pendingFailures = [];
+      for (const pending of Array.from(pendingManagedSettlements.values())) {
+        if (quarantinedManagedHandles.has(pending.handle.handleId)) continue;
+        try { settleManagedTerminal(pending.handle, pending.mode); }
+        catch (error) {
+          recordRuntimeDiagnostic('A9_SHUTDOWN_MANAGED_SETTLE_FAILED', error);
+          pendingFailures.push(`managed process terminal state could not be settled: ${pending.handle.handleId}`);
+        }
+      }
+      const before = manager.list().filter(handle => !pendingManagedSettlements.has(handle.handleId));
+      const recoveredLegacy = new Set(before.filter(handle => !handle.owner && manager.isRecoveredFact(handle.handleId)).map(handle => handle.handleId));
+      const result = quarantinedManagedHandles.size
+        ? { stopped: [], leftToSystem: [], unresolved: ['managed process ownership cannot be confirmed'] }
+        : await shutdownWait('background_manager_dispose', () => manager.dispose({ stopManaged }));
+      const terminalHandles = new Map((Array.isArray(result.stoppedHandles) ? result.stoppedHandles : []).map(handle => [handle.handleId, handle]));
+      delete result.stoppedHandles;
+      result.unresolved.push(...pendingFailures);
       for (const handle of before) {
-        // Terminal/released state was already audited by the manager. Do not overwrite it with a pre-release snapshot.
-        if (result.stopped.includes(handle.handleId)) recordManagedHandle({ ...handle, status: 'stopped', cleanupRequired: false });
+        if (!result.stopped.includes(handle.handleId)) continue;
+        // Persist the Runner's own terminal state, never a pre-stop snapshot (ADR-0344).
+        const terminal = terminalHandles.get(handle.handleId) || { ...handle, status: 'stopped', cleanupRequired: false };
+        try { settleManagedTerminal(terminal, recoveredLegacy.has(handle.handleId) ? 'settle' : undefined); }
+        catch (error) {
+          // An unsettled terminal write keeps its persistent blocker and the lock.
+          recordRuntimeDiagnostic('A9_SHUTDOWN_MANAGED_SETTLE_FAILED', error);
+          result.unresolved.push(`managed process terminal state could not be settled: ${handle.handleId}`);
+        }
       }
       if (activeController) {
         result.unresolved.push('active turn cleanup did not settle before the 10 second shutdown deadline');
@@ -3892,7 +4360,23 @@ function createA9AgentRuntime(options) {
       if (pendingStateOperations.size > 0) result.unresolved.push('workspace state operations have not settled');
       const cleanupConfirmed = !activeController && pendingStateOperations.size === 0
         && manager.getActiveCount() === 0 && result.unresolved.length === 0;
-      if (cleanupConfirmed) releaseWorkspaceLock();
+      if (manager.getActiveCount() > 0 && result.unresolved.length === 0) {
+        // Never report a clean close while the Runner still needs this workspace's attention.
+        const remaining = manager.list().filter(handle => handle.status === 'running' || handle.status === 'starting'
+          || handle.cleanupRequired === true || handle.statePersistencePending === true).map(handle => handle.handleId);
+        result.unresolved.push(`managed process state remains unsettled: ${remaining.slice(0, 20).join(', ')}`
+          + (remaining.length > 20 ? ` (+${remaining.length - 20})` : ''));
+      }
+      // Only a legacy direct-spawn handle the Runner itself left to the system keeps a
+      // running row legitimately; its exact identity is exempt in the final State check.
+      // The credential survives a refused release so a retry keeps the same exemption.
+      for (const handle of before) {
+        if (handle.owner || recoveredLegacy.has(handle.handleId) || !result.leftToSystem.includes(handle.handleId)) continue;
+        confirmedHandovers.set(handle.handleId, { handleId: handle.handleId, pid: handle.pid ?? null, startedAt: handle.startTime });
+      }
+      if (cleanupConfirmed) releaseWorkspaceLock(result);
+      // ADR-0346: a close that kept the workspace lock is never reported as resolved.
+      if (!workspaceLock.isReleased() && result.unresolved.length === 0) result.unresolved.push('workspace lock remains held');
       return result;
     })();
     shutdownPromise = attempt;
@@ -3936,6 +4420,7 @@ function createA9AgentRuntime(options) {
       // Context statistics only read SQLite/history. They must not block the
       // approval that just scheduled that refresh; actual state operations do.
       const stateOperations = [...pendingStateOperations].filter(op => !pendingReadOnlyRefreshes.has(op)).length;
+      if (!allowActive) readManagedRecoveryFacts();
       if (!allowActive && (conversationBlockReason() || stateOperations)) {
         throw Object.assign(new Error('A9_TRANSFER_TARGET_BUSY'), { code: 'A9_TRANSFER_TARGET_BUSY' });
       }
@@ -4058,6 +4543,7 @@ function createA9AgentRuntime(options) {
     reopenConversation: sessionId => updateConversationInbox(sessionId, 'reopen'),
     visitConversation: sessionId => updateConversationInbox(sessionId, 'visit'),
     canLeaveWorkspace,
+    isWorkspaceLockReleased: () => workspaceLock.isReleased(),
     getWorkdirInfo,
     getWorkdirConversationId: () => a9SessionId,
     ensureWorkdir,

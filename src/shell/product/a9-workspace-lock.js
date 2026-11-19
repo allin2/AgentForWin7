@@ -12,8 +12,10 @@
 const LOCK_STATE = Object.freeze({ UNLOCKED: 'unlocked', ACQUIRED: 'acquired', RELEASED: 'released' });
 
 /**
- * @param {{ acquire: () => { acquired?: boolean, holder?: string }, release: () => void }} port
- *   acquire runs persistence.acquireWorkspaceLock; release runs persistence.releaseWorkspaceLock.
+ * @param {{ acquire: () => { acquired?: boolean, holder?: string },
+ *   release: (options?: object) => void | { released: boolean, blockers?: string[], reason?: string } }} port
+ *   acquire runs persistence.acquireWorkspaceLock; release runs the persistence release.
+ *   A release result with released=false means the row was kept: the lock stays acquired.
  */
 function createWorkspaceLock(port) {
   let state = LOCK_STATE.UNLOCKED;
@@ -38,12 +40,20 @@ function createWorkspaceLock(port) {
       if (state === LOCK_STATE.UNLOCKED) attempt();
       return state === LOCK_STATE.ACQUIRED || (state === LOCK_STATE.RELEASED && heldAtRelease);
     },
-    /** Gives the persisted lock back once; later calls are no-ops. */
-    release() {
-      if (state === LOCK_STATE.RELEASED) return;
-      heldAtRelease = state === LOCK_STATE.ACQUIRED;
-      if (heldAtRelease) port.release();
+    /** Gives the persisted lock back once; later calls are no-ops. A refused release keeps it held. */
+    release(options) {
+      if (state === LOCK_STATE.RELEASED) return { released: true };
+      const held = state === LOCK_STATE.ACQUIRED;
+      if (held) {
+        const outcome = port.release(options);
+        if (outcome && outcome.released === false) {
+          return { released: false, blockers: Array.isArray(outcome.blockers) ? [...outcome.blockers] : [],
+            ...(typeof outcome.reason === 'string' ? { reason: outcome.reason } : {}) };
+        }
+      }
+      heldAtRelease = held;
       state = LOCK_STATE.RELEASED;
+      return { released: true };
     },
   });
 }

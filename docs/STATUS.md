@@ -1,6 +1,6 @@
 # 当前项目状态
 
-更新：2026-11-17 America/Los_Angeles。当前开发工作区 main；本页只保留当前有效基准、进行中的工作与未签发/已知限制声明，已结算历史交付记录迁入 [STATUS_LOG](STATUS_LOG.md#2026-11-17-自-status-迁入的已结算历史交付记录adr-0340)（ADR-0340）。
+更新于 2026-11-19 UTC。当前开发工作区 main；本页只保留当前有效基准、进行中的工作与未签发/已知限制声明，已结算历史交付记录迁入 [STATUS_LOG](STATUS_LOG.md#2026-11-17-自-status-迁入的已结算历史交付记录adr-0340)（ADR-0340）。
 
 ## 产品与可试用结果
 
@@ -13,9 +13,23 @@
 
 - [健康体检与体验优化（Phase A / Phase B / Phase C）](tasks/README.md#当前工作与待批准任务)：`APPROVED_FOR_IMPLEMENTATION`。负责人授权开展全面体检、Phase A 快速修复、Phase B 体验与质量提升以及 Phase C 长期架构优化。Phase A（已提交 `fda0aee`）、Phase B（已提交 `35678eb`，ADR-0339）、Phase C 批次 1（已提交 `dbf9cf1`，ADR-0340）与 Phase C 批次 2（已提交 `c717f7d`，ADR-0341）均已闭环。当前完成 Phase C 批次 3：C1 巨石文件拆分（`a9-card-renderers.js`、`a9-runtime-office.js`、`a9-runtime-model-failure.js`、`a9-runtime-redaction.js`、`a9-runtime-persisted-context.js`、`a9-runtime-unavailable.js`），并通过代码审查修复加固；开发机通过 Shell、Core、Gateway 全量测试及文档一致性检查。Win10、Win7 实机、正式门 A/B 与公开推送为 `NOT_PERFORMED`。
 
+- [Phase C 快照与 SQLite 遗留修复](#phase-c-开发分支交接)：负责人于 2026-11-19 UTC 授权将当前补丁同步到 staging 开发分支，供后续修复。第 24 轮独立复核在开发机复现 3 项 P1，问题仍待修复。此前决定见 ADR-0342 至 ADR-0346。
+
 - [A9-70](tasks/A9_70_OFFICE_WORKFLOW_BATCH1.md#10-当前交付与接续点)：`APPROVED_FOR_IMPLEMENTATION`。cloud-main 上 OpenCode Hydrogen/xhigh 已基于 `a9-70-p1b` 本地提交 P2～P6 并完成 `claude-opus-5-5`/`high` 独立只读审核（`71b341b..1a3730d` 检出 `P0=0`、`P1=3`、`P2=9`）后的 P1 全量修复与 P2 加固，覆盖流式 ZIP32、DOCX 模板强制数据与边界样张确认门、PPTX 五版式与模板填充、离线单文件 HTML 看板与独立会话 Chromium 108 受限预览、只读邮箱（Worker 隔离、Mock 标 `SURROGATE`、EML/GBK、Win7 危险附件阻断）、办公界面引导/勾选/样张与技能目标确认安装（真实 SQLite checkpoint 撤销）及 `office-lite` 闭包检查。当前均为开发机证据（Node `20.17.0` + Electron `22.3.27`/Node `16.17.1`/Chromium `108`），不声明 Windows Explorer（无 KB2704299 可能乱码 UTF-8 中文名）或 ZIP64，不声明任意排版分页保真，Worker 超时待 Win7 实测；Win10、Win7 实机、正式门 A/B 与公开推送发布为 `NOT_PERFORMED`，不变更 alpha.8 已发布结果。
 - [A9-69](tasks/A9_69_ALPHA8_RELEASE.md)：**COMPLETE，`WIN7-62` 限定接受并已发布**，`A9_69_WIN7_62_PASS_WITH_KNOWN_LIMITS`（`0.3.0-alpha.8`，ADR-0333 / ADR-0320）。本地整合、增量只读独立审核复审（`P0=0`、`P1=0`、`P2=0`）及全量开发机检查已通过，干净源码 `585ea92b…` 单次构建 `Win7CodingAgent-0.3.0-alpha.8-win7-x64.zip`（`111,281,027` 字节、ZIP `3e3970a9…`、manifest `a7ce32a8…`、`3,283` 文件）。Win7 `DEV_CHANNEL` `win762` 取得 **14/14 PASS**（真实 DPAPI 100K/双工作区、非阻塞 `a9.snapshot.get` `326 ms`、128K/队列缩容保留/`auto` 清除及 Chromium 108 DOM；回环 `4` 次，外部模型 `0` 次），运行目录已清理、锁 `inactive`、临时容量例外已移除，证据见本机 `outputs/a9-69-alpha8/win7/RESULT_FINAL.json`。标签 `v0.3.0-alpha.8-win7-62` 准确指向 `585ea92b…`，Pre-release 于 UTC `2026-11-16T06:52:07Z` 公开，4 个附件草稿与公开后回下载核验全部一致，见本机 `outputs/a9-69-alpha8/publish/`；正式门 A/B、双构建与冻结为 `NOT_PERFORMED`。
 - 已结算任务（A9-68 及更早的 A9-4x～A9-6x 交付、ENGINEERING_03～06 环境与 Win7 开发通道记录）的逐项结论、哈希与限制不再在本页重复，见 [STATUS_LOG](STATUS_LOG.md#2026-11-17-自-status-迁入的已结算历史交付记录adr-0340) 与 [任务索引](tasks/README.md)；ADR-0340 规定迁移规则，不改判任何已签结论。
+
+### Phase C 开发分支交接
+
+交接分支为 `staging/box/health-check-phase-abc`。复核基线为 `234dbd8b…`。第 24 轮复核的跟踪差异 SHA-256 为 `69f9f2313c1f767f4245b2e7ae3f3a5ac66e18c73ab9b701ab702d495fba2f67`，新增快照测试的 Git blob 为 `fea71bcdf730d95b874004360af80fddeb0dc4b5`。交接提交在该代码基础上补录本节。
+
+| 级别 | 开发机已知问题 | 继续修复时的验证目标 |
+|---|---|---|
+| P1 | 旧库默认目录从 A 改名为 B，再改绑到 C 时，A 内的截断归属可能漏报。复核在旧版改名保留 `origin: 'auto'` 和旧元数据退化为 JSON `null` 时复现。两种关闭选择均误释放 A 的工作区锁。 | 旧库证据无法确认来源时保留锁，A 返回归属损坏诊断。核对[历史补齐](../src/state/src/a9-persistence.ts#L1110)。 |
+| P1 | 会话按 A → B → A 改绑后，B 内已可确认来源的截断句柄前缀（如 `sh-`）会误阻断 A。复核覆盖 A 的 `stopped` 和 `released` 事实。 | 归属读取和历史校验都按事件写入时的工作区判定。两种关闭选择均可正常释放 A 的锁。核对[归属读取](../src/state/src/a9-persistence.ts#L2769)和[历史校验](../src/state/src/a9-persistence.ts#L2923)。 |
+| P1 | 同一会话在 A、B 各完成一次处置，再改绑到 C 后，B 内截断的处置事件会遮蔽 A 内的有效回执。当前 A 和 B 都无法关闭。 | A 继续读取有效回执并正常关闭。B 报告本工作区的处置损坏并保留锁。核对[处置事件读取](../src/state/src/a9-persistence.ts#L3022)。 |
+
+第 24 轮独立复核使用开发机 Node 20.17.0 和 SQLite 3.43.1。State 35 套件、643 项以及 Shell 97 套件、2,066 项均通过。独立反例另外复现上述 3 项 P1。Win10、Win7 实机验证、正式门 A/B 与公开发布均为 `NOT_PERFORMED`。
 
 ## 日常入口
 

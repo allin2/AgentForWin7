@@ -26,6 +26,8 @@ function shutdownHarness(blocked?: string) {
     // C1：Office 外围端口已拆到 a9-runtime-office.js；此夹具没有创建过任何外围端口。
     officePorts: { hasOpenPorts: () => false, closeOpenPorts: () => [] },
     loopTrustedRunner: { getBackgroundManager: () => manager },
+    readManagedRecoveryFacts() {}, quarantinedManagedHandles: new Set(), confirmedHandovers: new Map(),
+    pendingManagedSettlements: new Map(), settleManagedTerminal() {},
     workspaceLock: createWorkspaceLock({ acquire: () => ({ acquired: true, holder: 'owner' }), release }),
     persistence: { releaseWorkspaceLock: release }, canonicalWorkspace: '/test', ownerId: 'owner', checkpointRecoveryPending: blocked === 'checkpoint_recovery',
     checkpointRecoveryReady: blocked === 'checkpoint_recovery' ? gate.promise : Promise.resolve(), activeController: blocked === 'active_task_cancel' ? { abort: jest.fn() } : null,
