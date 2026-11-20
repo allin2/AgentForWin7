@@ -1,19 +1,16 @@
 # 当前项目状态
 
-更新于 2026-11-19 UTC。当前开发工作区 main；本页只保留当前有效基准、进行中的工作与未签发/已知限制声明，已结算历史交付记录迁入 [STATUS_LOG](STATUS_LOG.md#2026-11-17-自-status-迁入的已结算历史交付记录adr-0340)（ADR-0340）。
+更新于 2026-11-20 UTC。当前开发工作区 main；本页只保留当前有效基准、进行中的工作与未签发/已知限制声明，已结算历史交付记录迁入 [STATUS_LOG](STATUS_LOG.md#2026-11-17-自-status-迁入的已结算历史交付记录adr-0340)（ADR-0340）。
 
 ## 产品与可试用结果
 
-- **启动阻断**：已发布的 Alpha.9 / `WIN7-63`（源码 `6c8bd75d…`、ZIP `b739cf3c…`）出现普通桌面启动失败。开发机从该 ZIP 提取并执行原加载器，复现 `A9_PACKAGE_RUNTIME_CONFIG_INVALID`。暂停使用该包，临时试用可沿用 Alpha.8。修复通过开发机定向验证，换发与新包 Win7 实机验证为 `NOT_PERFORMED`。见 [A9-72 §6](tasks/A9_72_ALPHA9_RELEASE.md#6-发布后启动阻断)。
-- 最新已发布试用版：`v0.3.0-alpha.9-win7-63`，内部预览版；[下载与说明](https://github.com/allin2/AgentForWin7/releases/tag/v0.3.0-alpha.9-win7-63)。整合 Phase ABC 架构与性能优化（C1～C6、B1、B3）及 P1 锁处置修复（ADR-0347～ADR-0353）；原证据为 Windows 7 SP1 x64 实机 DEV_CHANNEL 21/21 PASS（回环 SSE 4 次，外部模型 0 次，进程树与锁清理完毕，归档 outputs/phase-abc-p1-win7/RESULT_FINAL.json），负责人按 ADR-0354、ADR-0333 与 ADR-0320 限定接受并授权发布，见 [A9-72](tasks/A9_72_ALPHA9_RELEASE.md)。
-- 当前已签发限定接受候选：`v0.3.0-alpha.9` / `WIN7-63`，源 `6c8bd75d…`，ZIP `b739cf3c…`，结论 `A9_72_WIN7_63_PASS_WITH_KNOWN_LIMITS`。负责人按 ADR-0354、ADR-0333 与 ADR-0320 限定接受并授权发布，未执行门 A/B，详见 [A9-72](tasks/A9_72_ALPHA9_RELEASE.md)。
-- 前一发布试用版：`v0.3.0-alpha.8-win7-62`，内部预览版；[下载与说明](https://github.com/allin2/AgentForWin7/releases/tag/v0.3.0-alpha.8-win7-62)。详见 [A9-69 §6](tasks/A9_69_ALPHA8_RELEASE.md#6-负责人限定接受与发布授权2026-11-16-utc)。
+- 最新已发布试用版为 `v0.3.0-alpha.10-win7-64`。Windows 7 SP1 x64 普通用户桌面完成同包开窗、正常退出和进程、任务、锁收尾。外部模型请求 0。来源 `5e196294…`，ZIP `ad418073…`。负责人限定接受为 `A9_73_WIN7_64_PASS_WITH_KNOWN_LIMITS`，正式门 A/B 为 `NOT_PERFORMED`。GitHub 4 个附件回下载核验通过。见 [下载与说明](https://github.com/allin2/AgentForWin7/releases/tag/v0.3.0-alpha.10-win7-64) 和 [A9-73](tasks/A9_73_ALPHA10_STARTUP_REISSUE.md)。
+- Alpha.9 / `WIN7-63` 的已发布包（源码 `6c8bd75d…`、ZIP `b739cf3c…`）存在普通桌面启动阻断，请使用已换发的 Alpha.10。原发布包、原限定接受记录和较早开发包的实机证据留档。见 [A9-72 §6](tasks/A9_72_ALPHA9_RELEASE.md#6-发布后启动阻断)。
+- 旧版回退参考：`v0.3.0-alpha.8-win7-62`，内部预览版；[下载与说明](https://github.com/allin2/AgentForWin7/releases/tag/v0.3.0-alpha.8-win7-62)。详见 [A9-69 §6](tasks/A9_69_ALPHA8_RELEASE.md#6-负责人限定接受与发布授权2026-11-16-utc)。
 - Full Access / Read Only 为当前产品能力；Review 保持 fail-closed。完整 Alpha / RC 未签发；当前已知限制见 [A9-43 §8.35](tasks/A9_43_ALPHA3_WIN7_56_RELEASE.md#835-负责人准确确认与-win7-56-验收签发)。历史限制见 A9-39 与 ADR-0286，不把版本名等同完整验收。
 - 当前有效需求：[A9 PRD](prds/WIN7_TRUSTED_CODING_AGENT_REQUIREMENTS_V1.md)；后继决定以 [ADR 索引](DECISIONS_INDEX.md) 定位。源码、历史需求和运行结论冲突时按后继决策核实，不以源码替代需求。
 
 ## 当前交付、进行中的工作与授权
-
-- [A9-73](tasks/A9_73_ALPHA10_STARTUP_REISSUE.md)：Alpha.10 / WIN7-64 启动修复换发已获本地实施与 90 分钟 Win7 开发级复验授权。
 
 - [健康体检与体验优化（Phase A / Phase B / Phase C）](tasks/README.md#当前工作与待批准任务)：`APPROVED_FOR_IMPLEMENTATION`。负责人授权开展全面体检、Phase A 快速修复、Phase B 体验与质量提升以及 Phase C 长期架构优化。Phase A（已提交 `fda0aee`）、Phase B（已提交 `35678eb`，ADR-0339）、Phase C 批次 1（已提交 `dbf9cf1`，ADR-0340）与 Phase C 批次 2（已提交 `c717f7d`，ADR-0341）均已闭环。当前完成 Phase C 批次 3：C1 巨石文件拆分（`a9-card-renderers.js`、`a9-runtime-office.js`、`a9-runtime-model-failure.js`、`a9-runtime-redaction.js`、`a9-runtime-persisted-context.js`、`a9-runtime-unavailable.js`），并通过代码审查修复加固；开发机通过 Shell、Core、Gateway 全量测试及文档一致性检查。Win10、Win7 实机、正式门 A/B 与公开推送为 `NOT_PERFORMED`。
 
