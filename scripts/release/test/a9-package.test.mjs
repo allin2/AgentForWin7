@@ -5079,7 +5079,10 @@ async function w41UndoRace(driverSource, options = {}) {
       throw new Error(`${label}; last_observation=${JSON.stringify(last)}`);
     },
     sleep: async () => {} });
-  const product = fs.readFileSync(path.join(process.cwd(), 'src/shell/product/renderer/a9-workbench.js'), 'utf8');
+  const rendererRoot = path.join(process.cwd(), 'src/shell/product/renderer');
+  const agentStatus = path.join(rendererRoot, 'a9-agent-status.js');
+  vm.runInContext(fs.readFileSync(agentStatus, 'utf8'), context, { filename: agentStatus });
+  const product = fs.readFileSync(path.join(rendererRoot, 'a9-workbench.js'), 'utf8');
   const instrumented = product.replace('  root.win7AgentA9Workbench = Object.freeze({',
     '  root.__r8 = { state, syncCheckpointScope, renderCheckpoints, cancelPendingUndo };\n  root.win7AgentA9Workbench = Object.freeze({');
   assert.notEqual(instrumented, product);
