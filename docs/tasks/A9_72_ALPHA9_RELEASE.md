@@ -53,3 +53,11 @@ Win7-Validation: DEV_CHANNEL
 - **测试结果**：21/21 项全部 PASS，`normal_quit=true`，外部模型调用严格为 0。
 - **环境清理**：验证完毕后运行目录锁释放（`lock.active: false`），残留进程为 0，残留任务为 0，临时容量窗口代码已还原。
 - **完整证据**：归档于 `outputs/phase-abc-p1-win7/RESULT_FINAL.json`（SHA-256 `6b3c84c9…` 绑定产物）。
+
+## 6. 发布后启动阻断
+
+- 用户的 Win7 桌面启动截图报告 `A9_PACKAGE_RUNTIME_CONFIG_INVALID`。开发机核验发布 ZIP `b739cf3c99f3acf4de5c20bc305b7cdd21b21eeedaa34b6d8d666280f4688cbd`，并用其中的描述符、manifest 和原生文件复现加载器在 `manifestContract` 失败。包内加载器与标签所指源码 `6c8bd75d82fced82e4b8d3301bd5ba81b2c2cea8` 一致。打包器登记了 Alpha.9 的输入锁，主进程加载器的允许表漏登记该锁。
+- §5 的 21/21 记录绑定开发包源码 `c00cb8c0cb26bd3f000204e917038fc77c68bfdc` 和 ZIP `6b3c84c9ae4021dbb1ac4a9efd9d49a0017c6fc0552195a4ef1f3266dbc065ac`，只对该次 `DEV_CHANNEL` 运行有效。既有裁决、发布包与原始证据留档。
+- 在 `box/phase-abc-p1-repair`（修复前 HEAD `a70628d0`）的本地差异中补齐 Alpha.9 锁、版本、Release ID 和候选的精确匹配。构建器在生成 ZIP 前调用暂存包内的真实加载器，校验描述符、manifest 和原生文件哈希。该检查能发现模块成功导入但执行启动校验失败的情况。
+- 以发布 ZIP 的原始输入重放，旧加载器复现异常，修正后的加载器通过启动校验。锁定版本用例修复前 1 项失败，修复后 Shell 定向用例 61/61 通过。合成包测试验证了加载器拒绝自身身份时构建失败且没有 ZIP 输出。
+- 暂停使用原发布包。新的发布身份和换发须由负责人确认。以新产物执行普通 Win7 用户解压、双击、窗口就绪和正常退出，按源码、ZIP SHA-256 和运行身份保留直接证据。新包构建、Win7 实机复验和远程发布均为 `NOT_PERFORMED`。

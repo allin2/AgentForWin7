@@ -33,6 +33,19 @@ const repositoryRoot = path.resolve(scriptDirectory, '..', '..');
 const RUNTIME_MODULES = ['core', 'gateway', 'git-adapter', 'runner', 'shell', 'state', 'workspace'];
 
 const RELEASE_PROFILES = {
+  'A9-ALPHA10-INPUTS-D013-V26-MANAGED': {
+    task: 'A9-73', candidate: 'WIN7-64', candidateTentative: true, batch2: true,
+    releaseId: 'WIN7-CODING-AGENT-A9-ALPHA10', version: '0.3.0-alpha.10',
+    taskBook: 'docs/tasks/A9_73_ALPHA10_STARTUP_REISSUE.md',
+    lockFile: 'a9-alpha10-input-lock.json', kitFile: 'A9_ALPHA10_VALIDATION_KIT.json',
+    validationDoc: 'A9_ALPHA10_WIN7_VALIDATION.md',
+    integrityCommand: 'RUN_A9_ALPHA10_INTEGRITY.cmd', smokeCommand: 'RUN_A9_ALPHA10_SMOKE.cmd',
+    reportCommand: 'RUN_A9_ALPHA10_REPORT_VERIFY.cmd',
+    integrityScript: 'a9-alpha10-package-integrity.cjs', reportScript: 'a9-alpha10-report.cjs',
+    smokeScript: 'a9-alpha10-smoke.cjs', fixturesScript: 'a9-alpha10-fixtures.cjs',
+    requestScript: 'a9-alpha10-desktop-request.cjs', controllerScript: 'a9-alpha10-desktop-controller.ps1',
+    driverFile: 'a9-alpha10-driver.cjs', evidenceDirectory: 'a9-alpha10-evidence',
+  },
   'A9-ALPHA9-INPUTS-D013-V26-MANAGED': {
     task: 'A9-72', candidate: 'WIN7-63', candidateTentative: true, batch2: true,
     releaseId: 'WIN7-CODING-AGENT-A9-ALPHA9', version: '0.3.0-alpha.9',
@@ -695,7 +708,6 @@ export function buildA9ProductCandidate(options) {
     extractStorageRuntime(storageZip, nativeRoot);
     assertNativeOutsideApp(stage);
     verifyPackagedJavaScript(appRoot);
-    verifyA9ModuleClosure(appRoot);
 
     writeJson(path.join(appRoot, 'a9-runtime.json'), {
       schema_version: 1,
@@ -830,6 +842,7 @@ export function buildA9ProductCandidate(options) {
     verifyHelperRecoveryManifest(manifest, lock, profile, sbom);
     writeJson(path.join(stage, 'release-manifest.json'), manifest);
     verifyA9Manifest(stage, manifest, lock);
+    verifyA9ModuleClosure(appRoot);
 
     fs.mkdirSync(outputRoot, { recursive: true });
     fs.rmSync(temporaryZipPath, { force: true });
@@ -2476,9 +2489,20 @@ function verifyA9Manifest(stage, manifest, lock) {
 
 function verifyA9ModuleClosure(appRoot) {
   const appRequire = createRequire(path.join(appRoot, 'package.json'));
-  for (const entry of ['./git-adapter/dist/index.js', './product/a9-package-runtime.js']) {
-    try { appRequire(entry); }
-    catch (error) { throw new Error(`A9_PACKAGED_MODULE_LOAD_FAILED:${entry}:${error && error.message ? error.message : String(error)}`); }
+  const runtimeEntry = './product/a9-package-runtime.js';
+  for (const entry of ['./git-adapter/dist/index.js', runtimeEntry]) {
+    try {
+      const modulePath = appRequire.resolve(entry);
+      delete appRequire.cache[modulePath];
+      appRequire(modulePath);
+    } catch (error) {
+      throw new Error(`A9_PACKAGED_MODULE_LOAD_FAILED:${entry}:${error && error.message ? error.message : String(error)}`);
+    }
+  }
+  const { loadA9PackageRuntime } = appRequire(runtimeEntry);
+  // Validate the staged descriptor and manifest without creating a user data directory.
+  if (!loadA9PackageRuntime({ argv: ['--portable'], env: {} })) {
+    throw new Error('A9_PACKAGED_RUNTIME_DESCRIPTOR_MISSING');
   }
 }
 

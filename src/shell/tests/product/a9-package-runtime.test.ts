@@ -177,7 +177,7 @@ describe('A9-32 developer and A9-43 alpha.3 batch-2 package binding', () => {
   const BATCH2 = 'A9-BATCH2-INPUTS-D013-V26-MANAGED';
   const AUTHORITY = { formal_input_lock_sha256: 'b'.repeat(64), approval_registry_commit: 'c'.repeat(40), approval_registry_sha256: 'd'.repeat(64) };
 
-  function managed(kind: 'a9-32' | 'batch2' | 'alpha4' | 'alpha5' | 'alpha6' | 'alpha7' | 'alpha8' | 'alpha8-dev' | 'a9-31') {
+  function managed(kind: 'a9-32' | 'batch2' | 'alpha4' | 'alpha5' | 'alpha6' | 'alpha7' | 'alpha8' | 'alpha9' | 'alpha10' | 'alpha8-dev' | 'a9-31') {
     const env = fixture();
     const descriptorFile = path.join(env.productRoot, '..', 'a9-runtime.json');
     const manifestFile = path.join(env.releaseRoot, 'release-manifest.json');
@@ -200,7 +200,7 @@ describe('A9-32 developer and A9-43 alpha.3 batch-2 package binding', () => {
       manifest.status = 'A9_32_DEVELOPER_CHECK_NOT_WIN7_CANDIDATE';
       manifest.external_acceptance_eligible = false;
     } else {
-      const lockFile = kind === 'alpha8' ? 'a9-alpha8-input-lock.json' : kind === 'alpha7' ? 'a9-alpha7-input-lock.json' : kind === 'alpha6' ? 'a9-alpha6-input-lock.json' : kind === 'alpha5' ? 'a9-alpha5-input-lock.json' : kind === 'alpha4' ? 'a9-alpha4-input-lock.json' : 'a9-batch2-input-lock.json';
+      const lockFile = kind === 'batch2' ? 'a9-batch2-input-lock.json' : `a9-${kind}-input-lock.json`;
       const lock = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../../../../release/win7-product-v3', lockFile), 'utf8'));
       descriptor.version = manifest.version = lock.version;
       descriptor.release_id = manifest.release_id = lock.release_id;
@@ -283,6 +283,45 @@ describe('A9-32 developer and A9-43 alpha.3 batch-2 package binding', () => {
       try { mutate(env); env.save(); expect(() => load(env.productRoot)).toThrow('A9_PACKAGE_RUNTIME_CONFIG_INVALID'); }
       finally { env.cleanup(); }
     }
+  });
+
+  it('A9-73 starts with the alpha.10 release input lock and rejects the retired candidate number', () => {
+    const env = managed('alpha10');
+    try {
+      expect(load(env.productRoot)).toMatchObject({
+        version: '0.3.0-alpha.10', releaseId: 'WIN7-CODING-AGENT-A9-ALPHA10',
+        runnerHelperProfile: MANAGED, runnerHelperProtocol: 3,
+      });
+      expect(env.descriptor.candidate).toBe('WIN7-64');
+      env.descriptor.candidate = env.manifest.candidate = 'WIN7-63';
+      env.save();
+      expect(() => load(env.productRoot)).toThrow('A9_PACKAGE_RUNTIME_CONFIG_INVALID');
+    } finally { env.cleanup(); }
+  });
+
+  it('A9-72 starts with the alpha.9 release input lock', () => {
+    const env = managed('alpha9');
+    try {
+      expect(load(env.productRoot)).toMatchObject({
+        version: '0.3.0-alpha.9', releaseId: 'WIN7-CODING-AGENT-A9-ALPHA9',
+        runnerHelperProfile: MANAGED, runnerHelperProtocol: 3,
+      });
+      expect(env.descriptor.candidate).toBe('WIN7-63');
+    } finally { env.cleanup(); }
+  });
+
+  it.each([
+    ['another candidate', 'candidate', 'WIN7-62'],
+    ['another release', 'release_id', 'WIN7-CODING-AGENT-A9-ALPHA8'],
+    ['another version', 'version', '0.3.0-alpha.8'],
+    ['an unknown lock', 'lock_id', 'A9-ALPHA90-INPUTS-D013-V26-MANAGED'],
+  ])('A9-72 rejects alpha.9 with %s on both sides', (_label, field, value) => {
+    const env = managed('alpha9');
+    try {
+      env.descriptor[field] = env.manifest[field] = value;
+      env.save();
+      expect(() => load(env.productRoot)).toThrow('A9_PACKAGE_RUNTIME_CONFIG_INVALID');
+    } finally { env.cleanup(); }
   });
 
   it('A9-69 accepts alpha.8 release identity and rejects crossed alpha.7 or developer identity fields', () => {

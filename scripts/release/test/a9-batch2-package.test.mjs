@@ -259,6 +259,21 @@ test('batch-2 candidate is complete, reproducible and bound to its contract', ()
   }
 });
 
+test('batch-2 producer withholds the ZIP when the staged startup loader rejects its own lock', () => {
+  const root = tempRoot('a9-batch2-startup-TEST_ONLY-');
+  const repositoryRoot = cleanSourceFixture(root);
+  const runtimePath = path.join(repositoryRoot, 'src/shell/product/a9-package-runtime.js');
+  const runtime = fs.readFileSync(runtimePath, 'utf8');
+  const missingIdentity = /^  'A9-BATCH2-INPUTS-D013-V26-MANAGED': Object\.freeze\(.+\),\n/m;
+  assert.match(runtime, missingIdentity);
+  fs.writeFileSync(runtimePath, runtime.replace(missingIdentity, ''), 'utf8');
+  commitAll(repositoryRoot, 'TEST_ONLY omit startup identity');
+  const inputs = inputsFor(root, repositoryRoot, 'batch2');
+  const outputRoot = path.join(root, 'out');
+  assert.throws(() => buildA9ProductCandidate(buildOptions(inputs, outputRoot)), /A9_PACKAGE_RUNTIME_CONFIG_INVALID/);
+  assert.equal(fs.readdirSync(outputRoot).some((entry) => entry.endsWith('.zip')), false);
+});
+
 test('batch-2 integrity accepts the exact candidate and refuses every identity break', () => {
   const state = sharedCandidate();
   const files = externalFiles(state);

@@ -7,6 +7,8 @@
 历史合同保留原状态与未关闭义务；不构成当前实施授权，也不改判原候选。
 任务书路径保持稳定，不通过移动文件表达生命周期。
 
+本轮 A9-73 Alpha.10 启动修复换发：`APPROVED_FOR_IMPLEMENTATION`，实际分支 `box/phase-abc-p1-repair`。范围为启动身份与打包校验、本地构建及获准的同包 Win7 开发级运行。
+
 本轮 A9-72 alpha.9 集成整合与发布准备（2026-11-20 UTC，负责人明确指示“推动正式发版”，选择选项甲限定接受发版路径）：`APPROVED_FOR_IMPLEMENTATION`，实际分支 `box/phase-abc-p1-repair`，基线 `c00cb8c0…`。
 交付 `0.3.0-alpha.9` / `WIN7-63` 发版 Profile 与输入锁 `release/win7-product-v3/a9-alpha9-input-lock.json`（`A9-ALPHA9-INPUTS-D013-V26-MANAGED`），完整整合体检 Phase ABC（C1～C6、B1、B3）及 P1 锁处置修复（ADR-0347～ADR-0353）；
 单次构建预发布包 `Win7CodingAgent-0.3.0-alpha.9-win7-x64.zip`；绑定 Windows 7 SP1 x64 DEV_CHANNEL 21/21 PASS 实机证据（`outputs/phase-abc-p1-win7/RESULT_FINAL.json`），出具限定接受记录。
@@ -66,6 +68,7 @@ A9-64 只固定 `923bf875…` 的独立审查输入并登记任务；审查由�
 
 | 任务书 | 类型 | 状态 | Phase-Gate | Win7 验证 |
 |---|---|---|---|---|
+| [A9-73（Alpha.10 启动修复换发）](A9_73_ALPHA10_STARTUP_REISSUE.md) | PRODUCT_RELEASE | APPROVED_FOR_IMPLEMENTATION | A9_73_IMPLEMENTATION_AUTHORIZED | NOT_PERFORMED |
 | [A9-70（第一批办公场景改造：文件整理、模板套打与只读邮箱接口；文件整理及配对转移后端已实施，开发机检查中）](A9_70_OFFICE_WORKFLOW_BATCH1.md) | PRODUCT_EXPERIENCE | APPROVED_FOR_IMPLEMENTATION | A9_70_IMPLEMENTATION_AUTHORIZED | NOT_PERFORMED |
 | [A9 Settings：上下文预算、输入框上限与 thinking 设置](A9_SETTINGS_CONTEXT_COMPOSER_THINKING.md) | PRODUCT_EXPERIENCE | APPROVED_FOR_IMPLEMENTATION | A9_SETTINGS_IMPLEMENTATION | NOT_PERFORMED |
 | [A9-65（已合入本地main；开发机收口完成，Win7未执行）](A9_65_VISIBLE_WAITS_AND_DIAGNOSTICS.md) | PRODUCT_RELIABILITY_HARDENING | APPROVED_FOR_IMPLEMENTATION | A9_65_DEVELOPER_VERIFIED | NOT_PERFORMED |

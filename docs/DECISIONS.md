@@ -5797,3 +5797,8 @@ Claude P2-1、P2-3 已补测试，P2-4 已修复；P2-2 按裁决保留为 K7。
 - 验收依据：实机验证直接以 Windows 7 SP1 x64（宿主 `DCCS-CHAIZL-PC`）`DEV_CHANNEL` 21/21 项全量通过（回环 SSE 4 次，外部模型请求严格为 0，进程树与工作区锁完全清零，归档见 `outputs/phase-abc-p1-win7/RESULT_FINAL.json`）为基础，采用选项甲限定接受发布流程。不做双构建、正式冻结与门 A/B，结论记为 `PASS_WITH_KNOWN_LIMITS`，不产生正式 Win7 PASS。
 - 边界：本条不自动授权更新远程 `main` 分支、标签推送或公开 GitHub Release；每项动作均在准备好准确源码、包哈希及限定接受记录后报负责人确认。合同见 [A9-72](tasks/A9_72_ALPHA9_RELEASE.md)。
 
+## ADR-0355 A9-73 Alpha.10 启动修复换发身份
+
+- 状态：Accepted（2026-11-20 UTC，负责人指示“把修复版进行打包发版”，并明确批准 Alpha.10 / WIN7-64 的 90 分钟开发级复验）。
+- 决定：使用独立的 `0.3.0-alpha.10` / `WIN7-64`、输入锁 `A9-ALPHA10-INPUTS-D013-V26-MANAGED` 和匹配的包内启动身份。打包器在输出 ZIP 前执行暂存包的启动校验。沿用原生输入的准确字节，保留已发布 Alpha.9 包、标签和历史证据。
+- 顺序：干净源码构建 → 实际 ZIP 闭包与启动校验 → 同包 Win7 普通用户开窗与退出 `DEV_CHANNEL` → 负责人对准确产物的接受决定 → 同字节预发布与回下载核验。前一开发包的实机结果不能证明本次启动。范围与停止条件见 [A9-73](tasks/A9_73_ALPHA10_STARTUP_REISSUE.md)。
