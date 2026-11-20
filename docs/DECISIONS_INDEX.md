@@ -350,3 +350,10 @@
 | ADR-0344 | Phase C 第二次复审修复：恢复句柄终态、必需写入确认、等价路径锚点与持久活动阻断 | Accepted |
 | ADR-0345 | Phase C 第三次复核修复：无效 PID 未知、终态待结算重试、移交后回调隔离与处置来源筛选 | Accepted |
 | ADR-0346 | Phase C 第四次复核修复：PID 0 身份、启动采纳终态待结算、helper 终态审计失败、锚点来源与待结算控件 | Accepted |
+| ADR-0347 | Phase C 复核修复：旧目录与改绑后的托管事件归属 | Accepted |
+| ADR-0348 | Phase C 独立复审后的事件归属修正 | Accepted |
+| ADR-0349 | Phase C 旧库托管事件归属与回执核验 | Accepted |
+| ADR-0350 | Phase C 工作区绑定完整性与精确归属校验 | Accepted |
+| ADR-0351 | Phase C 托管历史核验顺序与会话绑定并发保护 | Accepted |
+| ADR-0352 | Phase C 处置回执的原始 Turn 与目录创建时间 | Accepted |
+| ADR-0353 | Phase C 处置句柄损坏时的原归属证据 | Accepted |

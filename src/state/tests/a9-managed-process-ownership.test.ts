@@ -981,6 +981,45 @@ it.each(['handleId only', 'full record owned by the other workspace'] as const)(
     } finally { p.db.close(); }
   });
 
+it.each(['unsegmented legacy rename', 'mislabeled interval', 'wrong request', 'wrong original turn'] as const)(
+  'A9-34 relies on the original receipt identity across a legacy move (%s)', (variant) => {
+    const { p, input } = dispositionSetup();
+    try {
+      const receipt = p.dismissRecoveredManagedProcess(input);
+      p.upsertTask('task', 'c', 'completed'); p.upsertTurn('turn', 'task', 'c', 'completed');
+      p.releaseWorkspaceLock('/w', 'window');
+      if (variant === 'unsegmented legacy rename') {
+        p.db.prepare("UPDATE a9_sessions SET workspace_path = '/w2' WHERE session_id = 'c'").run();
+        expect(p.getConversationMetadata('c')).toEqual({});
+        p.changeWorkdir('c', '/w2', '/w3', false);
+      } else {
+        // The purported source of this exact event contradicts its independent credentials.
+        p.db.prepare(`UPDATE a9_sessions SET workspace_path = '/w3', metadata_json = json_set(metadata_json, '$.workdir', json(?))
+          WHERE session_id = 'c'`).run(JSON.stringify({ origin: 'linked', previousWorkspace: '/w2',
+          workspaceHistory: [{ workspace: '/w', maxEventId: receipt.eventId - 1 }, { workspace: '/w2', maxEventId: receipt.eventId }],
+        }));
+        if (variant === 'wrong request') {
+          p.db.prepare("UPDATE a9_events SET payload_json = json_set(payload_json, '$.requestId', 'changed') WHERE id = ?").run(receipt.eventId);
+        }
+        if (variant === 'wrong original turn') {
+          p.upsertTurn('unrelated-turn', 'task', 'c', 'completed');
+          p.db.prepare("UPDATE a9_events SET turn_id = 'unrelated-turn' WHERE id = ?").run(receipt.eventId);
+        }
+      }
+      if (variant.startsWith('wrong')) {
+        // The overwritten binding is unproven. A raw candidate may still be found,
+        // but credential verification must reject it before it can release the lock.
+        expect(() => p.listManagedProcesses('/w', { includeOwnership: true })).toThrow('A9_MANAGED_DISPOSITION_UNCONFIRMED');
+        expect(lockOutcome(p)).toEqual({ released: false, blockers: ['h'] });
+      } else {
+        expect(p.getManagedProcessDisposition('h')?.eventId).toBe(receipt.eventId);
+        expect(p.listManagedProcesses('/w', { includeOwnership: true })[0])
+          .toMatchObject({ cleanupRequired: false, disposition: { eventId: receipt.eventId } });
+        expect(lockOutcome(p)).toEqual({ released: true, blockers: [] });
+      }
+    } finally { p.db.close(); }
+  });
+
 it('a disposition session rebinding invalidates managed revisions while ordinary tool output keeps them', () => {
   const { p, input } = dispositionSetup();
   try {
@@ -996,13 +1035,48 @@ it('a disposition session rebinding invalidates managed revisions while ordinary
       turnId: 'other-turn', taskId: 'other-task', toolCallId: 'call', requestId: 'req', stream: 'stdout', text: 'x', outputSeq: 1,
       sourceSeqThrough: 1, rawBytesRead: 1, truncated: false } }));
     unchanged(() => p.db.prepare("UPDATE a9_sessions SET workspace_path = '/w' WHERE session_id = 'plain'").run());
+    unchanged(() => p.mergeConversationMetadata('other', { displayNote: 'ordinary metadata' }));
+    changed(() => p.db.prepare(`UPDATE a9_sessions SET metadata_json = json_set(metadata_json, '$.workdir', json('{"workspaceHistory":[]}'))
+      WHERE session_id = 'other'`).run());
     expect(p.listManagedProcesses('/w', { includeOwnership: true })[0].cleanupRequired).toBe(false);
     changed(() => p.db.prepare("UPDATE a9_sessions SET workspace_path = '/w' WHERE session_id = 'other'").run());
+    expect(p.listManagedProcesses('/w', { includeOwnership: true })[0].cleanupRequired).toBe(false);
+    // Without the independent Turn row, the damaged event may belong to A.
+    changed(() => p.db.prepare("DELETE FROM a9_turns WHERE turn_id = 'other-turn'").run());
     expect(p.listManagedProcesses('/w', { includeOwnership: true, onOwnershipError: () => {} })[0].cleanupRequired).toBe(true);
     changed(() => p.db.prepare("UPDATE a9_sessions SET workspace_path = '/other' WHERE session_id = 'other'").run());
     changed(() => p.db.prepare("DELETE FROM a9_sessions WHERE session_id = 'other'").run());
   } finally { p.db.close(); }
 });
+
+it.each(['handle only', 'nested owner', 'complete other handle', 'conflicting original owner'] as const)(
+  'checks a newer disposition from a different verified Turn in A (%s)', claim => {
+    const { p, input } = dispositionSetup();
+    try {
+      const receipt = p.dismissRecoveredManagedProcess(input);
+      p.upsertTask('unrelated-task', 'c', 'completed');
+      p.upsertTurn('unrelated-turn', 'unrelated-task', 'c', 'completed');
+      const { eventId: _receiptId, ...payload } = receipt;
+      const { eventId } = p.recordToolEvent('c', 'unrelated-turn', 'managed_process_disposition',
+        claim === 'handle only' ? { handleId: 'h' } : { ...payload, requestId: 'changed' });
+      if (claim === 'nested owner' || claim === 'complete other handle') {
+        const owner = JSON.stringify(receipt.owner);
+        const truncated = claim === 'nested owner' ? `{"nested":{"owner":${owner}},"handleId":"h",`
+          : `{"owner":${owner},"handleId":"other",`;
+        p.db.prepare('UPDATE a9_events SET payload_json = ? WHERE id = ?').run(truncated, eventId);
+      }
+      const clearsLock = claim !== 'conflicting original owner';
+      if (clearsLock) {
+        expect(p.getManagedProcessDisposition('h')?.eventId).toBe(receipt.eventId);
+        expect(p.dismissRecoveredManagedProcess({ ...input, identity: undefined, pidProbe: undefined }).eventId).toBe(receipt.eventId);
+      } else {
+        expect(() => p.listManagedProcesses('/w', { includeOwnership: true })).toThrow('A9_MANAGED_DISPOSITION_UNCONFIRMED');
+        expect(() => p.dismissRecoveredManagedProcess({ ...input, identity: undefined, pidProbe: undefined })).toThrow('A9_MANAGED_RECOVERY_STALE');
+      }
+      p.releaseWorkspaceLock('/w', 'window');
+      expect(lockOutcome(p)).toEqual(clearsLock ? { released: true, blockers: [] } : { released: false, blockers: ['h'] });
+    } finally { p.db.close(); }
+  });
 
 it.each(['active', 'released', 'user_dismissed'] as const)(
   'a non-tool ownership record without handleId is neither evidence nor damage (%s)', (kind) => {
@@ -1398,6 +1472,91 @@ function openFileManager(prefix: string) {
 const workspaceHistory = (p: A9PersistenceManager, sessionId: string) =>
   (p.getConversationMetadata(sessionId).workdir as { workspaceHistory?: unknown } | undefined)?.workspaceHistory;
 
+it.each(['save', 'metadata', 'inbox'] as const)(
+  'serializes a conversation %s write with a relink on another SQLite connection', writer => {
+    const env = openFileManager('a9-relink-write-');
+    const p = env.openManager(); const other = env.openManager();
+    try {
+      p.createConversation('relocated', '/w');
+      p.mergeConversationMetadata('relocated', { retained: true });
+      // The second connection runs on the test thread. Return busy immediately
+      // when the first connection owns the write transaction.
+      other.db.pragma('busy_timeout = 0');
+      const readRow = () => other.db.prepare(`SELECT workspace_path, updated_at, metadata_json
+        FROM a9_sessions WHERE session_id = 'relocated'`).get() as { workspace_path: string; updated_at: string; metadata_json: string };
+      const readBinding = () => JSON.parse(readRow().metadata_json)._managedWorkspaceBinding;
+      const before = readRow();
+      const time = '2026-11-19T00:00:00.000Z';
+      let movedBinding: unknown;
+      const move = () => {
+        other.changeWorkdir('relocated', '/w', '/w2', false);
+        movedBinding = readBinding();
+      };
+      let interleaved = false;
+      const prepare = p.db.prepare.bind(p.db);
+      const probe = jest.spyOn(p.db, 'prepare').mockImplementation(sql => {
+        const statement = prepare(sql);
+        if (sql.includes('UPDATE a9_sessions SET') && sql.includes('metadata_json = ?')) {
+          const run = statement.run.bind(statement);
+          statement.run = (...params) => {
+            if (!interleaved) {
+              interleaved = true;
+              try { move(); } catch (error) {
+                if ((error as { code?: string }).code !== 'SQLITE_BUSY') throw error;
+              }
+            }
+            return run(...params);
+          };
+        }
+        return statement;
+      });
+      try {
+        if (writer === 'save') p.saveSession('relocated', '/w', { written: true });
+        else if (writer === 'metadata') p.mergeConversationMetadata('relocated', { written: true });
+        else p.mergeConversationInbox('relocated', '/w', { lastVisitedAt: time });
+      } finally { probe.mockRestore(); }
+      expect(interleaved).toBe(true);
+      if (!movedBinding) {
+        if (writer === 'inbox') expect(readRow().updated_at).toBe(before.updated_at);
+        move();
+      }
+      expect({ workspace: readRow().workspace_path, binding: readBinding() })
+        .toEqual({ workspace: '/w2', binding: movedBinding });
+      expect(workspaceHistory(other, 'relocated')).toEqual([{ workspace: '/w', maxEventId: 0 }]);
+      expect(other.getConversationMetadata('relocated')).toMatchObject({ retained: true,
+        ...(writer === 'inbox' ? { inbox: { lastVisitedAt: time } } : { written: true }) });
+    } finally { other.db.close(); p.db.close(); env.cleanup(); }
+  });
+
+it('keeps a moved legacy conversation in its current workspace when the old workspace is reopened', () => {
+  const { p } = setup();
+  try {
+    p.upsertTurn('turn', 'task', 'c', 'completed'); p.upsertTask('task', 'c', 'completed');
+    p.changeWorkdir('c', '/w', '/w2', false);
+    const moved = p.getConversationMetadata('c');
+    expect(p.ensureActiveConversation('/w', 'c', 'fresh')).toMatchObject({ sessionId: 'fresh', workspacePath: '/w' });
+    expect(() => p.saveSession('c', '/w', { stale: true })).toThrow('A9_CONVERSATION_WORKSPACE_MISMATCH');
+    expect(() => p.mergeConversationInbox('c', '/w', { lastVisitedAt: '2026-11-19T00:00:00.000Z' }))
+      .toThrow('A9_CONVERSATION_WORKSPACE_MISMATCH');
+    expect(p.listConversations('/w2').map(item => item.sessionId)).toEqual(['c']);
+    expect(p.getConversationMetadata('c')).toEqual(moved);
+  } finally { p.db.close(); }
+});
+
+it('keeps the newer binding history and directory timestamp when a stale save still names the same workspace', () => {
+  const { p } = setup();
+  try {
+    const initial = { version: 1, origin: 'auto', createdAt: '2026-11-01T00:00:00.000Z' };
+    p.saveSession('c', '/w', { workdir: initial });
+    p.upsertTurn('turn', 'task', 'c', 'completed'); p.upsertTask('task', 'c', 'completed');
+    p.changeWorkdir('c', '/w', '/w2', false);
+    p.changeWorkdir('c', '/w2', '/w', false);
+    const rebound = p.getConversationMetadata('c').workdir;
+    p.saveSession('c', '/w', { workdir: initial, saved: true });
+    expect(p.getConversationMetadata('c')).toEqual({ workdir: rebound, saved: true });
+  } finally { p.db.close(); }
+});
+
 // (1) c1 is rebound A -> B -> C (or renamed in place first, then rebound) and its only record of
 // A is cut early; a later complete owned record of c2 in A never shadows that damage.
 const rebindPaths = [
@@ -1432,7 +1591,7 @@ it.each(rebindPaths.flatMap(([route, rebind]) => (['stopped', 'exited'] as const
       const original = (p.db.prepare("SELECT max(id) AS id FROM a9_events").get() as { id: number }).id;
       const current = rebind(p);
       expect(p.listConversations(current).map(item => item.sessionId)).toEqual(['c1']);
-      // The first segment is A, bounded by the newest event at the first change.
+      // This session's binding was recorded at creation, before the audited event.
       expect((workspaceHistory(p, 'c1') as any[])[0]).toMatchObject({ workspace: '/w', maxEventId: original });
       // Another conversation of the original workspace writes a complete owned record of h.
       p.createConversation('c2', '/w'); p.upsertTask('task2', 'c2', 'completed'); p.upsertTurn('turn2', 'task2', 'c2', 'completed');
@@ -1493,7 +1652,8 @@ it('round 20: changeWorkdir records ordered segments across rebinds and renames'
     expect(p.getConversationMetadata('d').workdir).toEqual({ version: 1, origin: 'auto', createdAt: null,
       workspaceHistory: [{ workspace: '/w2-renamed', renamedTo: '/w2-final', maxEventId: 3 }] });
     // A damaged history of the conversation being rebound refuses the change instead of losing A.
-    p.mergeConversationMetadata('c', { workdir: { version: 1, origin: 'linked', createdAt: null, workspaceHistory: [{ workspace: '/w' }] } });
+    p.db.prepare("UPDATE a9_sessions SET metadata_json = json_set(metadata_json, '$.workdir.workspaceHistory', json(?)) WHERE session_id = 'c'")
+      .run('[{"workspace":"/w"}]');
     expect(() => p.changeWorkdir('c', '/w3', '/w4', false)).toThrow('A9_WORKDIR_HISTORY_CORRUPT');
     expect(p.listConversations('/w3').map(item => item.sessionId)).toEqual(['c']);
   } finally { p.db.close(); }
@@ -1799,8 +1959,8 @@ it.each((['stopped', 'released'] as const).flatMap(status =>
       if (segments !== 'no rebind') { p.changeWorkdir('c1', '/w', '/w2', false); p.changeWorkdir('c1', '/w2', '/w3', false); }
       if (segments === 'damaged first segment') {
         const history = workspaceHistory(p, 'c1') as Array<{ workspace: string; maxEventId: number }>;
-        p.mergeConversationMetadata('c1', { workdir: { ...(p.getConversationMetadata('c1').workdir as object),
-          workspaceHistory: [{ workspace: '/w' }, history[1]] } });
+        other.prepare("UPDATE a9_sessions SET metadata_json = json_set(metadata_json, '$.workdir.workspaceHistory', json(?)) WHERE session_id = 'c1'")
+          .run(JSON.stringify([{ workspace: '/w' }, history[1]]));
       }
       const damagedIds = (other.prepare(`SELECT id FROM a9_events WHERE event_type = 'managed_process_ownership'
         AND json_extract(payload_json, '$.handleId') = 'hB'`).all() as Array<{ id: number }>).map(item => item.id);

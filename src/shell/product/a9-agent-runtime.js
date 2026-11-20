@@ -186,12 +186,12 @@ function createA9AgentRuntime(options) {
     if (!config.defaultWorkdirRoot) return true;
     const state = verifyWorkdir(config.defaultWorkdirRoot, workspaceRoot, create);
     if (state.made) {
-      // Round 20: a workdir holding only the workspace history a rename recorded is still unset.
-      const stored = persistence.getConversationMetadata(a9SessionId).workdir;
-      const historyOnly = stored && Object.keys(stored).length === 1 && Object.prototype.hasOwnProperty.call(stored, 'workspaceHistory');
-      const workdir = stored && !historyOnly ? stored : { ...(stored || {}), version: 1, origin: 'auto', createdAt: null };
-      const message = `${workdir.createdAt ? '已重建' : '已创建'}工作目录：${workspaceRoot}`;
       persistence.db.transaction(() => {
+        // A rename can leave a history-only workdir before its first creation.
+        const stored = persistence.getConversationMetadata(a9SessionId).workdir;
+        const historyOnly = stored && Object.keys(stored).length === 1 && Object.prototype.hasOwnProperty.call(stored, 'workspaceHistory');
+        const workdir = stored && !historyOnly ? stored : { ...(stored || {}), version: 1, origin: 'auto', createdAt: null };
+        const message = `${workdir.createdAt ? '已重建' : '已创建'}工作目录：${workspaceRoot}`;
         persistence.saveSession(a9SessionId, canonicalWorkspace, { workdir: { ...workdir, createdAt: workdir.createdAt || new Date().toISOString() } });
         const data = { role: 'system', message, path: workspaceRoot };
         const { eventId } = persistence.recordToolEvent(a9SessionId, null, 'workdir.created', { type: 'system_message', data });
@@ -1722,7 +1722,7 @@ function createA9AgentRuntime(options) {
       managedDismissInFlight = true;
       try {
         const manager = loopTrustedRunner.getBackgroundManager();
-        const identity = persistence.getManagedProcessRecoveryIdentity(input.handleId);
+        const identity = persistence.getManagedProcessRecoveryIdentity(input.handleId, canonicalWorkspace);
         if (identity.owner.workspace !== canonicalWorkspace || identity.owner.conversationId !== a9SessionId) fail('A9_MANAGED_HANDLE_WRONG_OWNER');
         const previous = persistence.getManagedProcessDisposition(input.handleId);
         if ((previous?.recoveryRevision ?? identity.recoveryRevision) !== input.recoveryRevision) fail('A9_MANAGED_RECOVERY_STALE');

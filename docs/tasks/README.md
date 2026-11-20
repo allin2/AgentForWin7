@@ -16,6 +16,9 @@
 交付活跃输出期间的快照缓存、托管事实幂等写入与批量归属读取、收件箱批量汇总及事件类型索引。
 保持现有 IPC、schema v4、托管事实审计与进程权限。以真实 SQLite 的 State 和 Shell 开发机回归、查询计划与独立只读审查核查。
 独立审查中导致启动失败、错误归属或陈旧缓存的问题先修复，再完成开发机回归。提交、推送与 Win7 实机验证另按已批准范围执行。
+第 24 轮复核的三项 P1 沿用本范围，修复基于 `staging/box/health-check-phase-abc` 的 `21dbc389…`，在独立工作树实施。
+验证同一份反例在交接提交和修复工作树的结果，覆盖同一会话的历史归属、处置诊断与两种关闭选择。归属不明确时保留工作区锁。
+第四轮独立复审的三项 P1 沿用本范围。核对原归属、最新相关处置以及跨连接改绑后的实际锁行。两种关闭选择均须保留有损坏工作区的锁，并释放健康工作区的锁。
 
 本轮 A9 Settings 设置项（负责人任务书，基线 0153b394）：`APPROVED_FOR_IMPLEMENTATION`，实际分支 `box/a9-settings`。交付上下文预算、输入框上限、thinking 模式与思考强度设置及其 Provider/Core/Gateway 配置链路；保持 schemaVersion、不改专用 DeepSeek Provider、不新增依赖。必要验证与停止条件见 `A9_SETTINGS_CONTEXT_COMPOSER_THINKING.md`，证据目录为 `outputs/wp-a9-settings/a9-settings/`。
 

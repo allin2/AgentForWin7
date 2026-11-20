@@ -223,15 +223,13 @@ export class A9PersistenceManager {
                 FROM a9_managed_processes WHERE handle_id = CASE WHEN json_valid(${row}.payload_json)
                   THEN CASE WHEN json_type(${row}.payload_json, '$.handleId') = 'text'
                     THEN json_extract(${row}.payload_json, '$.handleId') END END), '') END` },
-          // Ownership validity also depends on its session/task/turn origin. Only origin
-          // columns referenced by an ownership event invalidate managed projections.
-          // A disposition record's trust is its session's workspace binding (ADR-0344), so
-          // session origin edits also invalidate when the session holds a disposition record.
-          ...[{ table: 'a9_sessions', id: 'session_id', columns: ['session_id', 'workspace_path', 'state'], match: '',
+          // Managed facts depend on the event origin and the session's binding evidence.
+          ...[{ table: 'a9_sessions', id: 'session_id', columns: ['session_id', 'workspace_path', 'state', 'metadata_json'], match: '',
             eventTypes: "'managed_process_ownership', 'managed_process_disposition'" },
             { table: 'a9_tasks', id: 'task_id', columns: ['task_id', 'session_id'],
               match: `AND CASE WHEN json_valid(e.payload_json) THEN json_extract(e.payload_json, '$.owner.taskId') END = {row}.task_id` },
-            { table: 'a9_turns', id: 'turn_id', columns: ['turn_id', 'task_id', 'session_id'], match: 'AND e.turn_id = {row}.turn_id' },
+            { table: 'a9_turns', id: 'turn_id', columns: ['turn_id', 'task_id', 'session_id'], match: 'AND e.turn_id = {row}.turn_id',
+              eventTypes: "'managed_process_ownership', 'managed_process_disposition'" },
           ].map(source => ({
             table: source.table, id: source.id, columns: source.columns, projection: 'managedEvents:',
             key: (row: string) => `CASE WHEN EXISTS (SELECT 1 FROM a9_events e WHERE e.session_id = ${row}.session_id
@@ -260,7 +258,10 @@ export class A9PersistenceManager {
               const columns = operation === 'UPDATE' && source.columns
                 ? ` OF ${source.columns.join(', ')}` : '';
               const changed = operation === 'UPDATE' && source.columns
-                ? ` WHEN ${source.columns.map(column => `OLD.${column} IS NOT NEW.${column}`).join(' OR ')}` : '';
+                ? ` WHEN ${source.columns.map(column => column === 'metadata_json'
+                  ? [workspaceHistoryJsonSql, managedBindingJsonSql, previousWorkspaceJsonSql]
+                    .map(read => `(${read('OLD')}) IS NOT (${read('NEW')})`).join(' OR ')
+                  : `OLD.${column} IS NOT NEW.${column}`).join(' OR ')}` : '';
               db.exec(`CREATE TEMP TRIGGER a9_snapshot_${index}_${operation}
                 AFTER ${operation}${columns} ON main.${source.table}${changed} BEGIN
                   ${keys.map(key => `SELECT a9_snapshot_changed('${source.projection}', key)
@@ -881,48 +882,75 @@ export class A9PersistenceManager {
   // 会话 / 任务 / Turn / Run
   // ---------------------------------------------------------------------
 
+  private withImmediateTransaction<T>(operation: () => T): T {
+    const transaction = this.db.transaction(operation) as (() => T) & { immediate?: () => T };
+    return (transaction.immediate ?? transaction)();
+  }
+
   saveSession(sessionId: string, workspacePath: string, metadata: Record<string, unknown> = {}): void {
-    const now = new Date().toISOString();
-    const existing = this.db.prepare('SELECT session_id FROM a9_sessions WHERE session_id = ?').get(sessionId);
-    if (existing) {
-      this.db.prepare('UPDATE a9_sessions SET workspace_path = ?, updated_at = ?, metadata_json = ? WHERE session_id = ?')
-        .run(workspacePath, now, JSON.stringify({ ...this.getConversationMetadata(sessionId), ...metadata }), sessionId);
-    } else {
-      this.db.prepare(`
-        INSERT INTO a9_sessions
-          (session_id, workspace_path, title, title_source, state, created_at, updated_at, last_activated_at, draft_ciphertext, metadata_json)
-        VALUES (?, ?, '新对话', 'auto', 'active', ?, ?, ?, NULL, ?)
-      `).run(sessionId, workspacePath, now, now, now, JSON.stringify(metadata));
-    }
+    this.withImmediateTransaction(() => {
+      const existing = this.db.prepare('SELECT workspace_path FROM a9_sessions WHERE session_id = ?')
+        .get(sessionId) as { workspace_path: string } | undefined;
+      if (!existing) {
+        this.insertConversation(sessionId, workspacePath, new Date().toISOString(), metadata);
+        return;
+      }
+      // A save can initialize a row. Only changeWorkdir can move an existing one.
+      if (!sameWorkspacePath(existing.workspace_path, workspacePath)) {
+        throw a9PersistenceError('A9_CONVERSATION_WORKSPACE_MISMATCH', '对话不属于当前工作区。');
+      }
+      this.updateConversationMetadata(sessionId, metadata);
+    });
+  }
+
+  private managedEventHighWaterMark(): number {
+    const sequence = this.db.prepare("SELECT seq FROM sqlite_sequence WHERE name = 'a9_events'").get() as { seq?: number } | undefined;
+    const latest = this.db.prepare('SELECT COALESCE(MAX(id), 0) AS id FROM a9_events').get() as { id: number };
+    return Math.max(Number(sequence?.seq ?? 0), latest.id);
+  }
+
+  private insertConversation(sessionId: string, workspacePath: string, now: string, metadata: Record<string, unknown> = {}): void {
+    // A new row establishes the binding from this cutoff forward, even if old events
+    // with the same session id predate the row (for example a legacy import).
+    const proof = writeManagedBinding(sessionId, workspacePath, [], this.managedEventHighWaterMark());
+    this.db.prepare(`
+      INSERT INTO a9_sessions
+        (session_id, workspace_path, title, title_source, state, created_at, updated_at, last_activated_at, draft_ciphertext, metadata_json)
+      VALUES (?, ?, '新对话', 'auto', 'active', ?, ?, ?, NULL, ?)
+    `).run(sessionId, workspacePath, now, now, now, JSON.stringify({ ...metadata, [MANAGED_BINDING_KEY]: proof }));
   }
 
   /**
    * 首次开启 v4 时确定性保留旧的“工作区派生 Session”；无旧事实时创建新对话。
    */
   ensureActiveConversation(workspacePath: string, legacySessionId: string, newSessionId: string): A9ConversationRecord {
-    const active = this.db.prepare(`
-      SELECT s.session_id FROM a9_workspace_conversation_state w
-      JOIN a9_sessions s ON s.session_id = w.active_session_id
-      WHERE w.workspace_path = ? AND s.workspace_path = ? AND s.state = 'active'
-    `).get(workspacePath, workspacePath) as any;
-    if (active?.session_id) return this.activateConversation(workspacePath, active.session_id);
+    return this.withImmediateTransaction(() => {
+      const active = this.db.prepare(`
+        SELECT s.session_id FROM a9_workspace_conversation_state w
+        JOIN a9_sessions s ON s.session_id = w.active_session_id
+        WHERE w.workspace_path = ? AND s.workspace_path = ? AND s.state = 'active'
+      `).get(workspacePath, workspacePath) as any;
+      if (active?.session_id) return this.activateConversation(workspacePath, active.session_id);
 
-    if (this.sessionHasFacts(legacySessionId)) {
-      this.saveSession(legacySessionId, workspacePath, { migratedFromWorkspaceSession: true });
-      this.db.prepare(`
-        UPDATE a9_sessions
-        SET title = '历史对话', title_source = 'legacy', updated_at = ?
-        WHERE session_id = ?
-      `).run(new Date().toISOString(), legacySessionId);
-      return this.activateConversation(workspacePath, legacySessionId);
-    }
-    const mostRecent = this.db.prepare(`
-      SELECT session_id FROM a9_sessions
-      WHERE workspace_path = ? AND state = 'active'
-      ORDER BY last_activated_at DESC, created_at DESC LIMIT 1
-    `).get(workspacePath) as any;
-    if (mostRecent?.session_id) return this.activateConversation(workspacePath, mostRecent.session_id);
-    return this.createConversation(newSessionId, workspacePath);
+      const legacy = this.db.prepare('SELECT workspace_path, state FROM a9_sessions WHERE session_id = ?')
+        .get(legacySessionId) as { workspace_path: string; state: string } | undefined;
+      if ((!legacy || (legacy.workspace_path === workspacePath && legacy.state === 'active')) && this.sessionHasFacts(legacySessionId)) {
+        this.saveSession(legacySessionId, workspacePath, { migratedFromWorkspaceSession: true });
+        this.db.prepare(`
+          UPDATE a9_sessions
+          SET title = '历史对话', title_source = 'legacy', updated_at = ?
+          WHERE session_id = ?
+        `).run(new Date().toISOString(), legacySessionId);
+        return this.activateConversation(workspacePath, legacySessionId);
+      }
+      const mostRecent = this.db.prepare(`
+        SELECT session_id FROM a9_sessions
+        WHERE workspace_path = ? AND state = 'active'
+        ORDER BY last_activated_at DESC, created_at DESC LIMIT 1
+      `).get(workspacePath) as any;
+      if (mostRecent?.session_id) return this.activateConversation(workspacePath, mostRecent.session_id);
+      return this.createConversation(newSessionId, workspacePath);
+    });
   }
 
   createConversation(sessionId: string, workspacePath: string): A9ConversationRecord {
@@ -934,11 +962,7 @@ export class A9PersistenceManager {
     }
     const now = new Date().toISOString();
     const create = this.db.transaction(() => {
-      this.db.prepare(`
-        INSERT INTO a9_sessions
-          (session_id, workspace_path, title, title_source, state, created_at, updated_at, last_activated_at, draft_ciphertext, metadata_json)
-        VALUES (?, ?, '新对话', 'auto', 'active', ?, ?, ?, NULL, '{}')
-      `).run(sessionId, workspacePath, now, now, now);
+      this.insertConversation(sessionId, workspacePath, now);
       this.setActiveConversation(workspacePath, sessionId, now);
     });
     create();
@@ -1005,11 +1029,7 @@ export class A9PersistenceManager {
         return this.requireConversation(next.session_id);
       }
       if (fallbackSessionId) {
-        this.db.prepare(`
-          INSERT INTO a9_sessions
-            (session_id, workspace_path, title, title_source, state, created_at, updated_at, last_activated_at, draft_ciphertext, metadata_json)
-          VALUES (?, ?, '新对话', 'auto', 'active', ?, ?, ?, NULL, '{}')
-        `).run(fallbackSessionId, row.workspacePath, now, now, now);
+        this.insertConversation(fallbackSessionId, row.workspacePath, now);
         this.setActiveConversation(row.workspacePath, fallbackSessionId, now);
         return this.requireConversation(fallbackSessionId);
       }
@@ -1078,7 +1098,7 @@ export class A9PersistenceManager {
 
   /** Caller has closed both affected runtimes. Never rewrite historical facts. */
   changeWorkdir(sessionId: string, source: string, target: string, rename: boolean): void {
-    this.db.transaction(() => {
+    this.withImmediateTransaction(() => {
       this.assertWorkdirChangeAllowed(sessionId, source, target);
       if (this.db.prepare('SELECT 1 FROM a9_workspace_locks WHERE workspace_path IN (?, ?) LIMIT 1').get(source, target)) {
         throw a9PersistenceError('A9_WORKSPACE_LOCKED', '路径更新要求先关闭 Runtime。');
@@ -1090,11 +1110,9 @@ export class A9PersistenceManager {
       // Round 21 (P1): retention may delete the newest events, lowering MAX(id); the bound is the
       // AUTOINCREMENT high-water mark (`sqlite_sequence`, never lowered by DELETE), and never
       // below the conversation's previous segment, so segments stay monotonic.
-      const seqRow = this.db.prepare("SELECT seq FROM sqlite_sequence WHERE name = 'a9_events'").get() as { seq?: number } | undefined;
-      const maxRow = this.db.prepare('SELECT COALESCE(MAX(id), 0) AS m FROM a9_events').get() as { m?: number } | undefined;
-      const currentEventSeq = Math.max(Number(seqRow?.seq ?? 0), Number(maxRow?.m ?? 0));
-      const segmentBound = (history: A9WorkspaceHistoryEntry[]) => Math.max(currentEventSeq,
-        history.length ? Number(history[history.length - 1].maxEventId) : 0);
+      const currentEventSeq = this.managedEventHighWaterMark();
+      const segmentBound = (history: A9WorkspaceHistoryEntry[], afterEventId = 0) =>
+        Math.max(currentEventSeq, history[history.length - 1]?.maxEventId ?? 0, afterEventId);
       const historyOf = (workdir: unknown): A9WorkspaceHistoryEntry[] => {
         const segments = parseWorkspaceHistory((workdir as { workspaceHistory?: unknown } | undefined)?.workspaceHistory);
         if (segments === 'damaged') {
@@ -1102,18 +1120,18 @@ export class A9PersistenceManager {
         }
         return segments ?? [];
       };
-      // Round 23 (P1): a conversation with no segments yet that was rebound before (a legacy
-      // build's `origin: 'linked'`, a Round 19 scalar `previousWorkspace`) or whose metadata is
-      // damaged may have written its events so far in an earlier workspace; the boundary is
-      // unknown. They are closed in one unknown segment (fail-closed for every workspace) instead
-      // of being attributed to `source`. No timestamp heuristic: a wrong bound would misattribute.
-      const withUnknownPrior = (id: string, workdir: unknown, history: A9WorkspaceHistoryEntry[]): A9WorkspaceHistoryEntry[] => {
-        if (history.length) return history;
-        const value = (workdir ?? {}) as { origin?: unknown; previousWorkspace?: unknown };
-        const metadataDamaged = (this.db.prepare('SELECT json_valid(metadata_json) AS valid FROM a9_sessions WHERE session_id = ?')
-          .get(id) as { valid?: number | null } | undefined)?.valid === 0;
-        return metadataDamaged || value.origin === 'linked' || typeof value.previousWorkspace === 'string'
-          ? [{ workspace: A9_UNKNOWN_PRIOR_WORKSPACE, maxEventId: segmentBound(history) }] : history;
+      const withUnknownPrior = (id: string, history: A9WorkspaceHistoryEntry[]): A9WorkspaceHistoryEntry[] => {
+        if (history.length || !this.db.prepare(`SELECT 1 FROM a9_events WHERE session_id = ? AND kind = 'tool'
+          AND event_type IN ('managed_process_ownership', 'managed_process_disposition') LIMIT 1`).get(id)) return history;
+        return [{ workspace: A9_UNKNOWN_PRIOR_WORKSPACE, maxEventId: segmentBound(history) }];
+      };
+      const closeBinding = (id: string, metadata: Record<string, unknown>, existing: A9WorkspaceHistoryEntry[]) => {
+        const afterEventId = verifiedManagedBinding(metadata[MANAGED_BINDING_KEY], id, source, existing);
+        const maxEventId = segmentBound(existing, afterEventId);
+        const previous = afterEventId === undefined ? withUnknownPrior(id, existing) : existing;
+        const workspaceHistory = [...previous, { workspace: source, maxEventId, ...(rename ? { renamedTo: target } : {}) }];
+        // Without a verified prior binding, the observed change attests only to subsequent events.
+        return { workspaceHistory, proof: writeManagedBinding(id, target, workspaceHistory, afterEventId ?? maxEventId) };
       };
       if (rename) {
         if (this.listReservedWorkspacePaths().some(value => value.toLowerCase() === target.toLowerCase())) {
@@ -1122,47 +1140,52 @@ export class A9PersistenceManager {
         // Round 20 (P1): the default directory keeps its facts under the source path (ADR-0343),
         // so every conversation renamed with it records that its events up to now were written
         // in `source`; segments of any conversation that name `source` note the later name.
-        const sessions = this.db.prepare(`SELECT session_id, workspace_path, metadata_json FROM a9_sessions
+        const sessions = this.db.prepare(`SELECT session_id, workspace_path FROM a9_sessions
           WHERE workspace_path = ? OR (json_valid(metadata_json)
             AND json_type(metadata_json, '$.workdir.workspaceHistory') = 'array')`).all(source) as Array<{
-          session_id: string; workspace_path: string; metadata_json: string }>;
-        const histories = new Map<string, { workdir: Record<string, unknown>; history: A9WorkspaceHistoryEntry[] }>();
+          session_id: string; workspace_path: string }>;
+        const metadataUpdates = new Map<string, Record<string, unknown>>();
         for (const session of sessions) {
           const moved = session.workspace_path === source;
-          const workdir = (this.getConversationMetadata(session.session_id).workdir ?? {}) as Record<string, unknown>;
+          const metadata = this.readConversationMetadata(session.session_id);
+          const workdir = (metadata.workdir ?? {}) as Record<string, unknown>;
           // A damaged history of a conversation outside `source` stays as it is (readers treat it
           // as ambiguous, fail-closed); a moved conversation's damaged history refuses the rename.
           if (!moved && parseWorkspaceHistory(workdir.workspaceHistory) === 'damaged') continue;
-          const history = (moved ? withUnknownPrior(session.session_id, workdir, historyOf(workdir)) : historyOf(workdir)).map(entry => sameWorkspacePath(entry.renamedTo ?? entry.workspace, source)
+          const history = historyOf(workdir).map(entry => sameWorkspacePath(entry.renamedTo ?? entry.workspace, source)
             ? { ...entry, renamedTo: target } : entry);
-          if (moved) history.push({ workspace: source, renamedTo: target, maxEventId: segmentBound(history) });
-          histories.set(session.session_id, { workdir, history });
+          if (!moved && !history.length) continue;
+          const binding = moved ? closeBinding(session.session_id, metadata, history) : undefined;
+          metadataUpdates.set(session.session_id, {
+            ...metadata,
+            workdir: { ...workdir, workspaceHistory: binding?.workspaceHistory ?? history },
+            ...(binding ? { [MANAGED_BINDING_KEY]: binding.proof } : {}),
+          });
         }
         this.db.prepare('UPDATE a9_workspaces SET workspace_path = ?, display_name = ?, updated_at = ? WHERE workspace_path = ?')
           .run(target, displayNameFor(target), now, source);
         this.db.prepare('UPDATE a9_sessions SET workspace_path = ?, updated_at = ? WHERE workspace_path = ?').run(target, now, source);
         this.db.prepare('UPDATE a9_workspace_conversation_state SET workspace_path = ?, updated_at = ? WHERE workspace_path = ?').run(target, now, source);
         const updateMetadata = this.db.prepare('UPDATE a9_sessions SET metadata_json = ? WHERE session_id = ?');
-        for (const [id, { workdir, history }] of histories) {
-          if (!history.length) continue;
-          updateMetadata.run(JSON.stringify({ ...this.getConversationMetadata(id), workdir: { ...workdir, workspaceHistory: history } }), id);
+        for (const [id, metadata] of metadataUpdates) {
+          updateMetadata.run(JSON.stringify(metadata), id);
         }
       } else {
         // Round 19 (P1): the source workspace is kept so this conversation's older ownership
         // records (and their damage) stay evidence of that workspace after the rebind.
         // Round 20 (P1): the scalar is only kept for compatibility. The ordered segments keep
         // every earlier workspace across repeated rebinds (A -> B -> C), each bounded by event id.
-        const workdir = this.getConversationMetadata(sessionId).workdir;
-        const previous = withUnknownPrior(sessionId, workdir, historyOf(workdir));
-        const workspaceHistory = [...previous, { workspace: source, maxEventId: segmentBound(previous) }];
-        this.saveSession(sessionId, target, { workdir: { version: 1, origin: 'linked', previousWorkspace: source, workspaceHistory, createdAt: null } });
+        const metadata = this.readConversationMetadata(sessionId);
+        const { workspaceHistory, proof } = closeBinding(sessionId, metadata, historyOf(metadata.workdir));
+        const workdir = { version: 1, origin: 'linked', previousWorkspace: source, workspaceHistory, createdAt: null };
+        this.db.prepare('UPDATE a9_sessions SET workspace_path = ?, updated_at = ?, metadata_json = ? WHERE session_id = ?')
+          .run(target, now, JSON.stringify({ ...metadata, workdir, [MANAGED_BINDING_KEY]: proof }), sessionId);
         const remaining = this.listConversations(source).find(item => item.state === 'active');
         if (remaining) this.setActiveConversation(source, remaining.sessionId, now);
         else this.db.prepare('DELETE FROM a9_workspace_conversation_state WHERE workspace_path = ?').run(source);
         this.setActiveConversation(target, sessionId, now);
-        // saveSession merges all unrelated metadata; no history is migrated.
       }
-    })();
+    });
   }
 
   listConversations(workspacePath: string, options: { includeDraftPresence?: boolean } = {}):
@@ -1213,13 +1236,44 @@ export class A9PersistenceManager {
   }
 
   getConversationMetadata(sessionId: string): Record<string, unknown> {
+    const metadata = this.readConversationMetadata(sessionId);
+    delete metadata[MANAGED_BINDING_KEY];
+    return metadata;
+  }
+
+  private readConversationMetadata(sessionId: string): Record<string, unknown> {
     const row = this.db.prepare('SELECT metadata_json FROM a9_sessions WHERE session_id = ?').get(sessionId) as any;
     if (!row) throw a9PersistenceError('A9_CONVERSATION_NOT_FOUND', '未找到对话。');
     return safeParse(typeof row.metadata_json === 'string' ? row.metadata_json : '{}', { buffer: this.diagnosticBuffer, table: 'a9_sessions', rowId: sessionId });
   }
 
   mergeConversationMetadata(sessionId: string, patch: Record<string, unknown>): void {
-    const metadata = { ...this.getConversationMetadata(sessionId), ...patch };
+    this.withImmediateTransaction(() => this.updateConversationMetadata(sessionId, patch));
+  }
+
+  private updateConversationMetadata(sessionId: string, patch: Record<string, unknown>): void {
+    const stored = this.readConversationMetadata(sessionId);
+    const metadata: Record<string, unknown> = { ...stored, ...patch, [MANAGED_BINDING_KEY]: stored[MANAGED_BINDING_KEY] };
+    if (Object.prototype.hasOwnProperty.call(patch, 'workdir')) {
+      const workdir = stored.workdir;
+      const current = workdir && typeof workdir === 'object' && !Array.isArray(workdir)
+        ? workdir as Record<string, unknown> : undefined;
+      const requested = patch.workdir;
+      if (requested && typeof requested === 'object' && !Array.isArray(requested)) {
+        // A caller can carry a stale workdir even after A -> B -> A.
+        const origin = current?.origin;
+        const createdAt = current?.createdAt;
+        // A linked directory carries the timestamp assigned by its binding.
+        // An auto directory can fill in its timestamp on first creation.
+        const preserveCreatedAt = origin === 'linked' || (typeof createdAt === 'string' && createdAt.length > 0);
+        metadata.workdir = { ...current, ...requested,
+          ...(origin === 'auto' || origin === 'linked' ? { origin } : {}),
+          ...(preserveCreatedAt ? { createdAt } : {}),
+          previousWorkspace: current?.previousWorkspace, workspaceHistory: current?.workspaceHistory };
+      } else if (current?.workspaceHistory !== undefined || current?.previousWorkspace !== undefined) {
+        metadata.workdir = current;
+      }
+    }
     this.db.prepare('UPDATE a9_sessions SET metadata_json = ?, updated_at = ? WHERE session_id = ?')
       .run(JSON.stringify(metadata), new Date().toISOString(), sessionId);
   }
@@ -1231,20 +1285,22 @@ export class A9PersistenceManager {
   /** Inbox timestamps never change the conversation's sorting timestamp. */
   mergeConversationInbox(sessionId: string, workspacePath: string,
     patch: Partial<Omit<A9ConversationInbox, 'version'>>): A9ConversationInbox {
-    const conversation = this.requireConversation(sessionId);
-    if (!sameWorkspacePath(conversation.workspacePath, workspacePath)) {
-      throw a9PersistenceError('A9_CONVERSATION_WORKSPACE_MISMATCH', '对话不属于当前工作区。');
-    }
-    if (conversation.state === 'archived') {
-      throw a9PersistenceError('A9_CONVERSATION_ARCHIVED', '已归档对话不能修改收件箱状态。');
-    }
-    const metadata = this.getConversationMetadata(sessionId);
-    const previous = metadata.inbox;
-    const inbox = { ...(previous && typeof previous === 'object' && !Array.isArray(previous) ? previous : {}),
-      ...parseConversationInbox(previous), ...patch, version: 1 };
-    this.db.prepare('UPDATE a9_sessions SET metadata_json = ? WHERE session_id = ?')
-      .run(JSON.stringify({ ...metadata, inbox }), sessionId);
-    return parseConversationInbox(inbox);
+    return this.withImmediateTransaction(() => {
+      const conversation = this.requireConversation(sessionId);
+      if (!sameWorkspacePath(conversation.workspacePath, workspacePath)) {
+        throw a9PersistenceError('A9_CONVERSATION_WORKSPACE_MISMATCH', '对话不属于当前工作区。');
+      }
+      if (conversation.state === 'archived') {
+        throw a9PersistenceError('A9_CONVERSATION_ARCHIVED', '已归档对话不能修改收件箱状态。');
+      }
+      const metadata = this.readConversationMetadata(sessionId);
+      const previous = metadata.inbox;
+      const inbox = { ...(previous && typeof previous === 'object' && !Array.isArray(previous) ? previous : {}),
+        ...parseConversationInbox(previous), ...patch, version: 1 };
+      this.db.prepare('UPDATE a9_sessions SET metadata_json = ? WHERE session_id = ?')
+        .run(JSON.stringify({ ...metadata, inbox }), sessionId);
+      return parseConversationInbox(inbox);
+    });
   }
 
   private buildConversationInboxSummary(
@@ -2703,11 +2759,9 @@ export class A9PersistenceManager {
       ), relevant AS (
         SELECT id, handle_id,
           (SELECT workspace_path FROM a9_sessions WHERE session_id = candidates.session_id) AS workspace_path,
-          (SELECT json_extract(s.metadata_json, '$.workdir.previousWorkspace') FROM a9_sessions s
-            WHERE s.session_id = candidates.session_id AND json_valid(s.metadata_json)) AS previous_workspace,
-          (SELECT json_extract(s.metadata_json, '$.workdir.workspaceHistory') FROM a9_sessions s
-            WHERE s.session_id = candidates.session_id AND json_valid(s.metadata_json)) AS workspace_history,
-          (SELECT ${WORKDIR_ORIGIN_SQL} FROM a9_sessions s WHERE s.session_id = candidates.session_id) AS workdir_origin
+          (SELECT ${workspaceHistoryJsonSql('s')} FROM a9_sessions s
+            WHERE s.session_id = candidates.session_id) AS workspace_history,
+          (SELECT ${managedBindingJsonSql('s')} FROM a9_sessions s WHERE s.session_id = candidates.session_id) AS workspace_binding
         FROM candidates
         -- Only tool audit events are ownership evidence (ADR-0343); a non-tool record,
         -- with or without a handleId, is neither evidence nor damaged evidence.
@@ -2717,12 +2771,12 @@ export class A9PersistenceManager {
     // equivalent Windows spellings of one workspace are one scope (ADR-0344), so a
     // second spelling can never start its own "first" record and re-own a handle.
     const rows = this.db.prepare(`${ownershipCandidates}
-      SELECT relevant.handle_id, relevant.workspace_path, relevant.previous_workspace, relevant.workspace_history,
-        relevant.workdir_origin, e.id, e.payload_json, e.session_id, e.turn_id,
+      SELECT relevant.handle_id, relevant.workspace_path, relevant.workspace_history,
+        relevant.workspace_binding, e.id, e.payload_json, e.session_id, e.turn_id,
         EXISTS (SELECT 1 FROM a9_turns t WHERE t.turn_id = e.turn_id AND t.session_id = e.session_id) AS turn_valid
       FROM relevant JOIN a9_events e ON e.id = relevant.id ORDER BY e.id ASC`).all(ids) as Array<{
-      handle_id: string | null; workspace_path: string | null; previous_workspace: unknown; workspace_history: unknown;
-      workdir_origin: unknown; id: number; payload_json: string; session_id: string; turn_id: string | null; turn_valid: number }>;
+      handle_id: string | null; workspace_path: string | null; workspace_history: string | null; workspace_binding: string | null;
+      id: number; payload_json: string; session_id: string; turn_id: string | null; turn_valid: number }>;
     const byHandle = new Map<string | null, typeof rows>();
     // Damaged (invalid JSON) records attributed to a handle only through its salvaged handleId.
     const recoveredRows = new WeakSet<(typeof rows)[number]>();
@@ -2740,10 +2794,11 @@ export class A9PersistenceManager {
       // Round 17 (P1): a handleId cut before its closing quote names each requested handle
       // it is (a non-empty prefix of) as well.
       if (row.handle_id === null) {
-        for (const recovered of damagedPayloadHandleTargets(row.payload_json, targets)) {
-          const attributed = { ...row, handle_id: recovered };
+        const recovered = damagedPayloadHandleId(row.payload_json);
+        for (const handleId of damagedPayloadHandleTargets(recovered, targets)) {
+          const attributed = { ...row, handle_id: handleId };
           recoveredRows.add(attributed);
-          group(recovered, attributed);
+          group(handleId, attributed);
         }
       }
     }
@@ -2766,14 +2821,17 @@ export class A9PersistenceManager {
         // while a record written after the rebind (in B) is never damage of A.
         const writtenInScope = (candidate: (typeof rows)[number]) => !scope
           || managedEventWrittenIn(candidate, candidate.workspace_path, scope);
-        const candidates = byHandle.get(handleId);
-        const scoped = candidates?.filter(belongsToScope) ?? [];
-        const row = scoped[scoped.length - 1];
         // Round 13 (P1): a record without a usable handleId whose payload still names
         // this workspace as owner (e.g. the original record of a conversation rebound
         // elsewhere) is damaged evidence of this scope, whatever its session points to now.
         const namesScope = (candidate: (typeof rows)[number]) =>
           Boolean(scope) && namesManagedOwnerWorkspace(candidate.payload_json, scope!);
+        // An A -> B -> A rebind puts B's records in a session currently in A.
+        // A recovered handle prefix carries no authority to cross that boundary.
+        const candidates = byHandle.get(handleId)?.filter(candidate => !scope
+          || !managedEventProvenOutside(candidate, candidate.workspace_path, scope) || namesScope(candidate));
+        const scoped = candidates?.filter(belongsToScope) ?? [];
+        const row = scoped[scoped.length - 1];
         // Round 19 (P1): an unattributable record of this scope older than the first in-scope
         // record and of another conversation (e.g. the only record of a rebound conversation,
         // cut before its handleId) is never shadowed by that later conversation: it fails closed.
@@ -2865,25 +2923,23 @@ export class A9PersistenceManager {
    */
   private readManagedOwnershipHistories(handleIds: string[]) {
     const rows = this.db.prepare(`
-      SELECT id, session_id, turn_id, payload_json, handle_id, turn_valid, session_known, session_workspace, previous_workspace,
-        workspace_history, workdir_origin FROM (
+      SELECT id, session_id, turn_id, payload_json, handle_id, turn_valid, session_known, session_workspace,
+        workspace_history, workspace_binding FROM (
         SELECT e.id, e.session_id, e.turn_id, e.payload_json, e.kind,
           CASE WHEN json_valid(e.payload_json) THEN CASE WHEN json_type(e.payload_json, '$.handleId') = 'text'
             THEN NULLIF(json_extract(e.payload_json, '$.handleId'), '') END END AS handle_id,
           EXISTS (SELECT 1 FROM a9_turns t WHERE t.turn_id = e.turn_id AND t.session_id = e.session_id) AS turn_valid,
           EXISTS (SELECT 1 FROM a9_sessions s WHERE s.session_id = e.session_id) AS session_known,
           (SELECT s.workspace_path FROM a9_sessions s WHERE s.session_id = e.session_id) AS session_workspace,
-          (SELECT json_extract(s.metadata_json, '$.workdir.previousWorkspace') FROM a9_sessions s
-            WHERE s.session_id = e.session_id AND json_valid(s.metadata_json)) AS previous_workspace,
-          (SELECT json_extract(s.metadata_json, '$.workdir.workspaceHistory') FROM a9_sessions s
-            WHERE s.session_id = e.session_id AND json_valid(s.metadata_json)) AS workspace_history,
-          (SELECT ${WORKDIR_ORIGIN_SQL} FROM a9_sessions s WHERE s.session_id = e.session_id) AS workdir_origin
+          (SELECT ${workspaceHistoryJsonSql('s')} FROM a9_sessions s WHERE s.session_id = e.session_id) AS workspace_history,
+          (SELECT ${managedBindingJsonSql('s')} FROM a9_sessions s WHERE s.session_id = e.session_id) AS workspace_binding
         FROM a9_events e WHERE e.event_type = 'managed_process_ownership')
       WHERE kind = 'tool' AND (handle_id IS NULL OR handle_id IN (SELECT value FROM json_each(?)))
       ORDER BY id ASC
     `).all(JSON.stringify(handleIds)) as Array<{ id: number; session_id: string; turn_id: string | null; payload_json: string;
       handle_id: string | null; turn_valid: number; session_known: number; session_workspace: string | null;
-      previous_workspace: unknown; workspace_history: unknown; workdir_origin: unknown; recovered_handle_ids?: string[] }>;
+      workspace_history: string | null; workspace_binding: string | null;
+      recovered_handle?: ReturnType<typeof damagedPayloadHandleId> }>;
     const byHandle = new Map<string, typeof rows>();
     const malformed: typeof rows = [];
     for (const row of rows) {
@@ -2893,11 +2949,11 @@ export class A9PersistenceManager {
         // in that history. It joins the handle's list (its parse fails closed) and stays
         // in the unattributable group, marked with the handle it names.
         // Round 17 (P1): including a handleId cut before its closing quote.
-        const attributed = damagedPayloadHandleTargets(row.payload_json, handleIds);
-        malformed.push({ ...row, recovered_handle_ids: attributed });
-        for (const handleId of attributed) {
+        const recovered = damagedPayloadHandleId(row.payload_json);
+        malformed.push({ ...row, recovered_handle: recovered });
+        for (const handleId of damagedPayloadHandleTargets(recovered, handleIds)) {
           const list = byHandle.get(handleId) ?? [];
-          list.push({ ...row, handle_id: handleId, recovered_handle_ids: attributed });
+          list.push({ ...row, handle_id: handleId, recovered_handle: recovered });
           byHandle.set(handleId, list);
         }
         continue;
@@ -2916,15 +2972,18 @@ export class A9PersistenceManager {
    */
   private verifyStableManagedHistory(row: { handle_id: string; workspace_path: string },
     histories: ReturnType<A9PersistenceManager['readManagedOwnershipHistories']>, { requireOwnedAnchor = true } = {}) {
-    // ADR-0346: a record is a source of this fact's history only when it comes from an
-    // unknown session, a session of the fact's own workspace, or names the fact's own
-    // workspace as owner (the ADR-0343 relink context). A record of another workspace
-    // that merely names the same handleId is neither anchor nor damage.
-    const events = (histories.byHandle.get(row.handle_id) ?? []).filter(event => event.session_workspace === null
-      || sameWorkspacePath(event.session_workspace, row.workspace_path)
-      || namesManagedOwnerWorkspace(event.payload_json, row.workspace_path));
-    const parsed = events.map(event => ({ id: event.id, record: this.parseManagedOwnership(event) }));
-    const anchor = parsed[0]?.record;
+    // A verified write-time binding takes precedence over a session's current path.
+    // The stored owner workspace can also identify history across a legacy move.
+    const provenOutside = (event: (typeof histories.malformed)[number]) =>
+      managedEventProvenOutside(event, event.session_workspace, row.workspace_path);
+    const candidates = histories.byHandle.get(row.handle_id) ?? [];
+    const inScope = (event: (typeof histories.malformed)[number]) => {
+      const workspace = managedEventWorkspace(event, event.session_workspace) ?? event.session_workspace;
+      return workspace === null || sameWorkspacePath(workspace, row.workspace_path)
+        || namesManagedOwnerWorkspace(event.payload_json, row.workspace_path);
+    };
+    const first = candidates.find(inScope);
+    const anchor = first && this.parseManagedOwnership(first);
     if (!anchor || (requireOwnedAnchor && anchor.ownershipState !== 'owned')) {
       throw a9PersistenceError('A9_MANAGED_OWNERSHIP_UNCONFIRMED', '缺少最初有效的持久归属记录');
     }
@@ -2935,6 +2994,12 @@ export class A9PersistenceManager {
       JOIN a9_turns tr ON tr.task_id=t.task_id AND tr.session_id=s.session_id
       WHERE s.session_id=? AND t.task_id=? AND tr.turn_id=?`).get(anchor.owner.conversationId, anchor.owner.taskId, anchor.owner.turnId);
     if (!origin) throw a9PersistenceError('A9_MANAGED_OWNER_MISMATCH', '无法验证最初归属的会话与任务');
+    // The exact handle and original event columns identify this history even when
+    // the payload is damaged. A truncated handle prefix cannot establish that origin.
+    const events = candidates.filter(event => inScope(event)
+      || (event.recovered_handle?.complete !== false && matchesManagedEventOrigin(event, anchor.owner))
+      || (!event.recovered_handle && event.session_id === anchor.owner.conversationId && !provenOutside(event)));
+    const parsed = events.map(event => ({ id: event.id, record: event === first ? anchor : this.parseManagedOwnership(event) }));
     for (const { record } of parsed) {
       if (!sameManagedOwner(record.owner, anchor.owner) || record.requestId !== anchor.requestId) {
         throw a9PersistenceError('A9_MANAGED_OWNERSHIP_UNCONFIRMED', '归属记录与最初归属不一致');
@@ -2966,11 +3031,6 @@ export class A9PersistenceManager {
     // Round 22 (P1): the anchor's conversation was active in this workspace, so its anonymous
     // record is excluded only when well-formed segments prove it was written outside. A legacy
     // rebind (no segments), damaged segments or damaged session metadata prove nothing: fail closed.
-    const provenOutside = (event: (typeof histories.malformed)[number]) => {
-      const segments = parseWorkspaceHistory(event.workspace_history);
-      return Array.isArray(segments) && segments.length > 0
-        && !managedEventWrittenIn(event, event.session_workspace, row.workspace_path);
-    };
     // Round 23 (P1): a record is attributable to this history only when it is in scope or not
     // proven written outside this workspace. (1) A record whose salvaged (possibly prefix-only,
     // e.g. `sh-`) handleId names this handle but that segments prove was written in another
@@ -2978,7 +3038,8 @@ export class A9PersistenceManager {
     // of the anchor's own conversation that is attributable is damage at any position and of
     // any turn: an older record of another turn written in A is not skipped.
     const attributable = (event: (typeof histories.malformed)[number]) => malformedInScope(event) || !provenOutside(event);
-    const damaged = histories.malformed.find(event => (event.recovered_handle_ids?.includes(row.handle_id) && attributable(event))
+    const damaged = histories.malformed.find(event => (event.recovered_handle
+        && damagedHandleMayMatch(event.recovered_handle, row.handle_id) && attributable(event))
       || (malformedInScope(event) && (
         (event.id < parsed[0].id && event.session_id !== events[0].session_id)
         || (event.id > latestId && event.session_known !== 1)))
@@ -3011,35 +3072,54 @@ export class A9PersistenceManager {
   }
 
   /**
-   * Latest tool disposition record of a handle, before verification. Records are
-   * first restricted to trusted sources and only then is the latest chosen, so a
-   * record of another workspace (damaged or carrying only this handleId) can neither
-   * fail this read nor shadow the legitimate disposition. Trusted sources are the
-   * handle's stable owner session (its anchor survives a registry relink, ADR-0343),
-   * a session of this fact's workspace, and no known session. A trusted
-   * unattributable tool record newer than the match stays fail-closed.
+   * Latest candidate for this handle based on the original Turn and the
+   * event's possible write workspace. The caller verifies the selected receipt.
    */
-  private readManagedDispositionRow(handleId: string, ownerSessionId: string | undefined = this.managedAnchorSession(handleId)) {
-    const rows = this.db.prepare(`SELECT id, session_id, turn_id, payload_json, handle_id, session_workspace FROM (
+  private readManagedDispositionRow(handleId: string, fact: any = this.db.prepare('SELECT * FROM a9_managed_processes WHERE handle_id = ?').get(handleId),
+    ownership: A9ManagedOwnershipRecord | undefined = fact && this.managedOwnershipAnchor(handleId, fact.workspace_path)) {
+    const rows = this.db.prepare(`SELECT * FROM (
         SELECT e.id, e.session_id, e.turn_id, e.payload_json,
           CASE WHEN json_valid(e.payload_json) THEN CASE WHEN json_type(e.payload_json, '$.handleId') = 'text'
             THEN NULLIF(json_extract(e.payload_json, '$.handleId'), '') END END AS handle_id,
-          (SELECT s.workspace_path FROM a9_sessions s WHERE s.session_id = e.session_id) AS session_workspace
-        FROM a9_events e WHERE e.event_type = 'managed_process_disposition' AND e.kind = 'tool')
+          EXISTS (SELECT 1 FROM a9_turns t WHERE t.turn_id = e.turn_id AND t.session_id = e.session_id) AS turn_valid,
+          s.workspace_path AS session_workspace,
+          ${previousWorkspaceJsonSql('s')} AS previous_workspace,
+          ${workspaceHistoryJsonSql('s')} AS workspace_history,
+          ${managedBindingJsonSql('s')} AS workspace_binding
+        FROM a9_events e LEFT JOIN a9_sessions s ON s.session_id = e.session_id
+        WHERE e.event_type = 'managed_process_disposition' AND e.kind = 'tool')
       WHERE handle_id IS NULL OR handle_id = ? ORDER BY id DESC`).all(handleId) as Array<{ id: number; session_id: string;
-      turn_id: string | null; payload_json: string; handle_id: string | null; session_workspace: string | null }>;
-    const fact = this.db.prepare('SELECT workspace_path FROM a9_managed_processes WHERE handle_id = ?').get(handleId) as
-      { workspace_path: string } | undefined;
-    const trusted = (row: (typeof rows)[number]) => row.session_workspace === null
-      || (ownerSessionId !== undefined && row.session_id === ownerSessionId)
-      || (fact !== undefined && sameWorkspacePath(row.session_workspace, fact.workspace_path));
-    const match = rows.find(row => row.handle_id === handleId && trusted(row));
-    const damaged = rows.find(row => row.handle_id === null && (!match || row.id > match.id) && trusted(row));
-    if (damaged) {
-      safeParse(damaged.payload_json, { buffer: this.diagnosticBuffer, table: 'a9_events', rowId: damaged.id });
+      turn_id: string | null; payload_json: string; handle_id: string | null; turn_valid: number; session_workspace: string | null;
+      previous_workspace: unknown; workspace_history: string | null; workspace_binding: string | null }>;
+    const trusted = (row: (typeof rows)[number]) => {
+      if (row.session_workspace === null) return true;
+      if (!fact) return false;
+      const workspace = managedEventWorkspace(row, row.session_workspace);
+      if (workspace !== null) return sameWorkspacePath(workspace, fact.workspace_path);
+      return row.session_id === ownership?.owner.conversationId
+        || sameWorkspacePath(row.session_workspace, fact.workspace_path)
+        || (typeof row.previous_workspace === 'string' && sameWorkspacePath(row.previous_workspace, fact.workspace_path));
+    };
+    const owner = ownership?.owner;
+    const latest = rows.find(event => {
+      const originalTurn = matchesManagedEventOrigin(event, owner);
+      const recovered = event.handle_id === null ? damagedPayloadHandleId(event.payload_json) : null;
+      if (recovered && !damagedHandleMayMatch(recovered, handleId)) return false;
+      const exactHandle = event.handle_id === handleId || recovered?.complete === true;
+      if (exactHandle && originalTurn) return true;
+      if (!trusted(event)) return false;
+      // A verified different Turn identifies a separate origin even in a legacy
+      // session. A complete claim to the original owner makes the source ambiguous.
+      if (owner && event.session_workspace !== null && event.turn_valid === 1 && !originalTurn) {
+        return sameManagedOwner(readDispositionOwnerClaim(event.payload_json), owner);
+      }
+      return true;
+    });
+    if (latest?.handle_id === null) {
+      safeParse(latest.payload_json, { buffer: this.diagnosticBuffer, table: 'a9_events', rowId: latest.id });
       throw a9PersistenceError('A9_MANAGED_DISPOSITION_UNCONFIRMED', '本工作区的处置审计记录受损');
     }
-    return match && { id: match.id, session_id: match.session_id, turn_id: match.turn_id, payload_json: match.payload_json };
+    return latest;
   }
 
   /**
@@ -3048,26 +3128,38 @@ export class A9PersistenceManager {
    * revision. Changing the status text alone settles nothing.
    */
   private verifyManagedDisposition(row: any, ownership: A9ManagedOwnershipRecord) {
-    const event = this.readManagedDispositionRow(row.handle_id, ownership.owner.conversationId);
-    const payload = event && safeParse(event.payload_json, { buffer: this.diagnosticBuffer, table: 'a9_events', rowId: event.id }) as any;
-    if (!event || !payload || payload.schemaVersion !== 1 || payload.disposition !== 'user_attested_after_restart'
+    const event = this.readManagedDispositionRow(row.handle_id, row, ownership);
+    const verified = event && this.matchManagedDisposition(row, ownership, event);
+    if (!verified) throw a9PersistenceError('A9_MANAGED_DISPOSITION_UNCONFIRMED', '已处置事实缺少一致的处置审计');
+    return verified;
+  }
+
+  private matchManagedDisposition(row: any, ownership: A9ManagedOwnershipRecord,
+    event: { id: number; session_id: string; turn_id: string | null; payload_json: string }) {
+    // Check actual event columns as well as the payload. A record from another
+    // session or turn cannot establish the original disposition.
+    if (!matchesManagedEventOrigin(event, ownership.owner)) return undefined;
+    const payload = safeParse(event.payload_json, { buffer: this.diagnosticBuffer, table: 'a9_events', rowId: event.id }) as any;
+    if (payload.schemaVersion !== 1 || payload.disposition !== 'user_attested_after_restart'
       || payload.handleId !== row.handle_id || ownership.ownershipState !== 'owned'
-      || event.session_id !== ownership.owner.conversationId || event.turn_id !== ownership.owner.turnId
       || !sameManagedOwner(payload.owner, ownership.owner) || payload.requestId !== ownership.requestId
       || payload.startedAt !== row.started_at || !Number.isSafeInteger(row.pid) || row.pid <= 0
       || payload.pidProbe?.pid !== row.pid || payload.pidProbe?.status !== 'absent'
       || !Number.isFinite(Date.parse(payload.pidProbe?.checkedAt))
       || typeof payload.recoveryRevision !== 'string' || !/^[0-9a-f]{64}$/.test(payload.recoveryRevision)
       || payload.recoveryRevision !== this.managedRecoveryRevision(row, ownership, 'cleanup_required')) {
-      throw a9PersistenceError('A9_MANAGED_DISPOSITION_UNCONFIRMED', '已处置事实缺少一致的处置审计');
+      return undefined;
     }
     return { ...payload, eventId: Number(event.id) } as Record<string, any> & { eventId: number };
   }
 
   /** 摘要绑定原始行和完整归属；刷新相同事实不推进 revision。 */
-  getManagedProcessRecoveryIdentity(handleId: string) {
+  getManagedProcessRecoveryIdentity(handleId: string, expectedWorkspace?: string) {
     const row = this.db.prepare('SELECT * FROM a9_managed_processes WHERE handle_id=?').get(handleId) as any;
     if (!row) throw a9PersistenceError('A9_MANAGED_HANDLE_UNKNOWN', '恢复事实不存在');
+    if (expectedWorkspace !== undefined && !sameWorkspacePath(row.workspace_path, expectedWorkspace)) {
+      throw a9PersistenceError('A9_MANAGED_HANDLE_WRONG_OWNER', '仅允许当前工作区及对话');
+    }
     return this.managedRecoveryIdentity(row, this.getManagedOwnership(handleId, row.workspace_path));
   }
 
@@ -3088,16 +3180,13 @@ export class A9PersistenceManager {
   }
 
   /**
-   * Session of the first tool ownership record that is a credential of this fact:
+   * First tool ownership record that is a credential of this fact:
    * a complete `owned` record whose owner workspace is the fact row's own workspace
    * and whose session/turn origin exists (ADR-0343 relink keeps it valid). A record
    * that only names the same handleId, or one owned by another workspace, is never
    * an anchor and cannot widen the trusted disposition sources (ADR-0346).
    */
-  private managedAnchorSession(handleId: string): string | undefined {
-    const fact = this.db.prepare('SELECT workspace_path FROM a9_managed_processes WHERE handle_id = ?').get(handleId) as
-      { workspace_path: string } | undefined;
-    if (!fact) return undefined;
+  private managedOwnershipAnchor(handleId: string, workspacePath: string): A9ManagedOwnershipRecord | undefined {
     const rows = this.db.prepare(`SELECT e.id, e.session_id, e.turn_id, e.payload_json, ? AS handle_id,
         EXISTS (SELECT 1 FROM a9_turns t WHERE t.turn_id = e.turn_id AND t.session_id = e.session_id) AS turn_valid
       FROM a9_events e WHERE e.event_type = 'managed_process_ownership' AND e.kind = 'tool'
@@ -3111,10 +3200,10 @@ export class A9PersistenceManager {
         if (error instanceof Error && 'code' in error && String(error.code).startsWith('A9_MANAGED_')) continue;
         throw error;
       }
-      if (record.ownershipState !== 'owned' || !sameWorkspacePath(record.owner.workspace, fact.workspace_path)) continue;
+      if (record.ownershipState !== 'owned' || !sameWorkspacePath(record.owner.workspace, workspacePath)) continue;
       const origin = this.db.prepare(`SELECT 1 FROM a9_tasks t JOIN a9_turns tr ON tr.task_id = t.task_id AND tr.session_id = t.session_id
         WHERE t.session_id = ? AND t.task_id = ? AND tr.turn_id = ?`).get(row.session_id, record.owner.taskId, record.owner.turnId);
-      if (origin) return row.session_id;
+      if (origin) return record;
     }
     return undefined;
   }
@@ -3135,7 +3224,7 @@ export class A9PersistenceManager {
     return this.db.transaction(() => {
       const lock = this.db.prepare('SELECT owner_id FROM a9_workspace_locks WHERE workspace_path=?').get(input.workspace) as any;
       if (lock?.owner_id !== input.lockOwnerId) throw a9PersistenceError('A9_WORKSPACE_LOCKED', '当前窗口未持有工作区锁');
-      const current = this.getManagedProcessRecoveryIdentity(input.handleId);
+      const current = this.getManagedProcessRecoveryIdentity(input.handleId, input.workspace);
       if (current.owner.workspace !== input.workspace || current.owner.conversationId !== input.conversationId) throw a9PersistenceError('A9_MANAGED_HANDLE_WRONG_OWNER', '仅允许当前工作区及对话');
       const previous = this.getManagedProcessDisposition(input.handleId);
       if (previous) {
@@ -3514,8 +3603,7 @@ export class A9PersistenceManager {
   releaseWorkspaceLockIfManagedSettled(workspacePath: string, ownerId: string, managedWorkspacePath: string,
     options: { handedOver?: Array<{ handleId: string; pid: number | null; startedAt: string }> } = {}):
     { released: boolean; blockers: string[]; reason?: string } {
-    type Outcome = { released: boolean; blockers: string[]; reason?: string };
-    const release = this.db.transaction((): Outcome => {
+    return this.withImmediateTransaction(() => {
       const lock = this.db.prepare('SELECT owner_id FROM a9_workspace_locks WHERE workspace_path = ?').get(workspacePath) as any;
       if (lock?.owner_id !== ownerId) return { released: true, blockers: [] };
       const blockers = new Set<string>();
@@ -3528,8 +3616,7 @@ export class A9PersistenceManager {
       }
       if (blockers.size) return { released: false, blockers: [...blockers] };
       return this.deleteOwnedWorkspaceLock(workspacePath, ownerId);
-    }) as (() => Outcome) & { immediate?: () => Outcome };
-    return (release.immediate ?? release)();
+    });
   }
 }
 
@@ -4008,38 +4095,31 @@ function isTruncatedWorkspacePrefix(partial: string, workspacePath: string): boo
   return [workspacePath, path.posix.resolve(workspacePath)].some(target => target.startsWith(partial));
 }
 
-/**
- * Round 15 (P1): the top-level `handleId` string of a payload that is not valid JSON
- * (e.g. truncated), or null. Only a top-level string value counts: a nested key or text
- * inside another string value is never read as this record's handle.
- * Round 17 (P1): a value cut before its closing quote is still read up to the end of the
- * text (`complete: false`); the characters kept may be the whole handleId or a prefix of it.
- */
-function damagedPayloadHandleId(payloadJson: unknown): { value: string; complete: boolean } | null {
-  if (typeof payloadJson !== 'string') return null;
-  try { JSON.parse(payloadJson); return null; } catch { /* damaged: scan below */ }
-  const text = payloadJson;
-  const readString = (start: number, allowOpen = false): { value: string; end: number; complete: boolean } | null => {
-    for (let i = start + 1; i < text.length; i++) {
-      if (text[i] === '\\') { i++; continue; }
-      if (text[i] === '"') {
-        try { return { value: JSON.parse(text.slice(start, i + 1)) as string, end: i + 1, complete: true }; } catch { return null; }
-      }
+function readDamagedPayloadString(text: string, start: number, allowOpen = false):
+  { value: string; end: number; complete: boolean } | null {
+  for (let i = start + 1; i < text.length; i++) {
+    if (text[i] === '\\') { i++; continue; }
+    if (text[i] === '"') {
+      try { return { value: JSON.parse(text.slice(start, i + 1)) as string, end: i + 1, complete: true }; } catch { return null; }
     }
-    if (!allowOpen) return null;
-    // Unclosed string: drop a trailing partial escape, then unescape what is left.
-    let raw = text.slice(start + 1).replace(/(^|[^\\])((?:\\\\)*)\\u[0-9a-fA-F]{0,3}$/, '$1$2');
-    if ((/\\+$/.exec(raw)?.[0].length ?? 0) % 2 === 1) raw = raw.slice(0, -1);
-    let value = raw;
-    try { value = JSON.parse(`"${raw}"`) as string; } catch { /* keep the raw (unescapable) text */ }
-    return { value, end: text.length, complete: false };
-  };
+  }
+  if (!allowOpen) return null;
+  // Unclosed string: drop a trailing partial escape, then unescape what is left.
+  let raw = text.slice(start + 1).replace(/(^|[^\\])((?:\\\\)*)\\u[0-9a-fA-F]{0,3}$/, '$1$2');
+  if ((/\\+$/.exec(raw)?.[0].length ?? 0) % 2 === 1) raw = raw.slice(0, -1);
+  let value = raw;
+  try { value = JSON.parse(`"${raw}"`) as string; } catch { /* keep the raw (unescapable) text */ }
+  return { value, end: text.length, complete: false };
+}
+
+/** Find a top-level field in the surviving prefix, skipping nested values and quoted text. */
+function damagedPayloadFieldStart(text: string, name: string): number | null {
   const skipSpace = (i: number) => { while (i < text.length && /\s/.test(text[i])) i++; return i; };
   let depth = 0, expectKey = false;
   for (let i = skipSpace(0); i < text.length;) {
     const ch = text[i];
     if (ch === '"') {
-      const key = readString(i);
+      const key = readDamagedPayloadString(text, i);
       if (!key) return null;
       i = key.end;
       if (depth === 1 && expectKey) {
@@ -4047,10 +4127,7 @@ function damagedPayloadHandleId(payloadJson: unknown): { value: string; complete
         i = skipSpace(i);
         if (text[i] !== ':') return null;
         i = skipSpace(i + 1);
-        if (key.value === 'handleId') {
-          const value = text[i] === '"' ? readString(i, true) : null;
-          return value?.value ? { value: value.value, complete: value.complete } : null;
-        }
+        if (key.value === name) return i;
       }
       continue;
     }
@@ -4064,16 +4141,55 @@ function damagedPayloadHandleId(payloadJson: unknown): { value: string; complete
 }
 
 /**
+ * A damaged payload can retain a complete top-level handleId or a truncated prefix.
+ * A nested key or text inside another string is never the record's handle.
+ */
+function damagedPayloadHandleId(payloadJson: unknown): { value: string; complete: boolean } | null {
+  if (typeof payloadJson !== 'string') return null;
+  try { JSON.parse(payloadJson); return null; } catch { /* damaged: scan the surviving prefix */ }
+  const start = damagedPayloadFieldStart(payloadJson, 'handleId');
+  if (start === null || payloadJson[start] !== '"') return null;
+  const handle = readDamagedPayloadString(payloadJson, start, true);
+  return handle?.value ? { value: handle.value, complete: handle.complete } : null;
+}
+
+/** A complete owner claim can keep a damaged receipt in scope for verification. */
+function readDispositionOwnerClaim(payloadJson: string): unknown {
+  try { return JSON.parse(payloadJson)?.owner; } catch { /* the owner object may survive truncation */ }
+  const start = damagedPayloadFieldStart(payloadJson, 'owner');
+  if (start === null || payloadJson[start] !== '{') return undefined;
+  for (let i = start + 1; i < payloadJson.length;) {
+    const char = payloadJson[i];
+    if (char === '}') return safeParse(payloadJson.slice(start, i + 1));
+    // The owner tuple is flat. A nested object or array cannot match it.
+    if (char === '{' || char === '[') return undefined;
+    if (char === '"') {
+      const field = readDamagedPayloadString(payloadJson, i);
+      if (!field) return undefined;
+      i = field.end;
+    } else {
+      i++;
+    }
+  }
+  return undefined;
+}
+
+/**
  * Requested handles a damaged payload names: the complete top-level handleId, or every
  * requested handle that a value cut before its closing quote is a non-empty prefix of
  * (fail-closed: an ambiguous prefix is damage of each handle it may name).
  */
-function damagedPayloadHandleTargets(payloadJson: unknown, targets: readonly string[]): string[] {
-  const recovered = damagedPayloadHandleId(payloadJson);
-  if (!recovered) return [];
-  return recovered.complete
-    ? targets.filter(target => target === recovered.value)
-    : targets.filter(target => target.startsWith(recovered.value));
+function damagedPayloadHandleTargets(recovered: ReturnType<typeof damagedPayloadHandleId>, targets: readonly string[]): string[] {
+  return recovered ? targets.filter(target => damagedHandleMayMatch(recovered, target)) : [];
+}
+
+function damagedHandleMayMatch(recovered: { value: string; complete: boolean }, handleId: string): boolean {
+  return recovered.complete ? recovered.value === handleId : handleId.startsWith(recovered.value);
+}
+
+function matchesManagedEventOrigin(event: { session_id: string; turn_id: string | null },
+  owner: A9ManagedOwnershipRecord['owner'] | undefined): boolean {
+  return owner !== undefined && event.session_id === owner.conversationId && event.turn_id === owner.turnId;
 }
 
 /**
@@ -4092,68 +4208,70 @@ interface A9WorkspaceHistoryEntry { workspace: string; maxEventId: number; renam
  */
 const A9_UNKNOWN_PRIOR_WORKSPACE = '#a9-unknown-prior';
 
-/** The stored segments, or null when absent; 'damaged' when present but not well-formed. */
+/** Validate the decoded history. Missing metadata and a malformed value are distinct. */
 function parseWorkspaceHistory(value: unknown): A9WorkspaceHistoryEntry[] | null | 'damaged' {
-  if (value === undefined || value === null) return null;
-  let parsed = value;
-  if (typeof value === 'string') {
-    try { parsed = JSON.parse(value); } catch { return 'damaged'; }
-  }
-  if (!Array.isArray(parsed)) return 'damaged';
-  let bound = -1;
-  for (const entry of parsed as Array<Record<string, unknown>>) {
+  if (value === undefined) return null;
+  if (!Array.isArray(value)) return 'damaged';
+  let bound = 0;
+  for (const entry of value as Array<Record<string, unknown>>) {
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)
       || typeof entry.workspace !== 'string' || !entry.workspace
       || !Number.isSafeInteger(entry.maxEventId) || Number(entry.maxEventId) < bound
       || (entry.renamedTo !== undefined && (typeof entry.renamedTo !== 'string' || !entry.renamedTo))) return 'damaged';
     bound = Number(entry.maxEventId);
   }
-  return parsed as A9WorkspaceHistoryEntry[];
+  return value as A9WorkspaceHistoryEntry[];
 }
 
-/**
- * `workdir.origin` of a session row aliased `s`; DAMAGED_WORKDIR_ORIGIN when its metadata is not
- * valid JSON (nothing about its earlier bindings can be read).
- */
-const DAMAGED_WORKDIR_ORIGIN = '#a9-damaged-metadata';
-const WORKDIR_ORIGIN_SQL = `CASE WHEN json_valid(s.metadata_json) THEN json_extract(s.metadata_json, '$.workdir.origin')
-  ELSE '${DAMAGED_WORKDIR_ORIGIN}' END`;
+// JSON text preserves a missing field separately from a field containing JSON null.
+const workspaceHistoryJsonSql = (row: string) => `CASE WHEN json_valid(${row}.metadata_json)
+  THEN ${row}.metadata_json -> '$.workdir.workspaceHistory' END`;
+const MANAGED_BINDING_KEY = '_managedWorkspaceBinding';
+const managedBindingJsonSql = (row: string) => `CASE WHEN json_valid(${row}.metadata_json)
+  THEN ${row}.metadata_json -> '$.${MANAGED_BINDING_KEY}' END`;
+const previousWorkspaceJsonSql = (row: string) => `CASE WHEN json_valid(${row}.metadata_json)
+  THEN json_extract(${row}.metadata_json, '$.workdir.previousWorkspace') END`;
 
-/**
- * Round 20 (P1): the workspace(s) the event's conversation was bound to when the event was
- * written, or null for an unknown conversation. Damaged history or a legacy scalar
- * `previousWorkspace` (no segment bounds) is ambiguous and yields every candidate (fail-closed).
- * Round 22 (P1): a conversation rebound by a legacy build (`origin: 'linked'` with neither
- * segments nor `previousWorkspace`), or whose metadata is damaged, may have written the event
- * in any workspace: null (fail-closed).
- */
-function managedEventWorkspaces(eventId: number, current: string | null, previousWorkspace: unknown, history: unknown,
-  origin?: unknown): string[] | null {
-  if (current === null || origin === DAMAGED_WORKDIR_ORIGIN) return null;
-  const segments = parseWorkspaceHistory(history);
-  if (segments === 'damaged') {
-    const mentioned = typeof history === 'string'
-      ? [...history.matchAll(/"(?:workspace|renamedTo)"\s*:\s*"((?:[^"\\]|\\.)*)"/g)].map(match => {
-        try { return JSON.parse(`"${match[1]}"`) as string; } catch { return match[1]; }
-      })
-      : [];
-    if (mentioned.includes(A9_UNKNOWN_PRIOR_WORKSPACE)) return null;
-    return [...mentioned, ...(typeof previousWorkspace === 'string' ? [previousWorkspace] : []), current];
-  }
-  if (segments?.length) {
-    const written = segments.find(entry => eventId <= entry.maxEventId)?.workspace ?? current;
-    // Round 23 (P1): an event of the unknown prior segment may have been written anywhere.
-    return written === A9_UNKNOWN_PRIOR_WORKSPACE ? null : [written];
-  }
-  if (typeof previousWorkspace === 'string') return [previousWorkspace, current];
-  return origin === 'linked' ? null : [current];
+function writeManagedBinding(sessionId: string, current: string, history: A9WorkspaceHistoryEntry[], afterEventId: number) {
+  const version = 1;
+  // renamedTo is a display alias. Only the write-time workspace and bounds place events.
+  const ranges = history.map(entry => [entry.workspace, entry.maxEventId]);
+  const digest = crypto.createHash('sha256').update(JSON.stringify([version, sessionId, current, afterEventId, ranges]), 'utf8').digest('hex');
+  return { version, afterEventId, digest };
 }
 
-/** True when the event was written in `scope` (an unknown conversation may have been: fail-closed). */
-function managedEventWrittenIn(event: { id: number; previous_workspace: unknown; workspace_history: unknown; workdir_origin?: unknown },
-  current: string | null, scope: string): boolean {
-  const written = managedEventWorkspaces(event.id, current, event.previous_workspace, event.workspace_history, event.workdir_origin);
-  return written === null || written.some(workspace => sameWorkspacePath(workspace, scope));
+function verifiedManagedBinding(value: unknown, sessionId: string, current: string, history: A9WorkspaceHistoryEntry[]): number | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const { version, afterEventId, digest } = value as ReturnType<typeof writeManagedBinding>;
+  if (version !== 1 || !Number.isSafeInteger(afterEventId) || afterEventId < 0
+    || typeof digest !== 'string' || !/^[0-9a-f]{64}$/.test(digest)) return undefined;
+  return writeManagedBinding(sessionId, current, history, afterEventId).digest === digest ? afterEventId : undefined;
+}
+
+type ManagedEventBinding = { id: number; session_id: string; workspace_history: string | null; workspace_binding: string | null };
+
+/**
+ * An old session path is a hint, and an ordered list can still be missing an
+ * interval. Exclusion requires a checked binding from a known cutoff forward.
+ */
+function managedEventWorkspace(event: ManagedEventBinding, current: string | null): string | null {
+  if (current === null || event.workspace_binding === null) return null;
+  const segments = parseWorkspaceHistory(event.workspace_history === null ? undefined : JSON.parse(event.workspace_history));
+  if (segments === 'damaged') return null;
+  const afterEventId = verifiedManagedBinding(JSON.parse(event.workspace_binding), event.session_id, current, segments ?? []);
+  if (afterEventId === undefined || event.id <= afterEventId) return null;
+  const workspace = segments?.find(entry => event.id <= entry.maxEventId)?.workspace ?? current;
+  return workspace === A9_UNKNOWN_PRIOR_WORKSPACE ? null : workspace;
+}
+
+/** For ownership damage, include an event whose binding cannot be ruled out. */
+function managedEventWrittenIn(event: ManagedEventBinding, current: string | null, scope: string): boolean {
+  const workspace = managedEventWorkspace(event, current);
+  return workspace === null || sameWorkspacePath(workspace, scope);
+}
+
+function managedEventProvenOutside(event: ManagedEventBinding, current: string | null, scope: string): boolean {
+  return !managedEventWrittenIn(event, current, scope);
 }
 
 function sameManagedOwner(left: unknown, right: unknown): boolean {

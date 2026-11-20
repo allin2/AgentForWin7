@@ -3711,48 +3711,167 @@ async function round23Env(pid: number, ownHandle: string) {
     p.upsertTurn(turn, `${turn}-task`, session, 'completed'); p.upsertTask(`${turn}-task`, session, 'completed');
   };
   /** Records and stops `handleId` in `workspace`; returns its ownership event ids. */
-  const recordOther = (handleId: string, workspace: string, turn = 'new-turn') => {
-    p.upsertTask(`${turn}-task`, session, 'active'); p.upsertTurn(turn, `${turn}-task`, session, 'active');
+  const recordOther = (handleId: string, workspace: string, turn = 'new-turn', eventSession = session) => {
+    p.upsertTask(`${turn}-task`, eventSession, 'active'); p.upsertTurn(turn, `${turn}-task`, eventSession, 'active');
     p.recordManagedOwnership({ handleId, workspacePath: workspace, pid: pid + 1000, command: 'new command', cwd: workspace,
       startedAt: '2026-11-19T00:00:00.000Z', lastProbeStatus: 'stopped', cleanupRequired: false }, { schemaVersion: 1, requestId: 'new-request',
-      ownershipState: 'owned', owner: { workspace, conversationId: session, taskId: `${turn}-task`, turnId: turn, toolCallId: 'new-call' } });
-    p.upsertTurn(turn, `${turn}-task`, session, 'completed'); p.upsertTask(`${turn}-task`, session, 'completed');
+      ownershipState: 'owned', owner: { workspace, conversationId: eventSession, taskId: `${turn}-task`, turnId: turn, toolCallId: 'new-call' } });
+    p.upsertTurn(turn, `${turn}-task`, eventSession, 'completed'); p.upsertTask(`${turn}-task`, eventSession, 'completed');
     return (f.db.prepare(`SELECT id FROM a9_events WHERE event_type = 'managed_process_ownership'
       AND json_extract(payload_json, '$.handleId') = ?`).all(handleId) as Array<{ id: number }>).map(item => item.id);
+  };
+  const dismiss = (workspace: string, handleId: string, eventSession = session) => {
+    const taskId = handleId + '-task'; const turnId = handleId + '-turn';
+    p.upsertTask(taskId, eventSession, 'active'); p.upsertTurn(turnId, taskId, eventSession, 'active');
+    const owner = { workspace, conversationId: eventSession, taskId, turnId, toolCallId: 'call' };
+    p.recordManagedOwnership({
+      handleId, workspacePath: workspace, pid, command: 'previous command', cwd: workspace,
+      startedAt: '2026-11-18T00:00:00.000Z', lastProbeStatus: 'cleanup_required',
+    }, { schemaVersion: 1, requestId: handleId, ownershipState: 'owned', owner });
+    const identity = p.getManagedProcessRecoveryIdentity(handleId);
+    expect(p.acquireWorkspaceLock(workspace, 'seed').acquired).toBe(true);
+    const receipt = p.dismissRecoveredManagedProcess({
+      workspace, conversationId: eventSession, handleId, lockOwnerId: 'seed', recoveryRevision: identity.recoveryRevision,
+      identity, pidProbe: { pid: identity.pid, status: 'absent', checkedAt: '2026-11-19T00:00:00.000Z' },
+    });
+    p.releaseWorkspaceLock(workspace, 'seed');
+    p.upsertTurn(turnId, taskId, eventSession, 'completed'); p.upsertTask(taskId, eventSession, 'completed');
+    return receipt;
   };
   const mkdir = (name: string) => { const dir = path.join(f.env.root, name); fs.mkdirSync(dir); return dir; };
   const truncate = (ids: number[], payload: string) => {
     for (const id of ids) f.db.prepare('UPDATE a9_events SET payload_json = ? WHERE id = ?').run(payload, id);
   };
-  return { ...f, row, p, session, recordOwn, recordOther, mkdir, truncate };
+  return { ...f, row, p, session, recordOwn, recordOther, dismiss, mkdir, truncate };
 }
 
-async function expectLeaveBlocked(f: Awaited<ReturnType<typeof round23Env>>) {
+async function expectLeaveBlocked(f: Awaited<ReturnType<typeof round23Env>>, code = 'A9_MANAGED_OWNERSHIP_CORRUPT') {
   const before = f.row();
-  const runtime = makeRuntime(f.env);
+  let runtime = makeRuntime(f.env);
   try {
     expect(runtime.status).toBe('ready');
-    expect(JSON.stringify(runtime.getSnapshot({ bypassCache: true }).persistenceDiagnostics)).toContain('A9_MANAGED_OWNERSHIP_CORRUPT');
-    expect(runtime.canLeaveWorkspace().allowed).toBe(false);
+    const diagnostics = JSON.stringify(runtime.getSnapshot({ bypassCache: true }).persistenceDiagnostics);
+    const allowed = runtime.canLeaveWorkspace().allowed;
+    const attempts = [];
     for (const stopManaged of [true, false]) {
       const closed = await runtime.shutdown({ stopManaged });
-      expect(closed.unresolved.length).toBeGreaterThan(0);
-      expect(f.lockRows()).toBe(1);
+      const locks = f.lockRows();
+      attempts.push({ stopManaged, unresolved: closed.unresolved.length, locks });
+      // Exercise the second choice on a fresh runtime if the first choice wrongly released the lock.
+      if (stopManaged && locks === 0) runtime = makeRuntime(f.env);
     }
+    expect({ diagnostics, allowed, attempts }).toEqual({
+      diagnostics: expect.stringContaining(code),
+      allowed: false,
+      attempts: [
+        { stopManaged: true, unresolved: expect.any(Number), locks: 1 },
+        { stopManaged: false, unresolved: expect.any(Number), locks: 1 },
+      ],
+    });
+    expect(attempts.every(attempt => attempt.unresolved > 0)).toBe(true);
   } finally { await runtime.shutdown({ stopManaged: false }); }
   expect(f.row()).toEqual(before);
 }
 
-// (1) The conversation settles its own handle and then a new handle in A; a legacy build rebinds
-// it to B (`workdir: { origin: 'linked' }`, no segments) and the new handle's records are cut.
+it.each((['stopped', 'released'] as const).flatMap(status => ([
+  'legacy rename with omitted workdir', 'legacy rename before any further rebind',
+  'lost first path', 'lost complete middle interval', 'lost complete middle interval then rebound',
+  'workdir history set to JSON null', 'previously misassigned first interval',
+] as const).map(route => [status, route] as const)))(
+  'unproven historical ownership retains A lock for %s (%s)',
+  async (status, route) => {
+    const f = await round23Env(987656500, 'legacy-recovered');
+    const warn = jest.spyOn(process, 'emitWarning').mockImplementation(() => {});
+    try {
+      const a = f.env.workspaceRoot; const b = f.mkdir('moved-b'); const c = f.mkdir('moved-c');
+      const lostMiddle = route.startsWith('lost complete middle interval');
+      f.p.createConversation('ordinary', lostMiddle ? b : a);
+      if (lostMiddle) f.p.changeWorkdir('ordinary', b, a, false);
+      // Write the competing evidence first. The settled anchor cannot shadow an
+      // earlier anonymous ownership event whose workspace may still be A.
+      const [damagedId] = f.recordOther('different-handle', a, 'other-turn', 'ordinary');
+      f.recordOwn(status);
+      if (route === 'legacy rename with omitted workdir') {
+        // The old State rename moves ordinary sessions and leaves their metadata unchanged.
+        f.db.prepare('UPDATE a9_sessions SET workspace_path = ? WHERE session_id = ?').run(b, 'ordinary');
+        expect(f.p.getConversationMetadata('ordinary')).toEqual({});
+        f.p.changeWorkdir('ordinary', b, c, false);
+      } else if (route === 'legacy rename before any further rebind') {
+        // A legacy database has no binding proof. Its current B path alone is not evidence.
+        f.db.prepare("UPDATE a9_sessions SET workspace_path = ?, metadata_json = '{}' WHERE workspace_path = ?").run(b, a);
+      } else if (route === 'previously misassigned first interval') {
+        f.db.prepare(`UPDATE a9_sessions SET workspace_path = ?, metadata_json = json_set(metadata_json, '$.workdir', json(?))
+          WHERE session_id = 'ordinary'`).run(c, JSON.stringify({
+          version: 1, origin: 'linked', previousWorkspace: b, workspaceHistory: [{ workspace: b, maxEventId: damagedId }],
+        }));
+      } else {
+        f.p.changeWorkdir('ordinary', a, b, false);
+        f.p.changeWorkdir('ordinary', b, c, false);
+        const workdir = f.p.getConversationMetadata('ordinary').workdir as Record<string, unknown>;
+        const workspaceHistory = workdir.workspaceHistory as Array<{ workspace: string }>;
+        f.db.prepare("UPDATE a9_sessions SET metadata_json = json_set(metadata_json, '$.workdir.workspaceHistory', json(?)) WHERE session_id = 'ordinary'")
+          .run(JSON.stringify(lostMiddle ? workspaceHistory.filter(entry => entry.workspace !== a) : route === 'lost first path' ? [{}] : null));
+        if (route === 'lost complete middle interval then rebound') {
+          f.p.changeWorkdir('ordinary', c, f.mkdir('moved-d'), false);
+        }
+      }
+      f.truncate([damagedId], '{');
+      const history = (f.p.getConversationMetadata('ordinary').workdir as any)?.workspaceHistory;
+      f.p.db.close();
+      await expectLeaveBlocked(f);
+      if (route === 'legacy rename with omitted workdir') {
+        expect(history.map((entry: any) => entry.workspace)).toEqual(['#a9-unknown-prior', b]);
+      }
+    } finally {
+      if (f.p.db.open) f.p.db.close();
+      warn.mockRestore(); f.db.close(); fs.rmSync(f.env.root, { recursive: true, force: true });
+    }
+  });
+
+it.each((['stopped', 'released'] as const).flatMap(status => ([
+  'missing owner in original turn', 'truncated in original turn', 'written in A by another session now in B',
+] as const).map(source => [status, source] as const)))(
+  'a damaged record of the exact handle blocks %s after a rebind (%s)', async (status, source) => {
+    const f = await round23Env(987656501, 'legacy-recovered');
+    const warn = jest.spyOn(process, 'emitWarning').mockImplementation(() => {});
+    try {
+      const a = f.env.workspaceRoot; const b = f.mkdir('rebound-ws-b');
+      const damaged = { schemaVersion: 1, handleId: 'legacy-recovered', ownershipState: 'release_unknown', releaseId: 'r' };
+      f.recordOwn(status);
+      if (source === 'written in A by another session now in B') {
+        f.p.createConversation('other-a', a);
+        const [id] = f.recordOther('other-handle', a, 'other-turn', 'other-a');
+        f.p.changeWorkdir('other-a', a, b, false);
+        f.truncate([id], JSON.stringify(damaged));
+      } else {
+        f.p.changeWorkdir(f.session, a, b, false);
+        const { eventId } = f.p.recordToolEvent(f.session, 'own-turn', 'managed_process_ownership', damaged);
+        if (source === 'truncated in original turn') f.truncate([eventId], '{"handleId":"legacy-recovered",');
+      }
+      f.p.db.close();
+      await expectLeaveBlocked(f);
+    } finally {
+      if (f.p.db.open) f.p.db.close();
+      warn.mockRestore(); f.db.close(); fs.rmSync(f.env.root, { recursive: true, force: true });
+    }
+  });
+
+// (1) The conversation settles two handles in A. A legacy build rebinds it to B or renames
+// its default workspace to B without recording segments. The second handle's records are cut.
 // The current build then rebinds it B -> C (the registry's State call). The events written before
 // that are closed in an unknown prior segment, never attributed to B: leave of A stays refused and
 // both shutdown modes keep A's lock.
 it.each((['stopped', 'released'] as const).flatMap(status =>
-  ([['opening brace only', '{'], ['handleId key only', '{"handleId":"']] as const).map(([name, truncated]) =>
-    [`${status}, ${name}`, status, truncated] as const)))(
+  ([
+    ['legacy rebind', '{"workdir":{"version":1,"origin":"linked","createdAt":null}}', '{'],
+    ['legacy rebind without handleId', '{"workdir":{"version":1,"origin":"linked","createdAt":null}}', '{"handleId":"'],
+    ['legacy default rename', '{"workdir":{"version":1,"origin":"auto","createdAt":null}}', '{'],
+    ['legacy rename with JSON null metadata', 'null', '{'],
+    ['legacy rename with null workdir field', '{"workdir":null}', '{'],
+  ] as const).map(([name, metadata, truncated]) =>
+    [`${status}, ${name}`, status, metadata, truncated] as const)))(
   'round 23: a rebind B -> C after a legacy rebind A -> B keeps damage written in A blocking leave of A (%s)',
-  async (_name, status, truncated) => {
+  async (_name, status, metadata, truncated) => {
     const pid = 987656000 + Math.floor(Math.random() * 99);
     const probe = scriptedPidProbe(pid);
     const f = await round23Env(pid, 'legacy-recovered');
@@ -3762,16 +3881,16 @@ it.each((['stopped', 'released'] as const).flatMap(status =>
       const damaged = f.recordOther('new-handle', f.env.workspaceRoot);
       const b = f.mkdir('rebound-ws-b'); const c = f.mkdir('rebound-ws-c');
       f.db.prepare('UPDATE a9_sessions SET workspace_path = ?, metadata_json = ? WHERE session_id = ?')
-        .run(b, JSON.stringify({ workdir: { version: 1, origin: 'linked', createdAt: null } }), f.session);
+        .run(b, metadata, f.session);
       f.truncate(damaged, truncated);
       f.p.changeWorkdir(f.session, b, c, false);
       expect(f.p.listConversations(c).map((item: any) => item.sessionId)).toEqual([f.session]);
-      expect((f.p.getConversationMetadata(f.session).workdir as any).workspaceHistory.map((entry: any) => entry.workspace))
-        .toEqual(['#a9-unknown-prior', b]);
+      const history = (f.p.getConversationMetadata(f.session).workdir as any).workspaceHistory;
       f.p.db.close();
       expect((f.row() as any).last_probe_status).toBe(status);
       probe.state.result = 'absent';
       await expectLeaveBlocked(f);
+      expect(history.map((entry: any) => entry.workspace)).toEqual(['#a9-unknown-prior', b]);
       expect(probe.signals().every((signal: unknown) => signal === 0)).toBe(true);
     } finally {
       probe.state.result = 'absent';
@@ -3800,8 +3919,8 @@ it.each((['stopped', 'released'] as const).flatMap(status =>
         const b = f.mkdir('rebound-ws-b'); const c = f.mkdir('rebound-ws-c');
         f.p.changeWorkdir(f.session, f.env.workspaceRoot, b, false); f.p.changeWorkdir(f.session, b, c, false);
         const workdir = f.p.getConversationMetadata(f.session).workdir as any;
-        f.p.mergeConversationMetadata(f.session, { workdir: { ...workdir,
-          workspaceHistory: [{ workspace: f.env.workspaceRoot }, workdir.workspaceHistory[1]] } });
+        f.db.prepare("UPDATE a9_sessions SET metadata_json = json_set(metadata_json, '$.workdir.workspaceHistory', json(?)) WHERE session_id = ?")
+          .run(JSON.stringify([{ workspace: f.env.workspaceRoot }, workdir.workspaceHistory[1]]), f.session);
       }
       f.p.db.close();
       f.truncate(damaged, truncated);
@@ -3821,7 +3940,7 @@ it.each((['stopped', 'released'] as const).flatMap(status =>
 // record is cut to `{"handleId":"sh-` (a prefix of both). Segments prove it was written in B, so it
 // is never damage of A: leave of A is allowed and both shutdown modes release A's lock. The same
 // damage written while still bound to A keeps blocking (control).
-it.each((['stopped', 'released'] as const).flatMap(status => (['written in B', 'written in A (control)'] as const).map(where =>
+it.each((['stopped', 'released'] as const).flatMap(status => (['written in B', 'written in B before returning to A', 'written in A (control)'] as const).map(where =>
   [`${status}, ${where}`, status, where] as const)))(
   'round 23: a handleId prefix cut from a record written in B never blocks leave of A (%s)',
   async (_name, status, where) => {
@@ -3832,16 +3951,19 @@ it.each((['stopped', 'released'] as const).flatMap(status => (['written in B', '
     try {
       f.recordOwn(status);
       let workspace = f.env.workspaceRoot;
-      if (where === 'written in B') {
+      if (where !== 'written in A (control)') {
         workspace = f.mkdir('rebound-ws-b');
         f.p.changeWorkdir(f.session, f.env.workspaceRoot, workspace, false);
       }
       const damaged = f.recordOther('sh-bbb', workspace);
+      if (where === 'written in B before returning to A') {
+        f.p.changeWorkdir(f.session, workspace, f.env.workspaceRoot, false);
+      }
       f.p.db.close();
       f.truncate(damaged, '{"handleId":"sh-');
       expect((f.row() as any).last_probe_status).toBe(status);
       probe.state.result = 'absent';
-      if (where !== 'written in B') { await expectLeaveBlocked(f); return; }
+      if (where === 'written in A (control)') { await expectLeaveBlocked(f); return; }
       for (const stopManaged of [true, false]) {
         runtime = makeRuntime(f.env);
         expect(runtime.status).toBe('ready');
@@ -3861,3 +3983,117 @@ it.each((['stopped', 'released'] as const).flatMap(status => (['written in B', '
       warn.mockRestore(); probe.restore(); f.db.close(); fs.rmSync(f.env.root, { recursive: true, force: true });
     }
   });
+
+it.each([
+  ['same session with segments', '{"handleId":"dismissed-'],
+  ['same session with legacy relink', '{"handleId":"dismissed-b",'],
+  ['same session with legacy relink and shared prefix', '{"handleId":"dismissed-'],
+  ['different legacy linked session', '{"handleId":"dismissed-b",'],
+  ['different legacy linked session without a readable handle', '{'],
+  ['different auto session with unknown prior segment', '{"handleId":"dismissed-b",'],
+  ['different auto session with unknown prior segment and ambiguous handle prefix', '{"handleId":"dismissed-'],
+] as const)('a damaged disposition written in B preserves the verified receipt in A (%s)', async (route, damagedPayload) => {
+  const f = await round23Env(987656401, 'dismissed-a');
+  const warn = jest.spyOn(process, 'emitWarning').mockImplementation(() => {});
+  let runtime: any;
+  try {
+    const a = f.env.workspaceRoot; const b = f.mkdir('rebound-ws-b'); const c = f.mkdir('rebound-ws-c');
+    const { eventId: receiptA } = f.dismiss(a, 'dismissed-a');
+    const sameSession = route.startsWith('same session');
+    const bSession = sameSession ? f.session : f.p.createConversation('b-session', b).sessionId;
+    if (sameSession) f.p.changeWorkdir(f.session, a, b, false);
+    const { eventId: receiptB } = f.dismiss(b, 'dismissed-b', bSession);
+    if (route.startsWith('same session with legacy relink') || route.startsWith('different legacy linked')) {
+      f.db.prepare('UPDATE a9_sessions SET workspace_path = ?, metadata_json = ? WHERE session_id = ?')
+        .run(c, '{"workdir":{"version":1,"origin":"linked","createdAt":null}}', bSession);
+    } else {
+      if (!sameSession) {
+        f.db.prepare('UPDATE a9_sessions SET metadata_json = ? WHERE session_id = ?')
+          .run('{"workdir":{"version":1,"origin":"auto","createdAt":null}}', bSession);
+      }
+      f.p.changeWorkdir(bSession, b, c, false);
+    }
+    f.p.db.close();
+    f.truncate([receiptB], damagedPayload);
+
+    const outcomes = [];
+    for (const stopManaged of [true, false]) {
+      runtime ??= makeRuntime(f.env);
+      const [fact] = runtime.getSnapshot({ bypassCache: true }).managedProcesses;
+      const allowed = runtime.canLeaveWorkspace().allowed;
+      expect(f.lockRows()).toBe(1);
+      const { unresolved } = await runtime.shutdown({ stopManaged });
+      const locks = f.lockRows();
+      outcomes.push({ stopManaged, fact, allowed, unresolved, locks });
+      if (locks === 0) runtime = null;
+    }
+    expect(outcomes).toEqual([true, false].map(stopManaged => ({
+      stopManaged,
+      fact: expect.objectContaining({ handleId: 'dismissed-a', cleanupRequired: false, disposition: expect.objectContaining({ eventId: receiptA }) }),
+      allowed: true, unresolved: [], locks: 0,
+    })));
+
+    runtime = makeRuntime({ ...f.env, workspaceRoot: b });
+    expect(JSON.stringify(runtime.getSnapshot({ bypassCache: true }).persistenceDiagnostics)).toContain('A9_MANAGED_DISPOSITION_UNCONFIRMED');
+    expect(runtime.canLeaveWorkspace().allowed).toBe(false);
+    expect(runtime.getSnapshot().managedProcesses).toEqual([
+      expect.objectContaining({ handleId: 'dismissed-b', cleanupRequired: true }),
+    ]);
+    for (const stopManaged of [true, false]) {
+      expect((await runtime.shutdown({ stopManaged })).unresolved).toHaveLength(1);
+      expect(f.db.prepare('SELECT workspace_path FROM a9_workspace_locks').all()).toEqual([{ workspace_path: b }]);
+    }
+  } finally {
+    if (runtime && !runtime.isWorkspaceLockReleased()) await runtime.shutdown({ stopManaged: false });
+    if (f.p.db.open) f.p.db.close();
+    warn.mockRestore(); f.db.close(); fs.rmSync(f.env.root, { recursive: true, force: true });
+  }
+});
+
+it.each(['wrong request', 'truncated payload'] as const)(
+  'the latest disposition of the original handle and turn blocks both closes after relink (%s)', async damage => {
+    const f = await round23Env(987656402, 'dismissed-a');
+    const warn = jest.spyOn(process, 'emitWarning').mockImplementation(() => {});
+    try {
+      const { eventId: oldId, ...receipt } = f.dismiss(f.env.workspaceRoot, 'dismissed-a');
+      f.p.changeWorkdir(f.session, f.env.workspaceRoot, f.mkdir('rebound-ws-b'), false);
+      expect(f.p.getManagedProcessDisposition('dismissed-a')?.eventId).toBe(oldId);
+      const { eventId } = f.p.recordToolEvent(f.session, receipt.owner.turnId, 'managed_process_disposition', {
+        ...receipt, requestId: 'damaged-request',
+      });
+      if (damage === 'truncated payload') f.truncate([eventId], '{"handleId":"dismissed-a",');
+      f.p.db.close();
+      await expectLeaveBlocked(f, 'A9_MANAGED_DISPOSITION_UNCONFIRMED');
+    } finally {
+      if (f.p.db.open) f.p.db.close();
+      warn.mockRestore(); f.db.close(); fs.rmSync(f.env.root, { recursive: true, force: true });
+    }
+  });
+
+it.each([
+  ['missing handle', undefined],
+  ['null handle', null],
+  ['empty handle', ''],
+  ['numeric handle', 17],
+  ['truncated after the owner', undefined],
+  ['truncated inside the handle', undefined],
+] as const)('a newer disposition claiming the original owner blocks both closes (%s)', async (damage, handleId) => {
+  const f = await round23Env(987656403, 'dismissed-a');
+  const warn = jest.spyOn(process, 'emitWarning').mockImplementation(() => {});
+  try {
+    const { eventId: receiptId, ...receipt } = f.dismiss(f.env.workspaceRoot, 'dismissed-a');
+    f.p.upsertTask('other-task', f.session, 'completed');
+    f.p.upsertTurn('other-turn', 'other-task', f.session, 'completed');
+    expect(f.p.getManagedProcessDisposition('dismissed-a')?.eventId).toBe(receiptId);
+    const { eventId } = f.p.recordToolEvent(f.session, 'other-turn', 'managed_process_disposition', { ...receipt, handleId });
+    if (damage.startsWith('truncated')) {
+      const raw = `{"owner":${JSON.stringify(receipt.owner)},`;
+      f.truncate([eventId], damage === 'truncated inside the handle' ? raw + '"handleId":"dismissed-' : raw);
+    }
+    f.p.db.close();
+    await expectLeaveBlocked(f, 'A9_MANAGED_DISPOSITION_UNCONFIRMED');
+  } finally {
+    if (f.p.db.open) f.p.db.close();
+    warn.mockRestore(); f.db.close(); fs.rmSync(f.env.root, { recursive: true, force: true });
+  }
+});
