@@ -5789,3 +5789,11 @@ Claude P2-1、P2-3 已补测试，P2-4 已修复；P2-2 按裁决保留为 K7。
 - 状态：Accepted（2026-11-19 UTC，延续 Phase C 修复授权，补充 ADR-0352）。
 - 在可能相关的工作区，事件列指向另一真实 Turn 而完整顶层 `owner` 匹配原归属时，句柄缺失、类型错误或被截断的事件仍参与最新候选选择。载荷截断时，仅使用可以完整解析的顶层归属对象。
 - 该归属证据用于判断候选范围。锁释放仍要求完整回执通过原会话及 Turn、句柄、请求、PID、启动时间和 revision 核验。只有嵌套归属或已辨识为其他句柄的记录沿用 ADR-0352 的筛选。
+
+## ADR-0354 A9-72 alpha.9 发布身份与限定接受路径
+
+- 状态：Accepted（2026-11-20 UTC，负责人明确指示“推动正式发版”，并同意 A9-72 `v0.3.0-alpha.9` / `WIN7-63` 及沿用 ADR-0320 / ADR-0333 限定接受路径）。
+- 决定：新增 `0.3.0-alpha.9` / `WIN7-63` 独立发版 Profile 与输入锁 `release/win7-product-v3/a9-alpha9-input-lock.json`（`A9-ALPHA9-INPUTS-D013-V26-MANAGED`），完整整合体检 Phase ABC 架构与性能优化（C1～C6、B1、B3）及 P1 锁处置边界修复（ADR-0347～ADR-0353）；沿用既有 Electron 22.3.27、SQLite 3.43.1/ABI 110 与 D-013 v26 managed 原生二进制，不改旧版身份或开发锁。
+- 验收依据：实机验证直接以 Windows 7 SP1 x64（宿主 `DCCS-CHAIZL-PC`）`DEV_CHANNEL` 21/21 项全量通过（回环 SSE 4 次，外部模型请求严格为 0，进程树与工作区锁完全清零，归档见 `outputs/phase-abc-p1-win7/RESULT_FINAL.json`）为基础，采用选项甲限定接受发布流程。不做双构建、正式冻结与门 A/B，结论记为 `PASS_WITH_KNOWN_LIMITS`，不产生正式 Win7 PASS。
+- 边界：本条不自动授权更新远程 `main` 分支、标签推送或公开 GitHub Release；每项动作均在准备好准确源码、包哈希及限定接受记录后报负责人确认。合同见 [A9-72](tasks/A9_72_ALPHA9_RELEASE.md)。
+

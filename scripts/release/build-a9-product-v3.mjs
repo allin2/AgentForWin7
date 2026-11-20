@@ -33,6 +33,19 @@ const repositoryRoot = path.resolve(scriptDirectory, '..', '..');
 const RUNTIME_MODULES = ['core', 'gateway', 'git-adapter', 'runner', 'shell', 'state', 'workspace'];
 
 const RELEASE_PROFILES = {
+  'A9-ALPHA9-INPUTS-D013-V26-MANAGED': {
+    task: 'A9-72', candidate: 'WIN7-63', candidateTentative: true, batch2: true,
+    releaseId: 'WIN7-CODING-AGENT-A9-ALPHA9', version: '0.3.0-alpha.9',
+    taskBook: 'docs/tasks/A9_72_ALPHA9_RELEASE.md',
+    lockFile: 'a9-alpha9-input-lock.json', kitFile: 'A9_ALPHA9_VALIDATION_KIT.json',
+    validationDoc: 'A9_ALPHA9_WIN7_VALIDATION.md',
+    integrityCommand: 'RUN_A9_ALPHA9_INTEGRITY.cmd', smokeCommand: 'RUN_A9_ALPHA9_SMOKE.cmd',
+    reportCommand: 'RUN_A9_ALPHA9_REPORT_VERIFY.cmd',
+    integrityScript: 'a9-alpha9-package-integrity.cjs', reportScript: 'a9-alpha9-report.cjs',
+    smokeScript: 'a9-alpha9-smoke.cjs', fixturesScript: 'a9-alpha9-fixtures.cjs',
+    requestScript: 'a9-alpha9-desktop-request.cjs', controllerScript: 'a9-alpha9-desktop-controller.ps1',
+    driverFile: 'a9-alpha9-driver.cjs', evidenceDirectory: 'a9-alpha9-evidence',
+  },
   'A9-ALPHA8-INPUTS-D013-V26-MANAGED': {
     task: 'A9-69', candidate: 'WIN7-62', candidateTentative: true, batch2: true,
     releaseId: 'WIN7-CODING-AGENT-A9-ALPHA8', version: '0.3.0-alpha.8',

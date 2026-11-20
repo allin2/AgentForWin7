@@ -357,3 +357,4 @@
 | ADR-0351 | Phase C 托管历史核验顺序与会话绑定并发保护 | Accepted |
 | ADR-0352 | Phase C 处置回执的原始 Turn 与目录创建时间 | Accepted |
 | ADR-0353 | Phase C 处置句柄损坏时的原归属证据 | Accepted |
+| ADR-0354 | A9-72 alpha.9 发布身份与限定接受路径 | Accepted |
