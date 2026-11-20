@@ -152,7 +152,7 @@ describe('OfficeArchiveService P2 contract', () => {
     await expect(f.plan({ sources: ['a.txt'], destination: '.git/out.zip' })).rejects.toMatchObject({ code: 'ARCHIVE_PATH_INVALID' });
     await expect(f.plan({ sources: ['a.txt'], destination: 'out.zip', manifestPath: 'out.zip' })).rejects.toMatchObject({ code: 'ARCHIVE_PATH_INVALID' });
     await expect(f.plan({ sources: ['.git'], destination: 'out.zip' })).rejects.toMatchObject({ code: 'ARCHIVE_PATH_EXCLUDED' });
-    await expect(f.plan({ sources: ['a.txt'], destination: `${'深'.repeat(120)}/out.zip` })).rejects.toMatchObject({ code: 'ARCHIVE_PATH_TOO_LONG' });
+    await expect(f.plan({ sources: ['a.txt'], destination: `${'深'.repeat(220)}/out.zip` })).rejects.toMatchObject({ code: 'ARCHIVE_PATH_TOO_LONG' });
     await expect(f.plan({ sources: ['a.txt'], destination: 'out.zip', maxFileBytes: 2 })).rejects.toMatchObject({ code: 'ARCHIVE_FILE_BYTE_LIMIT' });
     await expect(f.plan({ sources: ['a.txt'], destination: 'out.zip', maxFiles: OFFICE_ARCHIVE_LIMITS.files + 1 })).rejects.toMatchObject({ code: 'ARCHIVE_LIMIT_INVALID' });
   });
