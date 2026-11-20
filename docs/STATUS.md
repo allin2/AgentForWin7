@@ -4,9 +4,9 @@
 
 ## 产品与可试用结果
 
-- 最新已发布试用版：`v0.3.0-alpha.8-win7-62`，内部预览版；[下载与说明](https://github.com/allin2/AgentForWin7/releases/tag/v0.3.0-alpha.8-win7-62)。UTC `2026-11-16T06:52:07Z` 公开，4 个附件草稿与公开后回下载和本地原件大小/SHA/digest 一致。整合 A9-54～A9-68、A9-Settings 与 Windows CI 适配，原证据为开发机加 Win7 `DEV_CHANNEL`，负责人按 ADR-0333 与 ADR-0320 限定接受，见 [A9-69 §6](tasks/A9_69_ALPHA8_RELEASE.md#6-负责人限定接受与发布授权2026-11-16-utc)。
-- 当前候选与发布准备：`v0.3.0-alpha.9` / `WIN7-63`（Task A9-72），整合 Phase ABC 架构与性能优化（C1～C6、B1、B3）及 P1 锁处置修复（ADR-0347～ADR-0353）；Windows 7 SP1 x64 DEV_CHANNEL 取得 21/21 PASS（回环 SSE 4 次，外部模型 0 次，进程树清理完毕，归档 outputs/phase-abc-p1-win7/RESULT_FINAL.json），负责人授权按 ADR-0354、ADR-0333 与 ADR-0320 限定接受路径推进发版，详见 [A9-72](tasks/A9_72_ALPHA9_RELEASE.md)。
-- 当前已签发限定接受候选：`v0.3.0-alpha.8` / `WIN7-62`，源 `585ea92b…`，ZIP `3e3970a9…`，结论 `A9_69_WIN7_62_PASS_WITH_KNOWN_LIMITS`。负责人按 ADR-0333 与 ADR-0320 限定接受并授权发布，未执行门 A/B，详见 [A9-69 §6](tasks/A9_69_ALPHA8_RELEASE.md#6-负责人限定接受与发布授权2026-11-16-utc)。
+- 最新已发布试用版：`v0.3.0-alpha.9-win7-63`，内部预览版；[下载与说明](https://github.com/allin2/AgentForWin7/releases/tag/v0.3.0-alpha.9-win7-63)。整合 Phase ABC 架构与性能优化（C1～C6、B1、B3）及 P1 锁处置修复（ADR-0347～ADR-0353）；原证据为 Windows 7 SP1 x64 实机 DEV_CHANNEL 21/21 PASS（回环 SSE 4 次，外部模型 0 次，进程树与锁清理完毕，归档 outputs/phase-abc-p1-win7/RESULT_FINAL.json），负责人按 ADR-0354、ADR-0333 与 ADR-0320 限定接受并授权发布，见 [A9-72](tasks/A9_72_ALPHA9_RELEASE.md)。
+- 当前已签发限定接受候选：`v0.3.0-alpha.9` / `WIN7-63`，源 `6c8bd75d…`，ZIP `b739cf3c…`，结论 `A9_72_WIN7_63_PASS_WITH_KNOWN_LIMITS`。负责人按 ADR-0354、ADR-0333 与 ADR-0320 限定接受并授权发布，未执行门 A/B，详见 [A9-72](tasks/A9_72_ALPHA9_RELEASE.md)。
+- 前一发布试用版：`v0.3.0-alpha.8-win7-62`，内部预览版；[下载与说明](https://github.com/allin2/AgentForWin7/releases/tag/v0.3.0-alpha.8-win7-62)。详见 [A9-69 §6](tasks/A9_69_ALPHA8_RELEASE.md#6-负责人限定接受与发布授权2026-11-16-utc)。
 - Full Access / Read Only 为当前产品能力；Review 保持 fail-closed。完整 Alpha / RC 未签发；当前已知限制见 [A9-43 §8.35](tasks/A9_43_ALPHA3_WIN7_56_RELEASE.md#835-负责人准确确认与-win7-56-验收签发)。历史限制见 A9-39 与 ADR-0286，不把版本名等同完整验收。
 - 当前有效需求：[A9 PRD](prds/WIN7_TRUSTED_CODING_AGENT_REQUIREMENTS_V1.md)；后继决定以 [ADR 索引](DECISIONS_INDEX.md) 定位。源码、历史需求和运行结论冲突时按后继决策核实，不以源码替代需求。
 

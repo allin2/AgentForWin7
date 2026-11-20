@@ -1,7 +1,7 @@
 # A9-72 — alpha.9 集成整合与发布准备
 
 ```text
-Status: READY_FOR_ACCEPTANCE
+Status: COMPLETE
 Task Type: PRODUCT_RELEASE
 Target Branch: main
 Source Baseline: c00cb8c0cb26bd3f000204e917038fc77c68bfdc
